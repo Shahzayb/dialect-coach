@@ -29,7 +29,9 @@ are rejected: an unattended free-tier rebuild must produce the same image next m
 
 ## Running and testing
 
-Docker is the preferred path — `docker compose up --build`, serving http://localhost:8501.
+`make setup` (creates `.env` from `.env.example` if missing, checks `docker compose` is on
+PATH — logic lives in `scripts/setup.py` since it's conditional, not a one-liner), then
+`make up` (`docker compose up --build`, serving http://localhost:8501) and `make down`.
 The source directory is bind-mounted, so edits reload without a rebuild; rebuild only when
 `requirements.txt` changes. The image sets `STREAMLIT_SERVER_RUN_ON_SAVE=true`, because
 Streamlit's default only shows a "Rerun" prompt on a file change instead of applying it.

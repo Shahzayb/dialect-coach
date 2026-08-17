@@ -18,7 +18,7 @@ of the 5-hour monthly Azure quota, so it comes before any code that calls Azure.
 
 ## What works
 
-`docker compose up --build` serves a placeholder Streamlit page on port 8501 that renders.
+`make up` (`docker compose up --build`) serves a placeholder Streamlit page on port 8501.
 Python 3.12 and every runtime dependency, including the native Azure Speech SDK, import
 inside the container. That is all — no recording, no assessment, no coaching.
 
@@ -38,6 +38,9 @@ _None recorded._ Record failed attempts here with whether they are worth retryin
 - **Never install anything globally.** Docker is the preferred run path; a project-local
   `.venv` is the acceptable alternative.
 - Commit in chunks as work lands, not one commit at the end.
+- **Python over `.sh` for anything with branching/conditionals.** Trivial one-liners (a
+  single `docker compose up --build`) can stay as a Makefile recipe; put real logic in a
+  `scripts/*.py` file instead, as `scripts/setup.py` does.
 - Verify library versions and API surfaces against current sources rather than recalling
   them — the pins in the original design were already stale.
 - **The app runs locally. Deploying it is not a goal** — treat hosting as an option left

@@ -17,12 +17,12 @@ Docker is the supported path: nothing is installed on the host, and the containe
 the Python version and native libraries the app needs.
 
 ```bash
-docker compose up --build
+make setup   # first time only: creates .env, checks docker is available
+make up      # docker compose up --build
 ```
 
 The app serves on http://localhost:8501. The source directory is mounted, so edits reload
-without a rebuild; rebuild only when `requirements.txt` changes. Stop it with
-`docker compose down`.
+without a rebuild; rebuild only when `requirements.txt` changes. Stop it with `make down`.
 
 ## Running it — local Python (optional)
 
@@ -46,8 +46,9 @@ If you use `uv`, `uv venv --python 3.12 && uv pip install -r requirements.txt` f
 
 ## Configuration
 
-Copy `.env.example` to `.env` and fill in the required values. `.env` is gitignored, is
-never baked into the image, and is read at container start if present.
+`make setup` creates `.env` from `.env.example` if it doesn't already exist — fill in the
+required values there. `.env` is gitignored, is never baked into the image, and is read at
+container start if present.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
