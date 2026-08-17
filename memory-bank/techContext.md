@@ -27,7 +27,8 @@ are rejected: an unattended free-tier rebuild must produce the same image next m
 
 Docker is the preferred path — `docker compose up --build`, serving http://localhost:8501.
 The source directory is bind-mounted, so edits reload without a rebuild; rebuild only when
-`requirements.txt` changes.
+`requirements.txt` changes. The image sets `STREAMLIT_SERVER_RUN_ON_SAVE=true`, because
+Streamlit's default only shows a "Rerun" prompt on a file change instead of applying it.
 
 A project-local `.venv` built from Python 3.12 is supported as an optional alternative
 (`python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt`). Nothing is ever
