@@ -5,8 +5,7 @@ Source of truth for scope. When the memory bank files disagree, this one wins.
 ## Why this project exists
 
 I can't hear the difference between my pronunciation and a native speaker's, so I
-don't know what to practice. This causes real problems: getting asked to repeat
-myself in work calls, Discord, and interviews.
+don't know what to practice and how to improve my english speaking.
 
 ## Core requirements
 
@@ -15,7 +14,7 @@ myself in work calls, Discord, and interviews.
 - Show expected vs. actual sound for every flagged word, not just a score
 - Turn analysis into specific coaching (Gemini, with offline fallback)
 - Let me hear the correct pronunciation next to my own recording
-- Keep history in a local SQLite file — what exactly gets stored is not decided yet
+- Keep history in a local SQLite file.
 - Free tiers only, $0 budget, no accounts, no stored audio
 
 ## Goals
