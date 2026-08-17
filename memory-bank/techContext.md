@@ -19,6 +19,10 @@ No database, no accounts, no persistent audio storage.
   `google-generativeai` package is end-of-life and must not be used.
 - **pydub 0.25.1** + system `ffmpeg` — audio conversion.
 - **python-dotenv 1.2.3**, **pydantic 2.13.4**.
+- **SQLite** via the stdlib `sqlite3` — chosen 2026-08-17, not yet built. No dependency to
+  pin and no second service. It persists for free under the existing bind mount, since the
+  project directory is the host's; a database file under it survives `docker compose down`.
+  What gets stored is not decided yet.
 
 All pins in `requirements.txt` are exact `==`, verified against PyPI on 2026-08-17. Ranges
 are rejected: an unattended free-tier rebuild must produce the same image next month.
@@ -81,3 +85,12 @@ the project, and nothing in the app may assume a host. Practical consequences:
   read cannot drift; it also happens to be what a Space would read.
 - **No module stubs.** The other modules the design calls for were left uncreated rather
   than committed empty — dead files that later work would have to clean up.
+- **SQLite over Postgres or DuckDB.** Single user, single machine: Postgres would mean a
+  second container and a named volume for nothing, and DuckDB's analytical edge does not
+  show up at a few hundred rows. Revisit only if the data ever needs to be reachable from
+  outside the container.
+- When persistence is built, two Streamlit-specific traps apply: the script re-runs on
+  every widget interaction, so the connection belongs behind `@st.cache_resource` rather
+  than being reopened per rerun, and it needs `check_same_thread=False`. Using
+  `st.connection("sql")` instead would add SQLAlchemy — a dependency SQLite does not
+  otherwise need.

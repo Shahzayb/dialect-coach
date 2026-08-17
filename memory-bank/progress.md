@@ -47,6 +47,9 @@ _None recorded._ Record failed attempts here with whether they are worth retryin
 
 - 2026-08-17 — Docker became the primary run path mid-implementation, to keep the host
   clean and to pin the Azure SDK's native dependencies alongside the Python version.
+- 2026-08-17 — A local database is now in scope. The brief previously ruled out stored
+  history entirely; SQLite is the chosen engine, and `projectbrief.md` was updated on the
+  user's instruction. What gets stored is still open.
 - 2026-08-17 — Hosting dropped as a goal: the tool is for local use. The original design
   treated a Hugging Face Space as the target and derived real requirements from it
   (ephemeral-filesystem handling for the usage meter, cold-start wake time, a private

@@ -13,3 +13,10 @@ __pycache__/
 .env
 .streamlit/secrets.toml
 .usage.json
+
+# Local SQLite database, including WAL sidecar files. A committed database is a leaked one
+# the moment it holds anything real.
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
