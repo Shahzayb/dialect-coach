@@ -6,7 +6,7 @@ pronunciation assessment, and turns that raw analysis into specific coaching —
 which sound in which word failed and what was produced instead.
 
 Personal training tool, not a product. It runs locally. Diagnostic specificity over polish:
-no accounts, no database, no persistent audio storage.
+no accounts, no persistent audio storage.
 
 **Status: scaffold.** The app starts and renders a placeholder page. Recording,
 assessment, and coaching are not implemented yet.
