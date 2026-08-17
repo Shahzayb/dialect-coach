@@ -1,14 +1,3 @@
----
-title: Pronunciation Coach
-emoji: 🗣️
-colorFrom: indigo
-colorTo: blue
-sdk: streamlit
-sdk_version: 1.61.1
-app_file: app.py
-pinned: false
----
-
 # pronunciation-analyzer
 
 A single-user English pronunciation and delivery coach. It records spoken en-US English,
@@ -16,8 +5,8 @@ analyses it at the phoneme, syllable, word and prosody level with Azure Speech
 pronunciation assessment, and turns that raw analysis into specific coaching — naming
 which sound in which word failed and what was produced instead.
 
-Personal training tool, not a product. Diagnostic specificity over polish: no accounts, no
-database, no persistent audio storage.
+Personal training tool, not a product. It runs locally. Diagnostic specificity over polish:
+no accounts, no database, no persistent audio storage.
 
 **Status: scaffold.** The app starts and renders a placeholder page. Recording,
 assessment, and coaching are not implemented yet.
@@ -58,8 +47,7 @@ If you use `uv`, `uv venv --python 3.12 && uv pip install -r requirements.txt` f
 ## Configuration
 
 Copy `.env.example` to `.env` and fill in the required values. `.env` is gitignored, is
-never baked into the image, and is read at container start if present. On Hugging Face
-Spaces the same names are set as Space secrets and arrive as environment variables instead.
+never baked into the image, and is read at container start if present.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
@@ -77,10 +65,40 @@ See `.env.example` for the full annotated list. Nothing reads these yet.
 
 ## Cost
 
-Designed to run entirely on free tiers: Azure Speech **F0** (5 audio hours/month), the
-Gemini free tier, and a **private** Hugging Face Space on free CPU. An F0 resource cannot
-bill — it returns `403` when the monthly allowance is gone. Creating **S0** by mistake is
-the only way this project costs money.
+Designed to run entirely on free tiers: Azure Speech **F0** (5 audio hours/month) and the
+Gemini free tier. Running locally does not change this — the APIs are remote either way, so
+the same monthly allowances apply.
 
-The Space must be private: a public one exposes the Azure key's monthly quota to anyone
-who finds the URL.
+An F0 resource cannot bill: it returns `403` once the monthly allowance is gone. Creating
+an **S0** resource by mistake is the only way this project costs money. Likewise a Gemini
+key from a project with no billing account attached returns `429` rather than a charge.
+
+## Hosting it somewhere (optional)
+
+Not required — this is built to run on your own machine, and nothing in the app assumes
+otherwise. It is laid out to make a Hugging Face Space possible for anyone who wants one:
+`packages.txt` lists the apt packages such an image needs, and the app is a single
+`app.py` Streamlit entry point.
+
+Going that route means adding YAML frontmatter to the top of this file, since a Space will
+not build without it:
+
+```yaml
+---
+title: Pronunciation Coach
+emoji: 🗣️
+colorFrom: indigo
+colorTo: blue
+sdk: streamlit
+sdk_version: 1.61.1
+app_file: app.py
+pinned: false
+---
+```
+
+Three things to check first, none of them verified here: that Hugging Face supports the
+`sdk_version` you pin, that the `packages.txt` names match the Ubuntu release the image
+runs (newer releases want `libasound2t64` / `libssl3t64`), and that **the Space is
+private** — a public one exposes your Azure key's monthly quota to anyone who finds the
+URL. A free Space also has an ephemeral filesystem, so any local usage counter resets
+silently on rebuild.

@@ -47,20 +47,28 @@ blocked on a committed Azure response fixture, which the parsing work owns.
 - **Azure Speech SDK native prerequisites.** A missing `libasound2` shows up as an opaque
   `ImportError` on `import azure.cognitiveservices.speech`, not as an install failure. The
   `python:3.12-slim` base is Debian trixie, which renamed the packages to `libasound2t64`
-  and `libssl3t64`, so the Dockerfile tries both names. `packages.txt` (for the Hugging Face
-  Space image) still carries the pre-trixie names and is **unverified** against the image
-  that Space actually runs.
-- Free tiers only: Azure Speech **F0** (5 audio hours/month), Gemini free tier, Hugging Face
-  Spaces free CPU. Creating an Azure **S0** resource by mistake is the only way this project
-  costs money.
+  and `libssl3t64`, so the Dockerfile tries both names.
+- Free tiers only: Azure Speech **F0** (5 audio hours/month) and the Gemini free tier.
+  Running locally does not change this — the APIs are remote either way. Creating an Azure
+  **S0** resource by mistake is the only way this project costs money.
 - Target locale is **en-US** — prosody assessment supports nothing else.
 - Secrets come from environment variables only; never hardcoded, logged, or surfaced in a
   UI error or traceback. `.env` is gitignored and never copied into the image.
 - Required: `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION`, `GEMINI_API_KEY`. The full annotated
   set, including duration guards and the budget guard, lives in `.env.example`. Nothing
   reads any of them yet.
-- The Hugging Face Space must be **private**: a public one exposes the Azure key's monthly
-  quota to anyone with the URL.
+
+## Hosting
+
+**This runs locally. Deployment is not a goal** — it is left possible for anyone who forks
+the project, and nothing in the app may assume a host. Practical consequences:
+
+- The usage counter can just be a local file. No Hugging Face Dataset persistence, and no
+  design work around a Space's ephemeral filesystem.
+- No cold-start budget to design against, so no wake-time requirement.
+- `packages.txt` and the README's optional frontmatter block are kept for a would-be
+  deployer and are **unverified** — package names against the Space's Ubuntu release, and
+  `sdk_version` against Hugging Face's supported list. Neither blocks local work.
 
 ## Decisions
 
@@ -69,10 +77,7 @@ blocked on a committed Azure response fixture, which the parsing work owns.
   both the Python version and the Azure SDK's native libraries — the two things most likely
   to break setup on another machine. The local `.venv` path is kept but secondary.
 - **`requirements.txt` stays the single dependency manifest**, not a lockfile or
-  `pyproject.toml`, because Hugging Face Spaces reads exactly that file; a second manifest
-  would drift from it.
+  `pyproject.toml`. One manifest that both the Dockerfile and the optional local `.venv`
+  read cannot drift; it also happens to be what a Space would read.
 - **No module stubs.** The other modules the design calls for were left uncreated rather
   than committed empty — dead files that later work would have to clean up.
-- **`sdk_version: 1.61.1`** in the README frontmatter matches the Streamlit pin, but Hugging
-  Face maintains its own supported-version list and it has **not** been checked against it.
-  Verify before deploying.
