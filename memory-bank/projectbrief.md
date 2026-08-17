@@ -15,6 +15,7 @@ myself in work calls, Discord, and interviews.
 - Show expected vs. actual sound for every flagged word, not just a score
 - Turn analysis into specific coaching (Gemini, with offline fallback)
 - Let me hear the correct pronunciation next to my own recording
+- Keep history in a local SQLite file — what exactly gets stored is not decided yet
 - Free tiers only, $0 budget, no accounts, no stored audio
 
 ## Goals
@@ -26,5 +27,6 @@ myself in work calls, Discord, and interviews.
 ## Non-goals
 
 - Not a product for others — personal tool only
-- No gamification, no accounts, no stored history
+- No gamification, no accounts
+- Nothing leaves this machine — no cloud storage, no sync, no hosted database
 - Never spend money

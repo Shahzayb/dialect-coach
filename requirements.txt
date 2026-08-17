@@ -1,0 +1,23 @@
+# Exact pins, not ranges: a free-tier Space that rebuilds unattended must build the
+# same thing next month as it does today. Versions verified against PyPI 2026-08-17.
+
+# UI. st.audio_input requires >= 1.41.
+streamlit==1.61.1
+
+# Pronunciation assessment. Prosody + syllable granularity require >= 1.35; >= 1.40 for
+# the JSON-configured assessment path this project uses.
+azure-cognitiveservices-speech==1.51.1
+
+# Current Google GenAI SDK (`from google import genai`).
+# NOT google-generativeai — that package reached end-of-life 2025-11-30.
+google-genai==2.18.1
+
+# Audio conversion to 16 kHz / 16-bit / mono PCM WAV. Needs system ffmpeg (packages.txt)
+# and the stdlib audioop module, which is why Python is pinned to 3.12 (see .python-version).
+pydub==0.25.1
+
+# Local .env loading; on Hugging Face secrets arrive as environment variables instead.
+python-dotenv==1.2.3
+
+# Structured-output schemas for the coaching model.
+pydantic==2.13.4

@@ -1,0 +1,16 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8501:8501"
+    # Secrets stay outside the image. Optional so the scaffold runs before .env exists.
+    env_file:
+      - path: .env
+        required: false
+    # Live reload: edits on the host take effect without a rebuild (the image sets
+    # STREAMLIT_SERVER_RUN_ON_SAVE). The anonymous volume masks a host-side .venv — if you
+    # also use the optional local-Python path, those are macOS/host binaries and must not
+    # leak into the container.
+    volumes:
+      - .:/app
+      - /app/.venv

@@ -1,0 +1,17 @@
+.git
+.gitignore
+.venv
+__pycache__
+**/__pycache__
+*.py[cod]
+.env
+.usage.json
+.streamlit/secrets.toml
+.DS_Store
+.claude
+memory-bank
+plans
+guides
+Dockerfile
+compose.yaml
+.dockerignore
