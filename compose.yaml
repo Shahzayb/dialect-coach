@@ -1,0 +1,14 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8501:8501"
+    # Secrets stay outside the image. Optional so the scaffold runs before .env exists.
+    env_file:
+      - path: .env
+        required: false
+    # Live reload: edits on the host take effect without a rebuild. Anonymous volume keeps
+    # the image's site-packages from being shadowed by anything on the host.
+    volumes:
+      - .:/app
+      - /app/.venv
