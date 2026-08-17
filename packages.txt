@@ -1,0 +1,4 @@
+ffmpeg
+libssl3
+libasound2
+ca-certificates

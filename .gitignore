@@ -1,3 +1,15 @@
 .DS_Store
 guides/
+
+# Local notes that stay out of git
 plans/master-plan.md
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Secrets and local state
+.env
+.streamlit/secrets.toml
+.usage.json
