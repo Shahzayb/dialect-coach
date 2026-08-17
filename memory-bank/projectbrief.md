@@ -4,16 +4,27 @@ Source of truth for scope. When the memory bank files disagree, this one wins.
 
 ## Why this project exists
 
-_Not yet established._
+I can't hear the difference between my pronunciation and a native speaker's, so I
+don't know what to practice. This causes real problems: getting asked to repeat
+myself in work calls, Discord, and interviews.
 
 ## Core requirements
 
-_Not yet established._
+- Record speech in 3 modes: short drills, longer paragraphs, unscripted speech
+- Analyze phoneme/syllable/word/prosody level (Azure Speech)
+- Show expected vs. actual sound for every flagged word, not just a score
+- Turn analysis into specific coaching (Gemini, with offline fallback)
+- Let me hear the correct pronunciation next to my own recording
+- Free tiers only, $0 budget, no accounts, no stored audio
 
 ## Goals
 
-_Not yet established._
+- Stop getting asked to repeat myself
+- Sound less accented, raise IELTS speaking band
+- Make practice diagnostic — know exactly what to drill next
 
 ## Non-goals
 
-_Not yet established._
+- Not a product for others — personal tool only
+- No gamification, no accounts, no stored history
+- Never spend money

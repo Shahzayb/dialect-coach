@@ -2,10 +2,6 @@
 
 This is the workflow guide for this repo — **when** to do something. The technical facts (stack, architecture, commands, constraints) live in `memory-bank/` instead, so they exist in exactly one place.
 
-## Project status
-
-A fresh scaffold for **pronunciation-analyzer**. No source code, dependencies, build tooling, or tests exist yet. As those appear, they get documented in `memory-bank/techContext.md`, not here.
-
 ## 1. Before starting any task
 
 `memory-bank/` is the only record of previous work — nothing about the project loads into context automatically.
@@ -43,3 +39,4 @@ Work finishing or a decision being made means `memory-bank/` is out of date:
 ## Rules
 
 - No `Co-Authored-By` lines in commits or PR titles/descriptions. No watermarks, period.
+- Commit chunks of work as you go to prevent context drift, isolate AI bugs, and create clean rollback points.

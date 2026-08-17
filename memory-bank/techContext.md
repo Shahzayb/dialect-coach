@@ -2,7 +2,7 @@
 
 ## Architecture
 
-_Not yet established._ No source code exists yet — the repo contains only `README.md`, `.gitignore`, `CLAUDE.md`, and `.claude/`.
+_Not yet established._ No source code exists yet — the repo contains only `README.md`, `.gitignore`, `CLAUDE.md`, `memory-bank`, and `.claude/`.
 
 ## Technologies
 
