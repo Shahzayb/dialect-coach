@@ -1,0 +1,4 @@
+# pyproject.toml
+[project]
+name = "pronunciation-analyzer"
+version = "0.0.9"
