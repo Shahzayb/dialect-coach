@@ -40,6 +40,42 @@ WORD_AMBER = 95.0    # below this: amber, at or above: green
 PHONEME_RED = 60.0
 PHONEME_AMBER = 85.0
 
+
+class Band(str, Enum):
+    """Which colour band a score falls in.
+
+    `NONE` is not a fourth severity — it means there is no score to band at all. An omitted
+    word has no accuracy because it was never spoken, which is a different thing from having
+    scored badly, and colouring it red would claim Azure judged something it never heard.
+    """
+
+    RED = "red"
+    AMBER = "amber"
+    GREEN = "green"
+    NONE = "none"
+
+
+def score_band(score: float | None, red: float, amber: float) -> Band:
+    """Band one score against a red/amber cut pair. Below `red` is red, below `amber` amber."""
+    if score is None:
+        return Band.NONE
+    if score < red:
+        return Band.RED
+    if score < amber:
+        return Band.AMBER
+    return Band.GREEN
+
+
+def word_band(score: float | None) -> Band:
+    """Band a word accuracy score. Kept here so the thresholds have exactly one reader."""
+    return score_band(score, WORD_RED, WORD_AMBER)
+
+
+def phoneme_band(score: float | None) -> Band:
+    """Band a phoneme accuracy score. Phonemes are cut lower than words deliberately."""
+    return score_band(score, PHONEME_RED, PHONEME_AMBER)
+
+
 # Reference text limits. Azure aligns words against the reference, and a very long one
 # both costs alignment quality and is not a realistic single attempt.
 MAX_REFERENCE_CHARS = 1000
