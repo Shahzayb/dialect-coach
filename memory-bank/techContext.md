@@ -103,7 +103,9 @@ No lint or type-check setup yet.
   `AudioOutputConfig` bound to the default speaker, so omitting it makes the container
   synthesise to a sound device it does not have: no exception, no `audio_data`, and a call
   that consumed allowance for nothing. `audio_config=None` is what asks for the bytes back.
-  This is the TTS twin of the `apply_to` trap and is just as easy to leave out.
+  This is the TTS twin of the `apply_to` trap and is just as easy to leave out. Confirmed
+  against live Azure on 2026-08-18: with it, `Riff24Khz16BitMonoPcm` bytes come back and
+  play directly in `st.audio`.
 - **TTS character billing is an estimate that deliberately rounds up.** `tts.payload_for`
   returns exactly what is sent, and the meter is charged for all of it, SSML markup
   included. Whether Azure excludes markup is not confirmed; over-counting is the correct

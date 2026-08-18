@@ -40,9 +40,23 @@ and for the whole text — with your own recording directly beneath for back-to-
 comparison. Every attempt is stored in local SQLite with both raw API responses kept
 verbatim.
 
-Verified end to end against a real recording and, for this chunk, against the committed
-fixture driven through a browser: `make up`, `make test` (159 tests, offline, no keys), and
-the F0 refusal, which `OFFLINE_MODE` correctly bypasses.
+Verified end to end, offline and online. `make test` is 161 tests with no keys and no
+network. The online run on 2026-08-18 used the real `.env` and the 12.8 s weather recording:
+
+- The F0 guard refused to start at `AZURE_TIER_CONFIRMED_F0=false`, as designed, and the
+  acknowledgement was given by the user rather than assumed. It was passed to the container
+  as an environment variable rather than written into `.env`, so the file still says false.
+- Live assessment returned `pron_score` 83.0, accuracy 89.0, **prosody 76.4** — prosody is
+  genuinely populated, not blank.
+- Live TTS returned real audio: RIFF WAV, 24 kHz mono, 1.04 s for one word, 7.9 s for the
+  whole text. `audio_config=None` is confirmed necessary and sufficient.
+- The slow path returned 1.6 s against 1.04 s for the same word — the 1.54× that
+  `rate="-35%"` predicts, so the SSML reaches Azure intact.
+- **The meter charged once per distinct phrase, not once per click.** Four clicks produced
+  three `tts_usage` rows (8 chars for "thursday", 167 for its SSML, 135 for the whole text);
+  the repeat click was served from the session cache and charged nothing.
+- Exactly one synthesised player renders at a time, and the two offline replays sitting in
+  the table are correctly excluded from the STT meter — 12.82 s charged, not 16.82 s.
 
 Not built: Gemini coaching and its offline fallback, `phoneme_reference.py`, and Mode C
 (unscripted).
@@ -58,11 +72,9 @@ Not built: Gemini coaching and its offline fallback, `phoneme_reference.py`, and
 - The captured recording contains no `UnexpectedBreak` / `MissingBreak` / `Monotone`, so
   delivery-fault aggregation is covered by a hand-built payload marked synthetic, not by a
   captured one.
-- **TTS has never made a live call.** Every test substitutes `tts._speak`, and the browser
-  walkthrough ran under `OFFLINE_MODE`, where the buttons are correctly disabled. The
-  `audio_config=None` fix, the WAV format reaching `st.audio`, and `tts_usage` charging once
-  per distinct phrase rather than once per rerun are all reasoned and unit-tested but not
-  yet confirmed against Azure. One online run with a real key closes this.
+- The reference text sent to TTS is the *script*, not what was heard, so whole-text
+  playback always renders the intended reading. That is the point, but it means a
+  paragraph's playback does not line up word-for-word with a recording that omitted words.
 
 ## Dead ends
 
