@@ -1,18 +1,22 @@
 """Streamlit entry point for the pronunciation coach.
 
-UI only. Every API call lives in `speech_analyzer`, every write in `db`, every spend
-decision in `budget` — this file orchestrates them and renders the result.
+UI only. Every API call lives in `speech_analyzer` and `tts`, every write in `db`, every
+spend decision in `budget` — this file orchestrates them and renders the result.
 
-Minimal on purpose: recognised-vs-reference text, the metric row, and a plain word table.
-Colour-coded reference text, the reference/heard diff, the delivery panel, "Hear it"
-playback, and the coaching report are each their own chunk of work.
+The rendering aims at one thing: making the diagnosis legible and audible. Colour-coded
+reference text, the reference-vs-heard diff, expected → produced IPA per flagged word, the
+delivery panel, and "Hear it" playback against your own recording. The coaching report is
+its own chunk of work and is not here.
 """
 
 from __future__ import annotations
 
+import difflib
+import html
 import logging
 import sqlite3
 from collections import OrderedDict
+from typing import Any
 
 import streamlit as st
 
@@ -20,8 +24,9 @@ import audio_utils
 import budget
 import db
 import speech_analyzer
+import tts
 import utils
-from utils import Mode
+from utils import Band, Mode
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +39,31 @@ PAGE_ICON = "🗣️"
 # benefit; preventing rerun storms is the actual requirement.
 CACHE_LIMIT = 10
 
+# Synthesised audio is orders of magnitude larger than the assessment JSON, so this cache
+# holds fewer entries — still far more than one drill sentence's worth of flagged words.
+TTS_CACHE_LIMIT = 24
+
 MODE_LABELS: dict[str, Mode] = {
     "Drill — one or two sentences": Mode.DRILL,
     "Paragraph — connected speech": Mode.PARAGRAPH,
+}
+
+# Chosen to read on both the light and the dark Streamlit theme, and to survive being set
+# as a text colour rather than a background — a hardcoded background would fight whichever
+# theme the viewer is actually using.
+BAND_COLOURS: dict[Band, str] = {
+    Band.RED: "#d6455d",
+    Band.AMBER: "#c07f16",
+    Band.GREEN: "#2f8f63",
+    Band.NONE: "#8a8a8a",
+}
+
+# What Azure's prosody feedback means in words. The raw names are accurate but say nothing
+# to someone trying to fix their delivery.
+DELIVERY_LABELS: dict[str, str] = {
+    "UnexpectedBreak": "Paused in the middle of a phrase",
+    "MissingBreak": "Ran two phrases together with no pause",
+    "Monotone": "Flat intonation across the span",
 }
 
 # Chosen to load the sounds most likely to be substituted by Urdu/Punjabi L1 speakers
@@ -88,7 +115,10 @@ def get_connection() -> sqlite3.Connection:
     return db.connect()
 
 
-def cache_fetch(cache: "OrderedDict[str, tuple]", key: str) -> tuple | None:
+# --- Session caches -------------------------------------------------------------------------
+
+
+def lru_get(cache: "OrderedDict[Any, Any]", key: Any) -> Any | None:
     """Read an entry and mark it most-recently-used.
 
     Pure, so the eviction policy is testable without a Streamlit runtime.
@@ -99,36 +129,275 @@ def cache_fetch(cache: "OrderedDict[str, tuple]", key: str) -> tuple | None:
     return cache[key]
 
 
-def cache_store(
-    cache: "OrderedDict[str, tuple]", key: str, assessment, reference_text: str
-) -> None:
-    """Store an entry, evicting the *least recently used* once over the limit.
+def lru_put(cache: "OrderedDict[Any, Any]", key: Any, value: Any, limit: int) -> None:
+    """Store an entry, evicting the *least recently used* once over `limit`.
 
-    LRU rather than insertion order because the drill loop re-assesses one sentence over
-    and over; evicting by insertion order would drop exactly the entry being re-used, and
-    re-run the whole Azure pipeline on audio already assessed.
-
-    The reference text is stored alongside the result — rendering the live textarea would
-    otherwise show freshly edited text beside scores computed from the previous version.
+    LRU rather than insertion order because the drill loop re-uses one entry over and over:
+    the same sentence assessed again, the same flagged word played again. Evicting by
+    insertion order would drop exactly the entry being re-used, and pay to rebuild it.
     """
-    cache[key] = (assessment, reference_text)
+    cache[key] = value
     cache.move_to_end(key)
-    while len(cache) > CACHE_LIMIT:
+    while len(cache) > limit:
         cache.popitem(last=False)
 
 
-def _cache() -> "OrderedDict[str, tuple]":
-    if "assessments" not in st.session_state:
-        st.session_state["assessments"] = OrderedDict()
-    return st.session_state["assessments"]
+def _session_cache(name: str) -> "OrderedDict[Any, Any]":
+    if name not in st.session_state:
+        st.session_state[name] = OrderedDict()
+    return st.session_state[name]
 
 
 def _cache_get(key: str) -> tuple | None:
-    return cache_fetch(_cache(), key)
+    return lru_get(_session_cache("assessments"), key)
 
 
-def _cache_put(key: str, assessment, reference_text: str) -> None:
-    cache_store(_cache(), key, assessment, reference_text)
+def _cache_put(key: str, assessment: Any, reference_text: str) -> None:
+    """The reference text is stored alongside the result — rendering the live textarea
+    would otherwise show freshly edited text beside scores from the previous version."""
+    lru_put(_session_cache("assessments"), key, (assessment, reference_text), CACHE_LIMIT)
+
+
+# --- Pure rendering helpers -----------------------------------------------------------------
+# Kept free of Streamlit so the diffing, banding and aggregation can be tested directly
+# rather than through a headless app run.
+
+
+def is_flagged(word: dict[str, Any]) -> bool:
+    """Whether a word is worth showing a card for."""
+    accuracy = word.get("accuracy")
+    return bool(
+        (word.get("error_type") or "None") != "None"
+        or (isinstance(accuracy, (int, float)) and accuracy < utils.WORD_AMBER)
+        or word.get("delivery_error_types")
+    )
+
+
+def severity_key(word: dict[str, Any]) -> tuple[int, float]:
+    """Sort flagged words worst-first.
+
+    Omissions lead: a word that was never spoken is a worse outcome than one merely scored
+    badly, and it carries `accuracy: None`, which must not be allowed to sort as a zero
+    score or to blow up the comparison against a float.
+    """
+    accuracy = word.get("accuracy")
+    rank = 0 if (word.get("error_type") or "None") == "Omission" else 1
+    return (rank, accuracy if isinstance(accuracy, (int, float)) else 0.0)
+
+
+def hover_text(word: dict[str, Any]) -> str:
+    """The title attribute for a word: its score, and why it was flagged."""
+    accuracy = word.get("accuracy")
+    parts = [f"{accuracy:.0f}" if isinstance(accuracy, (int, float)) else "not spoken"]
+    error_type = word.get("error_type") or "None"
+    if error_type != "None":
+        # Says whose judgement it is: continuous mode ignores enableMiscue, so omissions
+        # and insertions there are our diff, not Azure's.
+        parts.append(f"{error_type} (flagged by {word.get('error_source') or 'azure'})")
+    parts.extend(word.get("delivery_error_types") or [])
+    return " · ".join(parts)
+
+
+def colour_coded_html(words: list[dict[str, Any]]) -> str:
+    """The assessed words as one colour-coded block, each carrying its score on hover.
+
+    Built from the aligned word list rather than the raw reference string, because that is
+    what carries the scores — so the original punctuation and capitalisation are not
+    reproduced here. The verbatim reference stays visible in the diff panel above it.
+
+    HTML rather than Streamlit's native `:red[…]` markdown because only an attribute can
+    carry hover text, and §11 asks for the score on hover. Both the word and the title are
+    escaped: they originate in the reference textarea, which is arbitrary user input being
+    interpolated into markup.
+    """
+    spans: list[str] = []
+    for word in words:
+        text = str(word.get("word") or "")
+        if not text:
+            continue
+        colour = BAND_COLOURS[utils.word_band(word.get("accuracy"))]
+        style = f"color:{colour};border-bottom:2px solid {colour};padding-bottom:1px;"
+        error_type = word.get("error_type") or "None"
+        if error_type == "Omission":
+            # Never spoken, so it has no score to colour by — struck through instead.
+            style += "text-decoration:line-through;opacity:0.7;"
+        elif error_type == "Insertion":
+            style += "font-style:italic;"
+        spans.append(
+            f'<span style="{style}" title="{html.escape(hover_text(word), quote=True)}">'
+            f"{html.escape(text)}</span>"
+        )
+    return '<div style="line-height:2.4;">' + " ".join(spans) + "</div>"
+
+
+def reference_vs_heard(reference_text: str, recognised_text: str) -> list[tuple[str, str]]:
+    """Diff the script against what Azure actually heard, as (tag, word) pairs.
+
+    If Azure heard something else entirely, that is the single most useful signal available
+    and §11 requires it not be buried under per-phoneme scores. Tags are `same`, `missing`
+    (in the script, never heard) and `extra` (heard, not in the script).
+
+    Reuses `utils.normalise_words`, so this diff and the miscue diff in `speech_analyzer`
+    agree on what counts as a word.
+    """
+    reference = utils.normalise_words(reference_text)
+    heard = utils.normalise_words(recognised_text)
+
+    pairs: list[tuple[str, str]] = []
+    matcher = difflib.SequenceMatcher(a=reference, b=heard, autojunk=False)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            pairs.extend(("same", word) for word in reference[i1:i2])
+        else:
+            pairs.extend(("missing", word) for word in reference[i1:i2])
+            pairs.extend(("extra", word) for word in heard[j1:j2])
+    return pairs
+
+
+def diff_html(pairs: list[tuple[str, str]]) -> str:
+    """Render a `reference_vs_heard` diff: struck-through for missing, italic for extra."""
+    styles = {
+        "same": "",
+        "missing": f"color:{BAND_COLOURS[Band.RED]};text-decoration:line-through;",
+        "extra": f"color:{BAND_COLOURS[Band.AMBER]};font-style:italic;",
+    }
+    spans = [
+        f'<span style="{styles[tag]}" title="{tag}">{html.escape(word)}</span>'
+        for tag, word in pairs
+    ]
+    return '<div style="line-height:2;">' + " ".join(spans) + "</div>"
+
+
+def phoneme_pairs(
+    word: dict[str, Any]
+) -> list[tuple[str | None, str | None, float | None]]:
+    """(expected IPA, produced IPA, score) for each phoneme in a word.
+
+    The produced phoneme is the highest-scoring nbest alternate that differs from the
+    target, or None when Azure's best guess agrees with it. This is the whole point of the
+    tool: "you produced /d/ where /ð/ was expected" is actionable, "your /ð/ scored 80" is
+    not. Takes the maximum rather than trusting nbest to arrive sorted.
+    """
+    pairs: list[tuple[str | None, str | None, float | None]] = []
+    for phoneme in word.get("phonemes") or []:
+        expected = phoneme.get("phoneme")
+        alternates = [a for a in (phoneme.get("nbest") or []) if a.get("phoneme")]
+        produced = None
+        if alternates:
+            best = max(alternates, key=lambda a: a.get("score") or 0.0)
+            if best.get("phoneme") != expected:
+                produced = best.get("phoneme")
+        pairs.append((expected, produced, phoneme.get("score")))
+    return pairs
+
+
+def weakest_phoneme(word: dict[str, Any]) -> str:
+    """One-line summary of a word's worst sound, for the card header."""
+    pairs = [p for p in phoneme_pairs(word) if p[2] is not None]
+    if not pairs:
+        return ""
+    expected, produced, score = min(pairs, key=lambda p: p[2])
+    if produced:
+        return f"/{expected}/ → sounded like /{produced}/"
+    return f"/{expected}/ ({score:.0f})"
+
+
+def delivery_summary(words: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Which words carry each delivery fault, in reading order.
+
+    These are not `ErrorType` values — they live under `Feedback.Prosody` in the payload
+    (see `speech_analyzer._delivery_error_types`). Aggregating them into counts plus the
+    specific words involved is what §5 asks for, and it is what turns a pronunciation
+    scorer into something that also fixes speaking flow.
+    """
+    summary: dict[str, list[str]] = {}
+    for word in words:
+        for fault in word.get("delivery_error_types") or []:
+            summary.setdefault(fault, []).append(str(word.get("word") or ""))
+    return summary
+
+
+# --- Playback ---------------------------------------------------------------------------------
+
+
+def play(conn: sqlite3.Connection, text: str, *, slow: bool, label: str) -> None:
+    """Synthesise `text` unless it is already cached, then queue it for playback.
+
+    The cache lookup comes **before** the pre-flight and the usage record, and that order
+    is the entire point. Streamlit re-runs this script top to bottom on every widget
+    interaction, so metering ahead of the cache check would charge the TTS meter again on
+    each unrelated click: the meter would climb steadily while nothing new was synthesised
+    and nothing new was spent.
+    """
+    cache = _session_cache("tts_audio")
+    key = (tts.voice_name(), text, slow)
+
+    if lru_get(cache, key) is None:
+        try:
+            # Price exactly what will be sent, SSML markup included.
+            budget.preflight_tts(conn, len(tts.payload_for(text, slow=slow)))
+        except budget.BudgetError as exc:
+            st.error(str(exc), icon="💸")
+            return
+
+        try:
+            with st.spinner(f"Synthesising {label}…"):
+                result = tts.synthesise(text, slow=slow)
+        except utils.ConfigError as exc:
+            st.error(str(exc), icon="🔑")
+            return
+        except (utils.PermanentError, utils.TransientError, tts.SynthesisError) as exc:
+            if speech_analyzer.is_quota_exhausted(exc):
+                # Azure is authoritative; block the rest of the month regardless of meter.
+                budget.mark_quota_exhausted()
+            # redact() rather than str(): SDK error details can echo request context.
+            st.error(utils.redact(str(exc)), icon="🔇")
+            logger.error("Synthesis failed", exc_info=True)
+            return
+
+        db.record_tts_usage(
+            conn,
+            # Attempts, not successes: a retry re-sends the text and can consume allowance
+            # even when it ultimately fails.
+            characters=result.characters * max(result.attempts, 1),
+            voice=result.voice,
+        )
+        lru_put(cache, key, result.audio, TTS_CACHE_LIMIT)
+
+    st.session_state["now_playing"] = key
+
+
+def playback_buttons(
+    conn: sqlite3.Connection, text: str, *, key_prefix: str, label: str
+) -> None:
+    """A "Hear it" / "Hear it slowly" pair, plus the player for whichever was clicked.
+
+    The player renders here rather than in one fixed place on the page, so the audio
+    appears next to the word it belongs to. Keys are prefixed by the caller with the word's
+    *index*: a paragraph repeats "the" and "that" constantly, and two buttons sharing a key
+    is a hard Streamlit error, not a cosmetic one.
+    """
+    offline = utils.offline_mode()
+    left, right, _ = st.columns([1, 1, 3])
+    with left:
+        if st.button("🔊 Hear it", key=f"{key_prefix}-normal", disabled=offline,
+                     use_container_width=True):
+            play(conn, text, slow=False, label=label)
+    with right:
+        if st.button("🐢 Slowly", key=f"{key_prefix}-slow", disabled=offline,
+                     use_container_width=True):
+            play(conn, text, slow=True, label=label)
+
+    now_playing = st.session_state.get("now_playing")
+    if now_playing and now_playing[1] == text:
+        audio = lru_get(_session_cache("tts_audio"), now_playing)
+        if audio:
+            # autoplay so one click plays, rather than one click to synthesise and another
+            # on the player. The click itself is lost to the rerun either way.
+            st.audio(audio, format="audio/wav", autoplay=True)
+
+
+# --- Startup and input -------------------------------------------------------------------------
 
 
 def _metric(label: str, value: float | None) -> None:
@@ -227,9 +496,11 @@ def run_assessment(conn: sqlite3.Connection, audio: bytes, reference_text: str, 
     return assessment
 
 
-def render_result(assessment, reference_text: str) -> None:
-    scores = assessment.overall_scores
+# --- Result rendering --------------------------------------------------------------------------
 
+
+def render_scores(assessment) -> None:
+    scores = assessment.overall_scores
     columns = st.columns(5)
     for column, (label, key) in zip(
         columns,
@@ -239,58 +510,144 @@ def render_result(assessment, reference_text: str) -> None:
         with column:
             _metric(label, scores.get(key))
 
-    # What Azure heard is often the single most useful signal on the page — if it heard
-    # something else entirely, no per-phoneme score matters yet.
-    st.subheader("What Azure heard")
-    st.write(assessment.recognised_text or "_nothing_")
-    with st.expander("What you meant to say"):
-        st.write(reference_text)
 
-    flagged = [
-        w for w in assessment.words
-        if w["error_type"] != "None"
-        or (w["accuracy"] is not None and w["accuracy"] < utils.WORD_AMBER)
-        or w["delivery_error_types"]
-    ]
+def render_diff(assessment, reference_text: str) -> None:
+    """What Azure heard, against what was written. The first thing worth looking at."""
+    st.subheader("Script versus what Azure heard")
+    if not assessment.recognised_text:
+        st.warning("Azure did not report any recognised text for this attempt.")
+        return
 
-    st.subheader(f"Words ({len(flagged)} of {len(assessment.words)} flagged)")
-    if not flagged:
-        st.success("Nothing flagged in that attempt.")
+    pairs = reference_vs_heard(reference_text, assessment.recognised_text)
+    if all(tag == "same" for tag, _ in pairs):
+        st.success("Azure heard every word of the script.")
     else:
-        st.dataframe(
-            [
-                {
-                    "Word": w["word"],
-                    "Score": round(w["accuracy"], 1) if w["accuracy"] is not None else None,
-                    "Error": w["error_type"],
-                    # Says whose judgement it is: continuous mode ignores enableMiscue, so
-                    # omissions and insertions there are our diff, not Azure's.
-                    "Flagged by": w["error_source"],
-                    "Delivery": ", ".join(w["delivery_error_types"]) or "",
-                    "Weakest sound": _weakest_phoneme(w),
-                }
-                for w in flagged
-            ],
-            hide_index=True,
-            use_container_width=True,
+        st.markdown(diff_html(pairs), unsafe_allow_html=True)
+        st.caption(
+            "Struck through: in the script, not heard. Italic: heard, not in the script. "
+            "A word Azure heard differently is a bigger problem than a low phoneme score."
         )
+    with st.expander("The two texts, verbatim"):
+        st.markdown(f"**Script**\n\n{reference_text}")
+        st.markdown(f"**Heard**\n\n{assessment.recognised_text}")
 
+
+def render_colour_coded(assessment) -> None:
+    st.subheader("Word by word")
+    st.markdown(colour_coded_html(assessment.words), unsafe_allow_html=True)
     st.caption(
-        "Expected → produced sounds, colour-coded text, the delivery panel, playback, and "
-        "the coaching report are still to come."
+        f"Hover any word for its score. Red below {utils.WORD_RED:g}, amber below "
+        f"{utils.WORD_AMBER:g}, green above. Struck through: never spoken. Italic: heard "
+        f"but not in the script. These cut points are heuristics chosen for this tool — "
+        f"Azure returns a 0-100 score and says nothing about where \"bad\" starts."
     )
 
 
-def _weakest_phoneme(word: dict) -> str:
-    """Lowest-scoring phoneme, and what was produced instead. The diagnostic bit."""
-    scored = [p for p in word["phonemes"] if p["score"] is not None]
-    if not scored:
-        return ""
-    worst = min(scored, key=lambda p: p["score"])
-    alternates = [a for a in worst["nbest"] if a["phoneme"] != worst["phoneme"]]
-    if alternates and worst["is_mispronounced"]:
-        return f"/{worst['phoneme']}/ → sounded like /{alternates[0]['phoneme']}/"
-    return f"/{worst['phoneme']}/ ({worst['score']:.0f})"
+def render_word_card(conn: sqlite3.Connection, word: dict[str, Any], index: int) -> None:
+    """One flagged word: what was expected, what came out, and how it should sound."""
+    text = str(word.get("word") or "")
+    accuracy = word.get("accuracy")
+    error_type = word.get("error_type") or "None"
+
+    with st.container(border=True):
+        score = f"{accuracy:.0f}" if isinstance(accuracy, (int, float)) else "not spoken"
+        colour = BAND_COLOURS[utils.word_band(accuracy)]
+        st.markdown(
+            f'<span style="font-size:1.3rem;font-weight:600;color:{colour};">'
+            f"{html.escape(text)}</span> "
+            f'<span style="opacity:0.7;">— {html.escape(score)}</span>',
+            unsafe_allow_html=True,
+        )
+
+        notes = []
+        if error_type != "None":
+            notes.append(f"{error_type} (flagged by {word.get('error_source') or 'azure'})")
+        notes.extend(DELIVERY_LABELS.get(f, f) for f in word.get("delivery_error_types") or [])
+        if notes:
+            st.caption(" · ".join(notes))
+
+        pairs = phoneme_pairs(word)
+        if pairs:
+            rows = []
+            for expected, produced, score_value in pairs:
+                phoneme_colour = BAND_COLOURS[utils.phoneme_band(score_value)]
+                shown = f"/{expected}/"
+                if produced:
+                    shown += f" → <b>/{produced}/</b>"
+                title = f"{score_value:.0f}" if score_value is not None else "no score"
+                rows.append(
+                    f'<span style="color:{phoneme_colour};margin-right:1.1rem;" '
+                    f'title="{html.escape(title, quote=True)}">{shown}</span>'
+                )
+            st.markdown(
+                '<div style="line-height:2;">' + "".join(rows) + "</div>",
+                unsafe_allow_html=True,
+            )
+            st.caption("Expected → what you actually produced. Hover for the score.")
+
+        syllables = [s for s in word.get("syllables") or [] if s.get("syllable")]
+        if syllables:
+            # Misplaced lexical stress is one of the most common intelligibility failures
+            # and is invisible at the phoneme level, so it gets its own line.
+            rendered = " · ".join(
+                f"{s['syllable']}"
+                + (f" ({s['score']:.0f})" if isinstance(s.get("score"), (int, float)) else "")
+                for s in syllables
+            )
+            st.caption(f"Syllables: {rendered}")
+
+        if error_type != "Omission":
+            playback_buttons(conn, text, key_prefix=f"word-{index}", label=f"“{text}”")
+
+
+def render_delivery(assessment) -> None:
+    """Counts and locations of UnexpectedBreak / MissingBreak / Monotone."""
+    st.subheader("Delivery")
+    summary = delivery_summary(assessment.words)
+    if not summary:
+        st.success("No pausing or intonation problems flagged in that attempt.")
+        return
+    for fault, words in summary.items():
+        st.markdown(
+            f"**{DELIVERY_LABELS.get(fault, fault)}** — {len(words)} "
+            f"{'word' if len(words) == 1 else 'words'}: {', '.join(words)}"
+        )
+
+
+def render_result(conn: sqlite3.Connection, assessment, reference_text: str, source) -> None:
+    render_scores(assessment)
+    render_diff(assessment, reference_text)
+    render_colour_coded(assessment)
+
+    st.subheader("Hear the whole thing")
+    playback_buttons(conn, reference_text, key_prefix="whole", label="the full text")
+    if source is not None:
+        # Your own recording directly beneath the native rendering, so the two can be
+        # compared back to back without leaving the page. That comparison is the feature.
+        st.caption("Your recording:")
+        st.audio(source)
+    if utils.offline_mode():
+        st.caption(
+            "Playback is disabled: OFFLINE_MODE is on, and there is no fixture to replay "
+            "for audio the way there is for an assessment. Unset it to hear the target."
+        )
+
+    flagged = sorted((w for w in assessment.words if is_flagged(w)), key=severity_key)
+    st.subheader(f"Flagged words ({len(flagged)} of {len(assessment.words)})")
+    if not flagged:
+        st.success("Nothing flagged in that attempt.")
+    else:
+        st.caption(
+            "Worst first. Each word is synthesised on its own, so you hear it in citation "
+            "form — right for drilling a sound, but not how it sounds inside the sentence. "
+            "Use the whole-text playback above for that."
+        )
+        for index, word in enumerate(flagged):
+            render_word_card(conn, word, index)
+
+    render_delivery(assessment)
+
+    st.caption("The coaching report is still to come.")
 
 
 def render() -> None:
@@ -337,6 +694,8 @@ def render() -> None:
             else:
                 assessment = cached[0]
             st.session_state["last_key"] = key if assessment is not None else None
+            # A fresh result must not open with the previous attempt's word still queued.
+            st.session_state["now_playing"] = None
 
     last_key = st.session_state.get("last_key")
     if last_key:
@@ -344,11 +703,7 @@ def render() -> None:
         if cached is not None:
             assessment, assessed_text = cached
             st.divider()
-            render_result(assessment, assessed_text)
-            if source is not None:
-                # Your own recording, directly under the scores. Comparing it against a
-                # native rendering is the "Hear it" chunk; this is half of that.
-                st.audio(source)
+            render_result(conn, assessment, assessed_text, source)
 
     st.divider()
     st.caption(budget.summary_line(conn))

@@ -77,6 +77,15 @@ def slow_ssml(text: str, voice: str, rate: str = SLOW_RATE) -> str:
     )
 
 
+def payload_for(text: str, *, slow: bool, voice: str | None = None) -> str:
+    """Exactly the string that will be sent to Azure — which is exactly what is billed.
+
+    Exposed so the pre-flight guard can price a call before making it without rebuilding
+    the SSML itself. One construction, so the estimate and the charge cannot disagree.
+    """
+    return slow_ssml(text, voice or voice_name()) if slow else text
+
+
 def _speak(payload: str, voice: str, *, is_ssml: bool) -> bytes:
     """Send one synthesis request and return the audio bytes.
 
@@ -138,7 +147,7 @@ def synthesise(text: str, *, voice: str | None = None, slow: bool = False) -> Sy
         )
 
     chosen = voice or voice_name()
-    payload = slow_ssml(text, chosen) if slow else text
+    payload = payload_for(text, slow=slow, voice=chosen)
 
     made = 0
 
