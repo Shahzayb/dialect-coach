@@ -40,3 +40,4 @@ Work finishing or a decision being made means `memory-bank/` is out of date:
 
 - No `Co-Authored-By` lines in commits or PR titles/descriptions. No watermarks, period.
 - Commit chunks of work as you go to prevent context drift, isolate AI bugs, and create clean rollback points.
+  - Only applies to any branch other than the `main`.

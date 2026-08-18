@@ -1,5 +1,6 @@
 .DS_Store
 guides/
+playground/
 
 # Local notes that stay out of git
 plans/master-plan.md

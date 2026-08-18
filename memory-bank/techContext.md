@@ -17,6 +17,10 @@ No database, no accounts, no persistent audio storage.
 - **azure-cognitiveservices-speech 1.51.1** — pronunciation assessment. Native library.
 - **google-genai 2.18.1** — current Google GenAI SDK (`from google import genai`). The old
   `google-generativeai` package is end-of-life and must not be used.
+- **Gemini model ID: `gemini-3.6-flash`**, verified live 2026-08-17 via `scripts/smoke_test.py`.
+  `gemini-2.5-flash` (used in the original design) now 404s — the API's own error says it's
+  "no longer available to new users" and points at `gemini-3.6-flash`. Re-verify against a
+  live call rather than recalling a model ID; these retire without much notice.
 - **pydub 0.25.1** + system `ffmpeg` — audio conversion.
 - **python-dotenv 1.2.3**, **pydantic 2.13.4**.
 - **SQLite** via the stdlib `sqlite3` — chosen 2026-08-17, not yet built. No dependency to
