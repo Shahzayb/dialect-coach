@@ -7,7 +7,7 @@ including the "—" for an unavailable prosody score.
 
 from __future__ import annotations
 
-import json
+import os
 
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -150,16 +150,88 @@ def test_unavailable_prosody_renders_as_a_dash_not_zero(run_app) -> None:
     assert prosody.value == "—", "a missing score and a score of zero are different things"
 
 
-def test_the_result_shows_what_azure_heard(run_app) -> None:
+def test_the_result_diffs_the_script_against_what_azure_heard(run_app) -> None:
+    """If Azure heard something else, that outranks every per-phoneme score on the page."""
     app = seed_result(run_app(), offline_assessment())
-    assert any("What Azure heard" in s.value for s in app.subheader)
+    assert any("what Azure heard" in s.value for s in app.subheader)
 
 
-def test_flagged_words_are_listed(run_app) -> None:
+def test_flagged_words_get_a_card_each(run_app) -> None:
     app = seed_result(run_app(), offline_assessment())
-    assert app.dataframe, "the word table should render for a fixture with mispronunciations"
-    rendered = json.dumps(app.dataframe[0].value.to_dict())
-    assert "Flagged by" in rendered or "Word" in rendered
+    assert any("Flagged words" in s.value for s in app.subheader)
+    rendered = " ".join(m.value for m in app.markdown)
+    assert "→" in rendered, "a card must name what was produced, not only what was expected"
+
+
+def test_the_colour_coded_text_and_delivery_panel_render(run_app) -> None:
+    import app as app_module
+    from utils import Band
+
+    app = seed_result(run_app(), offline_assessment())
+    subheaders = [s.value for s in app.subheader]
+    assert "Word by word" in subheaders
+    assert "Delivery" in subheaders
+    rendered = " ".join(m.value for m in app.markdown)
+    assert app_module.BAND_COLOURS[Band.RED] in rendered, "words must be banded by score"
+
+
+# --- Playback ------------------------------------------------------------------------------
+
+
+def test_hear_it_buttons_are_disabled_offline_and_say_why(run_app) -> None:
+    """OFFLINE_MODE means no network call, ever — there is no audio fixture to replay."""
+    app = seed_result(run_app(), offline_assessment())
+
+    playback = [b for b in app.button if "Hear it" in b.label or "Slowly" in b.label]
+    assert playback, "the playback buttons must still render, just disabled"
+    assert all(b.disabled for b in playback)
+    assert any("OFFLINE_MODE is on" in c.value for c in app.caption)
+
+
+def test_nothing_is_charged_to_the_tts_meter_while_offline(run_app) -> None:
+    import db
+
+    app = seed_result(run_app(), offline_assessment())
+    assert not app.exception
+    conn = db.connect(os.environ["DB_PATH"])
+    assert db.monthly_tts_characters(conn) == 0
+    conn.close()
+
+
+def test_a_cached_phrase_is_not_charged_to_the_meter_twice(tmp_path, monkeypatch) -> None:
+    """Streamlit re-runs the whole script on every click.
+
+    Metering ahead of the cache check would charge again on each unrelated interaction, so
+    the meter would climb while nothing new was synthesised. The order in `play` is the fix
+    and this is the test that pins it.
+    """
+    from collections import OrderedDict
+
+    import app as app_module
+    import db
+    import tts
+
+    conn = db.connect(tmp_path / "tts.db")
+    monkeypatch.setenv("OFFLINE_MODE", "false")
+    monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
+    monkeypatch.setattr(
+        tts, "synthesise",
+        lambda text, **kw: tts.Synthesis(audio=b"WAV", characters=len(text),
+                                         voice="en-US-AvaNeural", attempts=1),
+    )
+
+    cache: OrderedDict = OrderedDict()
+    state: dict = {}
+    monkeypatch.setattr(app_module, "_session_cache", lambda _name: cache)
+    monkeypatch.setattr(app_module.st, "session_state", state, raising=False)
+
+    for _ in range(4):
+        app_module.play(conn, "weather", slow=False, label="test", source="word-0")
+
+    assert db.monthly_tts_characters(conn) == len("weather"), "charged once, not four times"
+    assert state["now_playing"] == {"key": ("en-US-AvaNeural", "weather", False),
+                                    "source": "word-0"}
+    conn.close()
 
 
 def test_paragraph_results_render_too(run_app) -> None:
@@ -177,18 +249,18 @@ def test_the_result_panel_shows_the_text_it_was_scored_against(run_app) -> None:
     assert "Something else entirely." not in rendered
 
 
-def test_the_result_cache_evicts_least_recently_used() -> None:
+def test_the_cache_evicts_least_recently_used() -> None:
     """The drill loop re-uses one entry; insertion-order eviction would drop that one."""
     from collections import OrderedDict
 
     import app as app_module
 
-    cache: OrderedDict[str, tuple] = OrderedDict()
+    cache: OrderedDict = OrderedDict()
     for i in range(app_module.CACHE_LIMIT):
-        app_module.cache_store(cache, f"key{i}", None, "")
+        app_module.lru_put(cache, f"key{i}", None, app_module.CACHE_LIMIT)
 
-    app_module.cache_fetch(cache, "key0")          # re-used, so it must survive
-    app_module.cache_store(cache, "overflow", None, "")
+    app_module.lru_get(cache, "key0")          # re-used, so it must survive
+    app_module.lru_put(cache, "overflow", None, app_module.CACHE_LIMIT)
 
     assert len(cache) == app_module.CACHE_LIMIT
     assert "key0" in cache
@@ -200,17 +272,22 @@ def test_the_cache_returns_none_for_a_miss() -> None:
 
     import app as app_module
 
-    assert app_module.cache_fetch(OrderedDict(), "nope") is None
+    assert app_module.lru_get(OrderedDict(), "nope") is None
 
 
-def test_the_cache_round_trips_the_reference_text() -> None:
+def test_the_cache_round_trips_any_value() -> None:
+    """Generalised because the same LRU now backs both assessments and synthesised audio."""
     from collections import OrderedDict
 
     import app as app_module
 
-    cache: OrderedDict[str, tuple] = OrderedDict()
-    app_module.cache_store(cache, "k", "assessment", "the text it was scored against")
-    assert app_module.cache_fetch(cache, "k") == ("assessment", "the text it was scored against")
+    cache: OrderedDict = OrderedDict()
+    app_module.lru_put(cache, "k", ("assessment", "the text it was scored against"), 10)
+    assert app_module.lru_get(cache, "k") == ("assessment", "the text it was scored against")
+
+    audio: OrderedDict = OrderedDict()
+    app_module.lru_put(audio, ("voice", "hello", False), b"WAV", 2)
+    assert app_module.lru_get(audio, ("voice", "hello", False)) == b"WAV"
 
 
 def test_a_retried_assessment_charges_the_meter_for_every_attempt(tmp_path) -> None:
@@ -234,3 +311,74 @@ def test_a_retried_assessment_charges_the_meter_for_every_attempt(tmp_path) -> N
     )
     assert db.monthly_stt_seconds(conn) == 36.0
     conn.close()
+
+
+def test_a_failed_synthesis_is_returned_not_rendered_in_a_narrow_column(
+    tmp_path, monkeypatch
+) -> None:
+    """`play` must hand the message back, not emit it inside an `st.columns` entry.
+
+    Measured against the running app: an alert emitted from inside the button column laid
+    out at 124px in a 672px row — a couple of hundred characters of error at one word per
+    line. The caller renders it after the columns close.
+    """
+    from collections import OrderedDict
+
+    import app as app_module
+    import db
+    import tts
+
+    conn = db.connect(tmp_path / "fail.db")
+    monkeypatch.setenv("OFFLINE_MODE", "false")
+    monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
+    monkeypatch.setattr(app_module, "_session_cache", lambda _n: OrderedDict())
+    monkeypatch.setattr(app_module.st, "session_state", {}, raising=False)
+
+    def boom(text, **kw):
+        raise tts.SynthesisError("Azure rejected the request as malformed.")
+
+    monkeypatch.setattr(tts, "synthesise", boom)
+    outcome = app_module.play(conn, "weather", slow=False, label="x", source="word-0")
+
+    assert outcome is not None, "the failure must come back to the caller"
+    icon, message = outcome
+    assert "malformed" in message
+    conn.close()
+
+
+def test_a_run_that_fails_after_retries_still_charges_the_meter(tmp_path, monkeypatch) -> None:
+    """Three uploads reached Azure and may have been billed; recording zero under-reports."""
+    from collections import OrderedDict
+
+    import app as app_module
+    import db
+    import tts
+    import utils
+
+    conn = db.connect(tmp_path / "retry.db")
+    monkeypatch.setenv("OFFLINE_MODE", "false")
+    monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
+    monkeypatch.setattr(app_module, "_session_cache", lambda _n: OrderedDict())
+    monkeypatch.setattr(app_module.st, "session_state", {}, raising=False)
+
+    def exhaust(text, *, slow=False, on_attempt=None, **kw):
+        for attempt in (1, 2, 3):
+            on_attempt(attempt)
+        raise utils.TransientError("Azure was temporarily unavailable")
+
+    monkeypatch.setattr(tts, "synthesise", exhaust)
+    assert app_module.play(conn, "weather", slow=False, label="x", source="w") is not None
+    assert db.monthly_tts_characters(conn) == len("weather") * 3
+    conn.close()
+
+
+def test_omitted_words_still_offer_playback(run_app) -> None:
+    """A word you skipped is the one you most need to hear a native rendering of."""
+    assessment = offline_assessment()
+    assessment.words = [dict(assessment.words[0], word="unpredictable", accuracy=None,
+                             error_type="Omission", error_source="local_diff",
+                             phonemes=[], syllables=[])]
+    app = seed_result(run_app(), assessment)
+    assert not app.exception
+    assert any("Hear it" in b.label for b in app.button)
+    assert any("did not say this one" in c.value for c in app.caption)

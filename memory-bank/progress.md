@@ -2,50 +2,74 @@
 
 ## Current focus
 
-Building the app one chunk at a time. Assessment works end to end and is persisted; the
-analysis is not yet turned into coaching, which is the thing the tool exists to do.
+Building the app one chunk at a time. The diagnosis is now legible and audible; turning it
+into coaching is the thing the tool still does not do.
 
 ## Next concrete step
 
-**Agreed 2026-08-18: make the diagnosis legible and audible** — master plan §11's UI plus
-§6's "Hear it" playback, as one chunk.
+**The coaching layer** — master plan §7: `phoneme_reference.py`, `fallback_coach.py`,
+`ai_coach.py`. Deferred until now on the user's explicit instruction, so that it would be
+built on top of a legible diagnosis rather than underneath one. Nothing blocks it:
+`db.attach_coaching` and the `gemini_raw_json` / `coach_source` columns have existed since
+schema version 1, so it is an UPDATE and not a migration.
 
-Why this before coaching. The brief's problem statement is "I can't hear the difference
-between my pronunciation and a native speaker's", and the two core requirements that answer
-it — show expected vs. actual sound for every flagged word, and hear the correct
-pronunciation next to my own recording — are both presentation, not analysis. The data for
-the first is already parsed and stored and is currently rendered as a plain table; the
-second needs only Azure neural TTS, whose meter and `tts_usage` table already exist.
+Order worth keeping when it is planned: `phoneme_reference.py` and `fallback_coach.py`
+first, `ai_coach.py` second. The master plan is explicit that the fallback "must be good
+enough to use permanently" because the free Gemini tier will run out — which makes it the
+primary path, not the degraded one, and it is fully testable offline against the committed
+fixture. `GEMINI_API_KEY` and `GEMINI_MODEL` are still unread by any code.
 
-The two halves belong in one chunk because a "Hear it" button lives *next to* each flagged
-word: splitting them means rebuilding the same render path twice.
-
-In scope: colour-coded reference text against the thresholds already in `utils.py`, the
-reference-vs-heard diff, expected IPA → produced IPA per flagged word, the delivery panel
-aggregating `UnexpectedBreak`/`MissingBreak`/`Monotone`, `tts.py`, per-word and
-full-paragraph playback cached in `st.session_state` by `(voice, text)`, and the user's own
-recording beneath it for back-to-back comparison.
-
-Out, on the user's explicit instruction: `phoneme_reference.py`, `fallback_coach.py`,
-`ai_coach.py` — the whole coaching layer waits for a later session. It is worth building on
-top of a legible diagnosis rather than underneath one, and `attach_coaching` and the
-`gemini_raw_json` column are already waiting for it, so deferring it costs no migration.
+Two things to re-verify rather than recall when that chunk starts: the Gemini model ID
+(`gemini-3.6-flash` was live on 2026-08-17 and these retire without much notice), and
+`response_schema` support in google-genai 2.18.1.
 
 ## Active plan
 
+`plans/2026-08-18_legible-audible-diagnosis.md` — complete.
 `plans/2026-08-18_azure-analysis-core.md` — complete.
 `plans/2026-08-17_project-scaffold.md` — complete.
 
 ## What works
 
-Record or upload a drill sentence or a paragraph, get real Azure scores down to the
-phoneme, and every attempt is stored in local SQLite with both raw API responses kept
-verbatim. Verified end to end against a real recording: `make up`, `make test` (108 tests,
-offline, no keys), and the F0 refusal, which `OFFLINE_MODE` correctly bypasses.
+Record or upload a drill sentence or a paragraph and get real Azure scores down to the
+phoneme, rendered as: the metric row, a script-versus-heard diff, colour-coded reference
+text with the score on hover, a card per flagged word naming the sound actually produced in
+place of the target (`/θ/ → /t/`, not "your /θ/ scored 41"), the syllable/stress line, and
+the delivery panel. "Hear it" and "Hear it slowly" synthesise a native rendering — per word
+and for the whole text — with your own recording directly beneath for back-to-back
+comparison. Every attempt is stored in local SQLite with both raw API responses kept
+verbatim.
 
-Not built: Gemini coaching and its offline fallback, `phoneme_reference.py`, TTS/"Hear it",
-Mode C (unscripted), and the rich §11 UI — colour-coded reference text, the
-reference-vs-heard diff, and the delivery panel.
+Verified end to end, offline and online. `make test` is 161 tests with no keys and no
+network. The online run on 2026-08-18 used the real `.env` and the 12.8 s weather recording:
+
+- The F0 guard refused to start at `AZURE_TIER_CONFIRMED_F0=false`, as designed, and the
+  acknowledgement was given by the user rather than assumed. It was passed to the container
+  as an environment variable rather than written into `.env`, so the file still says false.
+- Live assessment returned `pron_score` 83.0, accuracy 89.0, **prosody 76.4** — prosody is
+  genuinely populated, not blank.
+- Live TTS returned real audio: RIFF WAV, 24 kHz mono, 1.04 s for one word, 7.9 s for the
+  whole text. `audio_config=None` is confirmed necessary and sufficient.
+- The slow path returned 1.6 s against 1.04 s for the same word — the 1.54× that
+  `rate="-35%"` predicts, so the SSML reaches Azure intact.
+- **The meter charged once per distinct phrase, not once per click.** Four clicks produced
+  three `tts_usage` rows (8 chars for "thursday", 167 for its SSML, 135 for the whole text);
+  the repeat click was served from the session cache and charged nothing.
+- Exactly one synthesised player renders at a time, and the two offline replays sitting in
+  the table are correctly excluded from the STT meter — 12.82 s charged, not 16.82 s.
+
+A second review pass driven against the running app found four more, all fixed and
+re-verified live. Failure paths were exercised by starting the app with a deliberately
+invalid `AZURE_TTS_VOICE`, which is a cheap way to reach the error branches without
+waiting for a real outage — worth reusing. Omissions were exercised by adding a word to
+the reference text that the recording does not contain; Azure marked it `Omission` itself,
+confirming `enableMiscue` really is honoured in drill mode.
+
+Total spend across all live testing: 64 s of 18,000 STT seconds and 339 of 500,000 TTS
+characters.
+
+Not built: Gemini coaching and its offline fallback, `phoneme_reference.py`, and Mode C
+(unscripted).
 
 ## Known issues
 
@@ -58,6 +82,9 @@ reference-vs-heard diff, and the delivery panel.
 - The captured recording contains no `UnexpectedBreak` / `MissingBreak` / `Monotone`, so
   delivery-fault aggregation is covered by a hand-built payload marked synthetic, not by a
   captured one.
+- The reference text sent to TTS is the *script*, not what was heard, so whole-text
+  playback always renders the intended reading. That is the point, but it means a
+  paragraph's playback does not line up word-for-word with a recording that omitted words.
 
 ## Dead ends
 
@@ -82,6 +109,9 @@ reference-vs-heard diff, and the delivery panel.
   them — the pins in the original design were already stale.
 - **Build parsers against a captured payload, not documentation.** The real Azure response
   differs from the documented shape in ways that fail silently rather than loudly.
+- **Verify SDK surfaces by introspecting the installed package**, not from docs or memory.
+  The `SpeechSynthesizer` default-speaker trap was found by printing the constructor
+  signature in the project image, and it would not have been found by reading a sample.
 - Spend API quota deliberately and say so, not incidentally: two calls captured both
   fixtures, and every guard now also applies to the capture script.
 - **The app runs locally. Deploying it is not a goal** — treat hosting as an option left

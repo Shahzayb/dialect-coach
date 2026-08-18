@@ -124,12 +124,22 @@ def _pron_config(reference_text: str, mode: Mode):
 # --- Error mapping ---------------------------------------------------------------------------
 
 
-def _classify_cancellation(details) -> Exception:
+DEFAULT_BAD_REQUEST_HINT = "Check the reference text and the audio format."
+
+
+def classify_cancellation(details, *, bad_request_hint: str = DEFAULT_BAD_REQUEST_HINT) -> Exception:
     """Turn an Azure cancellation into a retryable or a terminal error, with a real message.
 
     Retrying a 401 only burns time; retrying a 403 quota response can consume more
     allowance for nothing. Both must be distinguishable in the message — "your key is
     wrong" and "your month is gone" need different actions from the user.
+
+    Public, and shared with `tts.py`: a synthesis cancellation carries the same
+    `error_code` / `error_details` attributes and the same `CancellationErrorCode` enum, so
+    one error map serves both. It also keeps `QuotaExhausted` a single type, which is what
+    lets `is_quota_exhausted` drive the budget guard for TTS 403s as well as STT ones.
+    `bad_request_hint` is the one branch that genuinely differs: a malformed recognition is
+    about the audio, a malformed synthesis is about the SSML or the voice name.
     """
     import azure.cognitiveservices.speech as speechsdk
 
@@ -158,8 +168,7 @@ def _classify_cancellation(details) -> Exception:
         )
     if code == speechsdk.CancellationErrorCode.BadRequest:
         return PermanentError(
-            f"Azure rejected the request as malformed. Check the reference text and the "
-            f"audio format. {raw_detail}"
+            f"Azure rejected the request as malformed. {bad_request_hint} {raw_detail}"
         )
     return PermanentError(f"Azure cancelled the request ({code}). {raw_detail}")
 
@@ -208,7 +217,7 @@ def _assess_single_shot(wav_path: str, reference_text: str) -> list[dict[str, An
             "and that the clip is not silence."
         )
     if result.reason == speechsdk.ResultReason.Canceled:
-        raise _classify_cancellation(result.cancellation_details)
+        raise classify_cancellation(result.cancellation_details)
     raise AssessmentError(f"Unexpected recognition result: {result.reason}")
 
 
@@ -239,7 +248,7 @@ def _assess_continuous(wav_path: str, reference_text: str) -> list[dict[str, Any
     def on_canceled(evt) -> None:
         # EndOfStream is the normal way a file-backed session finishes, not a failure.
         if evt.reason != speechsdk.CancellationReason.EndOfStream:
-            failure.append(_classify_cancellation(evt))
+            failure.append(classify_cancellation(evt))
         done.set()
 
     def on_stopped(_evt) -> None:

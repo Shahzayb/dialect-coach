@@ -3,8 +3,12 @@
 ## Architecture
 
 A single-page Streamlit app. `app.py` holds UI only and makes no API calls; it orchestrates
-`speech_analyzer` (Azure), `audio_utils`, `budget`, `db` and `utils`. Still uncreated:
-`ai_coach.py`, `fallback_coach.py`, `phoneme_reference.py`, `tts.py`.
+`speech_analyzer` (Azure STT), `tts` (Azure neural TTS), `audio_utils`, `budget`, `db` and
+`utils`. Still uncreated: `ai_coach.py`, `fallback_coach.py`, `phoneme_reference.py`.
+
+`app.py` also holds the pure rendering helpers — `colour_coded_html`, `reference_vs_heard`,
+`phoneme_pairs`, `delivery_summary`, `severity_key`, `is_flagged` — kept free of Streamlit
+so what the user sees is testable directly rather than only through a headless app run.
 
 `db.py` and `budget.py` are additions to the master plan's §8 file list — it predates both
 the SQLite decision and the decision to derive the meter from it.
@@ -20,7 +24,8 @@ re-recording that spends quota.
 - **Python 3.12**, pinned in `.python-version` and in the Docker base image.
 - **Streamlit 1.61.1** — UI. `st.audio_input` (needs ≥ 1.41) is the intended capture widget;
   `streamlit-audiorecorder` is deliberately not used.
-- **azure-cognitiveservices-speech 1.51.1** — pronunciation assessment. Native library.
+- **azure-cognitiveservices-speech 1.51.1** — pronunciation assessment and neural TTS.
+  Native library.
 - **google-genai 2.18.1** — current Google GenAI SDK (`from google import genai`). The old
   `google-generativeai` package is end-of-life and must not be used.
 - **Gemini model ID: `gemini-3.6-flash`**, verified live 2026-08-17 via `scripts/smoke_test.py`.
@@ -94,11 +99,22 @@ No lint or type-check setup yet.
   wrong on this.
 - **`enableMiscue` is ignored in continuous mode**, so Omission/Insertion for paragraphs are
   diffed locally and marked `error_source: "local_diff"` rather than passed off as Azure's.
+- **`SpeechSynthesizer`'s `audio_config` does not default to `None`.** It defaults to an
+  `AudioOutputConfig` bound to the default speaker, so omitting it makes the container
+  synthesise to a sound device it does not have: no exception, no `audio_data`, and a call
+  that consumed allowance for nothing. `audio_config=None` is what asks for the bytes back.
+  This is the TTS twin of the `apply_to` trap and is just as easy to leave out. Confirmed
+  against live Azure on 2026-08-18: with it, `Riff24Khz16BitMonoPcm` bytes come back and
+  play directly in `st.audio`.
+- **TTS character billing is an estimate that deliberately rounds up.** `tts.payload_for`
+  returns exactly what is sent, and the meter is charged for all of it, SSML markup
+  included. Whether Azure excludes markup is not confirmed; over-counting is the correct
+  direction for a spend guard.
 - Secrets come from environment variables only; never hardcoded, logged, or surfaced in a
   UI error or traceback. `.env` is gitignored and never copied into the image.
 - Required: `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION`, `GEMINI_API_KEY`. The full annotated
-  set, including duration guards and the budget guard, lives in `.env.example`. Nothing
-  reads any of them yet.
+  set, including duration guards and the budget guard, lives in `.env.example`.
+  `GEMINI_API_KEY` and `GEMINI_MODEL` are still unread; `AZURE_TTS_VOICE` is now live.
 
 ## Hosting
 
@@ -142,4 +158,36 @@ the project, and nothing in the app may assume a host. Practical consequences:
 - **`OFFLINE_MODE` bypasses the budget guard and the F0 acknowledgement.** Gating the
   zero-cost path behind a tier confirmation would make it harder to use than the paid one.
 - **Retries count against the meter.** A retry re-uploads the audio and can consume
-  allowance even when it fails, so recorded seconds are multiplied by attempts made.
+  allowance even when it fails, so recorded seconds are multiplied by attempts made. The
+  same rule applies to TTS characters.
+- **The TTS cache is checked before the meter is touched, never after.** Streamlit re-runs
+  the whole script on every widget interaction, so pricing a call ahead of the cache lookup
+  would charge again on each unrelated click and the meter would climb while nothing was
+  synthesised. Both session caches share one LRU (`lru_get` / `lru_put`) for the same
+  reason the assessment cache is LRU: the drill loop re-uses one entry over and over.
+- **"Hear it" is disabled under `OFFLINE_MODE`, not faked.** Synthesis is a live call by
+  definition and there is no audio fixture to replay the way there is for an assessment;
+  a silent placeholder would be a confusing thing to build in. `OFFLINE_MODE` keeps its
+  absolute meaning — no network call, ever — and `tts.synthesise` refuses independently of
+  the UI so no code path can slip past it.
+- **The voice comes from `AZURE_TTS_VOICE` only, with no UI picker.** The cache key is
+  already `(voice, text, slow)`, so adding a picker later changes no stored shape.
+- **Nothing renders an alert from inside an `st.columns` entry.** A function called within
+  `with column:` appends its output to that column, so an `st.error` emitted there is laid
+  out at the button's width — measured live at 124 px inside a 672 px row, a couple of
+  hundred characters of message at one word per line. `play()` therefore *returns* an
+  (icon, message) pair and the caller renders it after the columns close. Any future
+  helper called from inside a column needs the same treatment.
+- **A paid call that fails after retries is still metered.** `tts.synthesise` takes an
+  `on_attempt` hook precisely because the exception carries no attempt count: when every
+  attempt fails there is no `Synthesis` to read `attempts` from, but the text reached Azure
+  each time and may have been charged. The pre-flight prices
+  `payload × MAX_SYNTHESIS_ATTEMPTS` for the same reason — pricing one attempt would let
+  the guard approve a call whose real charge lands past the budget.
+- **Colour-coded text is HTML, not Streamlit's `:red[…]` markdown.** Only an attribute can
+  carry the score on hover, which §11 asks for. Both the word and the title are escaped —
+  they come from the reference textarea. Colours are set as text and border colours, never
+  as a background, so they survive both Streamlit themes.
+- **The colour-coded block is built from the aligned word list, not the reference string**,
+  because that is what carries the scores — so punctuation and capitalisation are not
+  reproduced there. The verbatim text stays visible in the diff panel above it.
