@@ -2,29 +2,22 @@
 
 ## Current focus
 
-Building the app one chunk at a time. The diagnosis is now legible and audible; turning it
-into coaching is the thing the tool still does not do.
+Building the app one chunk at a time. The diagnosis is legible and audible, and the
+coaching layer now turns it into something to practise. What remains is Mode C
+(unscripted).
 
 ## Next concrete step
 
-**The coaching layer** — master plan §7: `phoneme_reference.py`, `fallback_coach.py`,
-`ai_coach.py`. Deferred until now on the user's explicit instruction, so that it would be
-built on top of a legible diagnosis rather than underneath one. Nothing blocks it:
-`db.attach_coaching` and the `gemini_raw_json` / `coach_source` columns have existed since
-schema version 1, so it is an UPDATE and not a migration.
-
-Order worth keeping when it is planned: `phoneme_reference.py` and `fallback_coach.py`
-first, `ai_coach.py` second. The master plan is explicit that the fallback "must be good
-enough to use permanently" because the free Gemini tier will run out — which makes it the
-primary path, not the degraded one, and it is fully testable offline against the committed
-fixture. `GEMINI_API_KEY` and `GEMINI_MODEL` are still unread by any code.
-
-Two things to re-verify rather than recall when that chunk starts: the Gemini model ID
-(`gemini-3.6-flash` was live on 2026-08-17 and these retire without much notice), and
-`response_schema` support in google-genai 2.18.1.
+**Mode C (unscripted speech)** — free speech scored on vocabulary, grammar and topic, not
+just a script. Blocked on a real question, not busywork: `enable_content_assessment_with_topic`
+does not exist in SDK 1.51.1 despite the master plan citing it (see Dead ends below), so
+Mode C's content scoring needs another route found and verified before it can be planned.
+`UNSCRIPTED_TWO_PASS` is defined and priced by `budget.passes_for` but unread by any
+recognition code yet.
 
 ## Active plan
 
+`plans/2026-08-18_coaching-layer.md` — complete.
 `plans/2026-08-18_legible-audible-diagnosis.md` — complete.
 `plans/2026-08-18_azure-analysis-core.md` — complete.
 `plans/2026-08-17_project-scaffold.md` — complete.
@@ -68,8 +61,35 @@ confirming `enableMiscue` really is honoured in drill mode.
 Total spend across all live testing: 64 s of 18,000 STT seconds and 339 of 500,000 TTS
 characters.
 
-Not built: Gemini coaching and its offline fallback, `phoneme_reference.py`, and Mode C
-(unscripted).
+**The coaching layer** turns the diagnosis into a report: 2-3 sentences on the attempt, up
+to three priority fixes (expected → produced, affected words, why it matters, articulation,
+minimal pairs), stress-and-rhythm issues with a drill, and a five-minute practice plan
+naming specific words from the attempt. Rendered directly under the metric row — what to do
+before the evidence for it — with the top fixes as bordered cards, never a raw model text
+blob. The offline coach (`fallback_coach`) writes it for free on every assessment, with no
+key and no network; "✨ Improve this with Gemini" is a button that spends one free-tier call
+and replaces it in place, with a caption stating up front that a click sends the compacted
+analysis and the reference text to Google, never the audio. A visible caption always says
+which coach wrote the report on screen.
+
+Verified live on 2026-08-18 with `scripts/coach_test.py`, which spends no Azure quota (it
+replays the committed fixture the way `OFFLINE_MODE` does) and one real Gemini call: the
+schema was honoured, no phoneme absent from the Azure data survived into the report, the
+~39 kB raw response compacted to ~1.8 kB sent, and the stored payload re-parsed back into
+the same report. The exit criterion — a complete, useful report with `GEMINI_API_KEY`
+deliberately unset — was verified in a running container via the browser tool: uploading
+the captured recording and assessing it against its own reference text produced the full
+report, correctly naming `/θ/ → /s/` on "thursday" as the flagship fix, entirely offline.
+
+One thing the browser check caught that the offline test suite could not: a click on
+"Improve this with Gemini" is handled in the same Streamlit rerun that renders the button,
+so the on-screen button still shows as enabled until the *next* rerun — a second click
+before then would have bought a second call. Fixed by moving the spend guard into
+`coaching_for` itself (`already_asked`), not left on the button's `disabled` flag alone.
+
+`make test` is 247 tests, all offline with no keys and no network.
+
+Not built: Mode C (unscripted).
 
 ## Known issues
 

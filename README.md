@@ -8,13 +8,16 @@ which sound in which word failed and what was produced instead.
 Personal training tool, not a product. It runs locally. Diagnostic specificity over polish:
 no accounts, no persistent audio storage.
 
-**Status: the diagnosis works, the coaching does not.** You can record or upload a drill
+**Status: the diagnosis and the coaching both work.** You can record or upload a drill
 sentence or a paragraph and get real Azure scores down to the phoneme, rendered as
 colour-coded reference text, a script-versus-heard diff, and a card per flagged word naming
 the sound you actually produced in place of the target — plus "Hear it" playback of a native
-rendering, at normal speed or slowed, next to your own recording. Every attempt is kept in a
-local SQLite file. Not built yet: the Gemini coaching report and its offline fallback, and
-unscripted mode.
+rendering, at normal speed or slowed, next to your own recording. Under it, a coaching
+report names the top substitutions worth practising, with articulation notes and minimal
+pairs, built from the Azure data alone and free on every attempt; a button offers to spend
+one Gemini call improving it, and never fabricates a sound the Azure data did not report.
+Every attempt, and whichever coach wrote about it, is kept in a local SQLite file. Not
+built yet: unscripted mode.
 
 ## Running it — Docker (preferred)
 
@@ -59,8 +62,8 @@ container start if present.
 | --- | --- | --- |
 | `AZURE_SPEECH_KEY` | yes | Azure Speech resource key (**F0** tier) |
 | `AZURE_SPEECH_REGION` | yes | Azure Speech resource region |
-| `GEMINI_API_KEY` | not yet | Coaching model — not read until the coaching chunk lands |
-| `GEMINI_MODEL` | no | Model ID override, so it can be swapped without a code change |
+| `GEMINI_API_KEY` | no | Coaching model. Without it, or under `OFFLINE_MODE`, coaching still works — the offline coach writes the report instead |
+| `GEMINI_MODEL` | no | Model ID override, so it can be swapped without a code change (default `gemini-3.6-flash`) |
 | `AZURE_TTS_VOICE` | no | en-US neural voice for "Hear it" playback (default `en-US-BrianNeural`) |
 | `MIN_DURATION_SECONDS`, `MAX_DURATION_SECONDS_*` | no | Recording length guards |
 | `UNSCRIPTED_TWO_PASS` | not yet | Two-pass unscripted assessment; counted by the budget guard, but Mode C is not built |
@@ -132,9 +135,10 @@ Be clear-eyed about this rather than reassured:
   There is no local-only mode that still scores pronunciation.
 - Azure Speech logging can be disabled in the resource's settings, under
   [data logging](https://learn.microsoft.com/azure/ai-services/speech-service/logging-audio-transcription).
-- Once coaching lands, free-tier Gemini prompts and responses **may be used by Google to
-  improve their products**. Only the compacted analysis would be sent — never the audio —
-  but the reference text is part of it.
+- Coaching is **opt-in per attempt**: the report is written by the offline coach, free,
+  every time. Only clicking "Improve this with Gemini" sends anything to Google — the
+  compacted analysis and the reference text, never the audio — and free-tier prompts and
+  responses **may be used by Google to improve their products**.
 
 ## Hosting it somewhere (optional)
 
