@@ -21,3 +21,8 @@ python-dotenv==1.2.3
 
 # Structured-output schemas for the coaching model.
 pydantic==2.13.4
+
+# Test runner. In the one manifest rather than a separate requirements-dev.txt: the image
+# is a local dev container now that hosting is not a goal, and a second manifest is a
+# second thing to drift. Verified against PyPI 2026-08-18.
+pytest==9.1.1
