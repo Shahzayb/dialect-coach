@@ -12,7 +12,11 @@ import os
 import pytest
 from streamlit.testing.v1 import AppTest
 
+import app as app_module
+import db
+import fallback_coach
 import speech_analyzer as sa
+import utils
 from tests.conftest import ROOT
 from utils import Mode
 
@@ -114,18 +118,23 @@ def test_presets_contain_no_digits() -> None:
 # --- Result rendering ---------------------------------------------------------------------
 
 
-def seed_result(app: AppTest, assessment) -> AppTest:
+def seed_result(app: AppTest, assessment, *, attempt_id: int | None = None,
+                mode: Mode = Mode.DRILL) -> AppTest:
     """Put an assessment in the session cache the way a successful run would.
 
-    Entries are (assessment, reference_text) so the panel renders the text the scores were
-    computed against rather than whatever is in the textarea now.
+    The reference text, the row id and the mode travel with it because the widgets that
+    produced them can all be changed without re-running anything — the panel has to render
+    the text the scores were computed against, not whatever is in the textarea now.
     """
     from collections import OrderedDict
 
-    import utils
-
     key = utils.attempt_hash(REFERENCE, b"audio")
-    app.session_state["assessments"] = OrderedDict({key: (assessment, REFERENCE)})
+    app.session_state["assessments"] = OrderedDict({
+        key: app_module.CachedAttempt(
+            key=key, assessment=assessment, reference_text=REFERENCE,
+            attempt_id=attempt_id, mode=mode,
+        )
+    })
     app.session_state["last_key"] = key
     return app.run()
 
@@ -382,3 +391,72 @@ def test_omitted_words_still_offer_playback(run_app) -> None:
     assert not app.exception
     assert any("Hear it" in b.label for b in app.button)
     assert any("did not say this one" in c.value for c in app.caption)
+
+
+# --- Coaching ---------------------------------------------------------------------------------
+
+
+def test_the_coaching_report_renders_without_a_key(run_app) -> None:
+    """The exit criterion: no GEMINI_API_KEY, and the app still says what to work on."""
+    app = seed_result(run_app(), offline_assessment())
+    assert not app.exception
+    headings = [h.value for h in app.subheader]
+    assert "What to work on" in headings
+    body = " ".join(m.value for m in app.markdown)
+    assert "/θ/" in body and "/s/" in body, "the top fix names the substitution"
+    assert "Drill these pairs" in body
+    assert "Practice plan" in body
+
+
+def test_a_visible_note_says_which_coach_wrote_it(run_app) -> None:
+    app = seed_result(run_app(), offline_assessment())
+    captions = " ".join(c.value for c in app.caption)
+    assert "offline coach" in captions
+    assert "nothing sent anywhere" in captions.lower()
+
+
+def test_the_gemini_button_is_disabled_offline_and_says_why(run_app) -> None:
+    app = seed_result(run_app(), offline_assessment())
+    button = next(b for b in app.button if "Gemini" in b.label)
+    assert button.disabled
+    assert any("OFFLINE_MODE" in c.value for c in app.caption)
+
+
+def test_the_button_says_what_a_click_sends(run_app, monkeypatch) -> None:
+    """Free-tier prompts may be used to improve Google's products — that is a choice."""
+    # Replay the fixture *before* going online — with OFFLINE_MODE off, analyse() would
+    # try to open a recording and call Azure for real.
+    assessment = offline_assessment()
+    monkeypatch.setenv("OFFLINE_MODE", "false")
+    monkeypatch.setenv("GEMINI_API_KEY", "placeholder-not-a-real-key")
+    monkeypatch.setenv("AZURE_SPEECH_KEY", "placeholder")
+    monkeypatch.setenv("AZURE_SPEECH_REGION", "eastus")
+    monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
+    app = seed_result(run_app(), assessment)
+    captions = " ".join(c.value for c in app.caption)
+    assert "never your audio" in captions.lower()
+    assert "Google" in captions
+
+
+def test_the_report_is_attached_to_the_attempt_row_it_describes(run_app, tmp_path) -> None:
+    """Stored verbatim, so changing what this panel shows later is a re-parse."""
+    conn = db.connect(str(tmp_path / "coach.db"))
+    attempt_id = db.record_attempt(
+        conn, mode=Mode.DRILL, reference_text=REFERENCE, recognised_text="x",
+        audio_seconds=1.0, audio_sha256="deadbeef", overall_scores={}, azure_raw={},
+        offline=True,
+    )
+    seed_result(run_app(), offline_assessment(), attempt_id=attempt_id)
+
+    row = db.get_attempt(conn, attempt_id)
+    assert row["coach_source"] == fallback_coach.SOURCE_FALLBACK
+    assert row["gemini_raw_json"], "the report itself is stored on the offline path"
+
+
+def test_the_report_is_not_rebuilt_on_every_rerun(run_app) -> None:
+    """Streamlit re-runs the whole script on every click; a model call here would re-spend."""
+    app = seed_result(run_app(), offline_assessment())
+    cached = app.session_state["coaching"]
+    assert len(cached) == 1
+    app.run()
+    assert app.session_state["coaching"] is cached

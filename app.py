@@ -3,10 +3,15 @@
 UI only. Every API call lives in `speech_analyzer` and `tts`, every write in `db`, every
 spend decision in `budget` — this file orchestrates them and renders the result.
 
-The rendering aims at one thing: making the diagnosis legible and audible. Colour-coded
-reference text, the reference-vs-heard diff, expected → produced IPA per flagged word, the
-delivery panel, and "Hear it" playback against your own recording. The coaching report is
-its own chunk of work and is not here.
+The rendering aims at one thing: making the diagnosis legible, audible and actionable.
+Colour-coded reference text, the reference-vs-heard diff, expected → produced IPA per
+flagged word, the delivery panel, "Hear it" playback against your own recording, and the
+coaching report on top of all of it.
+
+The coaching report is always present and always free: `fallback_coach` builds it from the
+Azure data alone. Asking Gemini to improve on it is a button, not a side effect of
+assessing — a click is the point at which anything is sent to Google, and the point at
+which the free tier's daily allowance is spent.
 """
 
 from __future__ import annotations
@@ -16,13 +21,16 @@ import html
 import logging
 import sqlite3
 from collections import OrderedDict
+from dataclasses import dataclass
 from typing import Any
 
 import streamlit as st
 
+import ai_coach
 import audio_utils
 import budget
 import db
+import fallback_coach
 import speech_analyzer
 import tts
 import utils
@@ -148,14 +156,30 @@ def _session_cache(name: str) -> "OrderedDict[Any, Any]":
     return st.session_state[name]
 
 
-def _cache_get(key: str) -> tuple | None:
+@dataclass(frozen=True)
+class CachedAttempt:
+    """One assessed attempt, as the session remembers it.
+
+    The reference text, the database row and the mode travel with the assessment because
+    every widget that produced them is free to change underneath: the textarea can be
+    edited and the mode radio flipped without re-running anything. Rendering the live
+    widget values beside the previous attempt's scores would be a quiet lie, and the row id
+    is what lets the coaching report be attached to the attempt it was written about.
+    """
+
+    key: str
+    assessment: Any
+    reference_text: str
+    attempt_id: int | None
+    mode: Mode
+
+
+def _cache_get(key: str) -> CachedAttempt | None:
     return lru_get(_session_cache("assessments"), key)
 
 
-def _cache_put(key: str, assessment: Any, reference_text: str) -> None:
-    """The reference text is stored alongside the result — rendering the live textarea
-    would otherwise show freshly edited text beside scores from the previous version."""
-    lru_put(_session_cache("assessments"), key, (assessment, reference_text), CACHE_LIMIT)
+def _cache_put(entry: CachedAttempt) -> None:
+    lru_put(_session_cache("assessments"), entry.key, entry, CACHE_LIMIT)
 
 
 # --- Pure rendering helpers -----------------------------------------------------------------
@@ -440,18 +464,24 @@ def validate_reference(text: str) -> bool:
 
 
 def run_assessment(conn: sqlite3.Connection, audio: bytes, reference_text: str, mode: Mode):
-    """Convert, guard, assess, and store. Returns the Assessment, or None on a handled error."""
+    """Convert, guard, assess, and store.
+
+    Returns (Assessment, row id), or (None, None) on a handled error. The row id matters:
+    the coaching report is attached to that row later, and `db.attach_coaching` is an
+    UPDATE — the columns have existed since schema version 1 precisely so it is not a
+    migration.
+    """
     try:
         wav_bytes, seconds = audio_utils.prepare(audio, mode)
     except audio_utils.AudioError as exc:
         st.error(str(exc), icon="🎙️")
-        return None
+        return None, None
 
     try:
         budget.preflight_stt(conn, seconds, mode)
     except budget.BudgetError as exc:
         st.error(str(exc), icon="💸")
-        return None
+        return None, None
 
     try:
         with st.spinner(f"Assessing {seconds:.0f}s of audio…"):
@@ -459,7 +489,7 @@ def run_assessment(conn: sqlite3.Connection, audio: bytes, reference_text: str, 
                 assessment = speech_analyzer.analyse(wav_path, reference_text, mode)
     except speech_analyzer.NoSpeechDetected as exc:
         st.warning(str(exc), icon="🤫")
-        return None
+        return None, None
     except (utils.PermanentError, utils.TransientError, speech_analyzer.AssessmentError) as exc:
         if speech_analyzer.is_quota_exhausted(exc):
             # Azure is authoritative; block the rest of the month regardless of the meter.
@@ -467,12 +497,12 @@ def run_assessment(conn: sqlite3.Connection, audio: bytes, reference_text: str, 
         # redact() rather than str(): SDK error details can echo request context.
         st.error(utils.redact(str(exc)), icon="🚫")
         logger.error("Assessment failed", exc_info=True)
-        return None
+        return None, None
     except utils.ConfigError as exc:
         st.error(str(exc), icon="🔑")
-        return None
+        return None, None
 
-    db.record_attempt(
+    attempt_id = db.record_attempt(
         conn,
         mode=mode,
         reference_text=reference_text,
@@ -485,7 +515,7 @@ def run_assessment(conn: sqlite3.Connection, audio: bytes, reference_text: str, 
         azure_raw=assessment.raw if len(assessment.raw) > 1 else assessment.raw[0],
         offline=assessment.offline,
     )
-    return assessment
+    return assessment, attempt_id
 
 
 # --- Result rendering --------------------------------------------------------------------------
@@ -501,6 +531,131 @@ def render_scores(assessment) -> None:
     ):
         with column:
             _metric(label, scores.get(key))
+
+
+# --- Coaching ------------------------------------------------------------------------------------
+
+
+def coaching_for(
+    conn: sqlite3.Connection, entry: CachedAttempt, *, ask_model: bool
+) -> tuple[Any, str]:
+    """The report for this attempt, and which coach wrote it.
+
+    The session cache is checked before anything is produced, for the same reason the TTS
+    cache is: Streamlit re-runs this script top to bottom on every widget interaction, and
+    a model call sitting in the render path would be spent again on each unrelated click.
+    The offline report is cheap to rebuild but is cached too, so the row is written once
+    rather than on every rerun.
+    """
+    cache = _session_cache("coaching")
+    cached = lru_get(cache, entry.key)
+    if cached is not None and not ask_model:
+        return cached
+
+    if ask_model:
+        with st.spinner("Asking Gemini for a second opinion…"):
+            result = ai_coach.coach(entry.assessment, entry.reference_text, entry.mode)
+    else:
+        report = fallback_coach.build(entry.assessment, entry.mode)
+        result = ai_coach.CoachingResult(
+            report=report, source=fallback_coach.SOURCE_FALLBACK, raw=report.model_dump()
+        )
+
+    lru_put(cache, entry.key, (result.report, result.source), CACHE_LIMIT)
+    if entry.attempt_id:
+        # Verbatim, exactly as the Azure response is stored: changing what this panel shows
+        # later is then a re-parse of a stored row rather than another call.
+        db.attach_coaching(
+            conn, entry.attempt_id, gemini_raw=result.raw, coach_source=result.source
+        )
+    return result.report, result.source
+
+
+def render_fix(fix: Any, rank: int) -> None:
+    """One priority fix, rendered to dominate the page. Never a raw model blob."""
+    with st.container(border=True):
+        st.markdown(
+            f'<div style="font-size:1.7rem;font-weight:700;line-height:1.3;">'
+            f'{rank}. /{html.escape(fix.expected_phoneme)}/ '
+            f'<span style="opacity:0.55;">→</span> '
+            f'/{html.escape(fix.produced_phoneme)}/</div>',
+            unsafe_allow_html=True,
+        )
+        if fix.affected_words:
+            st.caption("In this attempt: " + ", ".join(fix.affected_words))
+        if fix.why_it_matters:
+            st.markdown(fix.why_it_matters)
+        if fix.articulation:
+            st.markdown(f"**How to make it** — {fix.articulation}")
+        if fix.minimal_pairs:
+            pairs = " · ".join(f"**{pair.a}** / {pair.b}" for pair in fix.minimal_pairs)
+            st.markdown(f"**Drill these pairs** — {pairs}")
+
+
+def render_coaching(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
+    """The report, with the button that offers to spend a Gemini call improving it.
+
+    The button is created before the report is rendered, so the click and the answer land
+    in the same rerun rather than showing the previous report for one pass.
+    """
+    st.subheader("What to work on")
+
+    _, cached_source = lru_get(_session_cache("coaching"), entry.key) or (None, None)
+    usable, reason = ai_coach.available()
+
+    asked = st.button(
+        "✨ Improve this with Gemini",
+        key=f"coach-{entry.key}",
+        disabled=not usable or cached_source == fallback_coach.SOURCE_GEMINI,
+        help="One free-tier call. The report below is already complete without it.",
+    )
+    if usable:
+        st.caption(
+            "Sends the compacted analysis and your reference text to Google — never your "
+            "audio. Free-tier prompts and responses may be used to improve Google's "
+            "products, so this is a click rather than something every assessment does."
+        )
+    else:
+        st.caption(reason)
+
+    report, source = coaching_for(conn, entry, ask_model=asked)
+
+    if asked and source == fallback_coach.SOURCE_FALLBACK:
+        st.info(
+            "Gemini could not be reached, or answered with something the Azure data did "
+            "not support. The report below is the offline one, unchanged.",
+            icon="🛟",
+        )
+
+    if source == fallback_coach.SOURCE_GEMINI:
+        st.caption(
+            f"Written by {ai_coach.model_name()} from the Azure findings, then checked "
+            f"against them — any sound it named that Azure did not report was removed."
+        )
+    else:
+        st.caption(
+            "Written from the Azure data alone by the offline coach. No key, no network, "
+            "and nothing sent anywhere."
+        )
+
+    st.markdown(report.overall_comment)
+
+    if report.priority_fixes:
+        for rank, fix in enumerate(report.priority_fixes, start=1):
+            render_fix(fix, rank)
+    else:
+        st.info("No single sound substitution stood out in that attempt.", icon="✅")
+
+    if report.stress_and_rhythm.issues or report.stress_and_rhythm.drill:
+        st.markdown("**Stress and rhythm**")
+        for issue in report.stress_and_rhythm.issues:
+            st.markdown(f"- {issue}")
+        if report.stress_and_rhythm.drill:
+            st.markdown(f"*Drill:* {report.stress_and_rhythm.drill}")
+
+    if report.practice_plan:
+        st.markdown("**Practice plan**")
+        st.markdown(report.practice_plan)
 
 
 def render_diff(assessment, reference_text: str) -> None:
@@ -618,8 +773,11 @@ def render_delivery(assessment) -> None:
         )
 
 
-def render_result(conn: sqlite3.Connection, assessment, reference_text: str, source) -> None:
+def render_result(conn: sqlite3.Connection, entry: CachedAttempt, source) -> None:
+    assessment, reference_text = entry.assessment, entry.reference_text
     render_scores(assessment)
+    # Directly under the scores: what to do about them comes before the evidence for them.
+    render_coaching(conn, entry)
     render_diff(assessment, reference_text)
     render_colour_coded(assessment)
 
@@ -652,8 +810,6 @@ def render_result(conn: sqlite3.Connection, assessment, reference_text: str, sou
             render_word_card(conn, word, index)
 
     render_delivery(assessment)
-
-    st.caption("The coaching report is still to come.")
 
 
 def render() -> None:
@@ -694,11 +850,14 @@ def render() -> None:
             key = utils.attempt_hash(reference_text, audio_bytes)
             cached = _cache_get(key)
             if cached is None:
-                assessment = run_assessment(conn, audio_bytes, reference_text, mode)
+                assessment, attempt_id = run_assessment(conn, audio_bytes, reference_text, mode)
                 if assessment is not None:
-                    _cache_put(key, assessment, reference_text)
+                    _cache_put(CachedAttempt(
+                        key=key, assessment=assessment, reference_text=reference_text,
+                        attempt_id=attempt_id, mode=mode,
+                    ))
             else:
-                assessment = cached[0]
+                assessment = cached.assessment
             st.session_state["last_key"] = key if assessment is not None else None
             # A fresh result must not open with the previous attempt's word still queued.
             st.session_state["now_playing"] = None
@@ -707,9 +866,8 @@ def render() -> None:
     if last_key:
         cached = _cache_get(last_key)
         if cached is not None:
-            assessment, assessed_text = cached
             st.divider()
-            render_result(conn, assessment, assessed_text, source)
+            render_result(conn, cached, source)
 
     st.divider()
     st.caption(budget.summary_line(conn))
