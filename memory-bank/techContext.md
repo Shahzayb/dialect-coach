@@ -2,12 +2,18 @@
 
 ## Architecture
 
-A single-page Streamlit app. `app.py` is the only source file so far and holds UI only — it
-renders a placeholder page and makes no API calls. The intended split keeps every API call
-out of `app.py`: separate modules for Azure assessment, the coaching model, the offline
-fallback coach, TTS, audio conversion, and shared utilities. None of those exist yet.
+A single-page Streamlit app. `app.py` holds UI only and makes no API calls; it orchestrates
+`speech_analyzer` (Azure), `audio_utils`, `budget`, `db` and `utils`. Still uncreated:
+`ai_coach.py`, `fallback_coach.py`, `phoneme_reference.py`, `tts.py`.
 
-No database, no accounts, no persistent audio storage.
+`db.py` and `budget.py` are additions to the master plan's §8 file list — it predates both
+the SQLite decision and the decision to derive the meter from it.
+
+Local SQLite history, no accounts, no persistent audio storage. One row per attempt holding
+**both raw API responses verbatim** (`azure_raw_json`, and `gemini_raw_json` created NULL
+for the coaching chunk), the normalised scores, and a SHA-256 of the audio — never the
+audio itself. Storing responses whole means changing what the UI shows is a re-parse, not a
+re-recording that spends quota.
 
 ## Technologies
 
@@ -23,10 +29,15 @@ No database, no accounts, no persistent audio storage.
   live call rather than recalling a model ID; these retire without much notice.
 - **pydub 0.25.1** + system `ffmpeg` — audio conversion.
 - **python-dotenv 1.2.3**, **pydantic 2.13.4**.
-- **SQLite** via the stdlib `sqlite3` — chosen 2026-08-17, not yet built. No dependency to
-  pin and no second service. It persists for free under the existing bind mount, since the
-  project directory is the host's; a database file under it survives `docker compose down`.
-  What gets stored is not decided yet.
+- **SQLite** via the stdlib `sqlite3` — built 2026-08-18. No dependency to pin and no second
+  service. It persists for free under the existing bind mount, since the project directory
+  is the host's; a database file under it survives `docker compose down`. Schema version is
+  tracked with `PRAGMA user_version`; `DB_PATH` defaults to `./data/coach.db`.
+- **pytest 9.1.1** — verified against PyPI 2026-08-18. In `requirements.txt` rather than a
+  separate dev manifest, since the image is a local dev container and one manifest cannot
+  drift. Collection is scoped to `tests/` in `pytest.ini`, because `scripts/smoke_test.py`
+  and `scripts/pronunciation_test.py` have `test_`-prefixed functions that make real,
+  billable API calls and pytest would otherwise collect them.
 
 All pins in `requirements.txt` are exact `==`, verified against PyPI on 2026-08-17. Ranges
 are rejected: an unattended free-tier rebuild must produce the same image next month.
@@ -47,8 +58,16 @@ installed globally.
 Verified in the container: Python 3.12.14, and `streamlit`, `pydub`, `pydantic`, `dotenv`,
 `audioop`, `azure.cognitiveservices.speech`, `google.genai` all import.
 
-No tests, lint, or type-check setup yet — and therefore no `pytest` pin. The test suite is
-blocked on a committed Azure response fixture, which the parsing work owns.
+`make test` runs the suite in the container. It runs fully offline: `tests/conftest.py`
+forces `OFFLINE_MODE=true`, clears the API keys, and marks dotenv as already-loaded — the
+last one matters because `.env` is bind-mounted, so without it a real `.env` would silently
+re-supply the keys the fixture just cleared and the suite would behave differently on a
+machine with credentials. Rebuild (`docker compose build`) after a `requirements.txt`
+change or the image has no pytest.
+
+`tests/fixtures/` holds two verbatim Azure responses captured once from a real recording,
+which is what lets parsing, colouring, and coaching be developed without spending quota.
+No lint or type-check setup yet.
 
 ## Technical constraints
 
@@ -62,6 +81,19 @@ blocked on a committed Azure response fixture, which the parsing work owns.
   Running locally does not change this — the APIs are remote either way. Creating an Azure
   **S0** resource by mistake is the only way this project costs money.
 - Target locale is **en-US** — prosody assessment supports nothing else.
+- **`enable_content_assessment_with_topic` does not exist in SDK 1.51.1.** The master plan
+  says it arrived in 1.33; it is on neither `PronunciationAssessmentConfig` nor the module.
+  Mode C's content scoring has to find another route — verify before planning that chunk.
+- **The SDK's JSON nests `ErrorType` and `Feedback` inside each word's
+  `PronunciationAssessment`**, not at the word's top level as the docs' flat REST example
+  shows. Reading `word["ErrorType"]` returns nothing and every word parses as clean — a
+  silent failure that looks like a perfect score. The parser reads both shapes.
+- **Delivery problems are not `ErrorType` values.** `UnexpectedBreak` / `MissingBreak` /
+  `Monotone` live under `Feedback.Prosody` in `Break.ErrorTypes` and
+  `Intonation.ErrorTypes`; `ErrorType` carries only the miscue kinds. Master plan §5 is
+  wrong on this.
+- **`enableMiscue` is ignored in continuous mode**, so Omission/Insertion for paragraphs are
+  diffed locally and marked `error_source: "local_diff"` rather than passed off as Azure's.
 - Secrets come from environment variables only; never hardcoded, logged, or surfaced in a
   UI error or traceback. `.env` is gitignored and never copied into the image.
 - Required: `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION`, `GEMINI_API_KEY`. The full annotated
@@ -95,8 +127,19 @@ the project, and nothing in the app may assume a host. Practical consequences:
   second container and a named volume for nothing, and DuckDB's analytical edge does not
   show up at a few hundred rows. Revisit only if the data ever needs to be reachable from
   outside the container.
-- When persistence is built, two Streamlit-specific traps apply: the script re-runs on
-  every widget interaction, so the connection belongs behind `@st.cache_resource` rather
-  than being reopened per rerun, and it needs `check_same_thread=False`. Using
-  `st.connection("sql")` instead would add SQLAlchemy — a dependency SQLite does not
-  otherwise need.
+- Both Streamlit persistence traps are handled: the connection lives behind
+  `@st.cache_resource` in `app.py` (the script re-runs on every widget interaction) and
+  `db.connect` sets `check_same_thread=False`. `st.connection("sql")` was rejected — it
+  would add SQLAlchemy, a dependency SQLite does not otherwise need. `db.py` never imports
+  Streamlit, so tests and scripts can use it.
+- **The usage meter is derived from the attempts table**, not a `.usage.json` file;
+  `BUDGET_STATE_PATH` was dropped. One store cannot disagree with itself.
+- **Mode B scores are duration-weighted, never naively averaged**, and completeness is
+  recomputed globally from the local omission diff — Azure scores each utterance against
+  the *whole* reference, so averaging would report a five-utterance paragraph as ~20%
+  complete. `pron_score` as a weighted average is an approximation: Azure's composite
+  weighting is not published.
+- **`OFFLINE_MODE` bypasses the budget guard and the F0 acknowledgement.** Gating the
+  zero-cost path behind a tier confirmation would make it harder to use than the paid one.
+- **Retries count against the meter.** A retry re-uploads the audio and can consume
+  allowance even when it fails, so recorded seconds are multiplied by attempts made.
