@@ -460,3 +460,73 @@ def test_the_report_is_not_rebuilt_on_every_rerun(run_app) -> None:
     assert len(cached) == 1
     app.run()
     assert app.session_state["coaching"] is cached
+
+
+def test_clicking_the_button_swaps_the_models_report_in(run_app, monkeypatch, tmp_path) -> None:
+    """The click path, without a live call: app.py and this test share one ai_coach module."""
+    import ai_coach
+
+    assessment = offline_assessment()
+    conn = db.connect(str(tmp_path / "coach.db"))
+    attempt_id = db.record_attempt(
+        conn, mode=Mode.DRILL, reference_text=REFERENCE, recognised_text="x",
+        audio_seconds=1.0, audio_sha256="deadbeef", overall_scores={}, azure_raw={},
+        offline=True,
+    )
+
+    improved = fallback_coach.build(assessment, Mode.DRILL).model_copy(
+        update={"overall_comment": "A second opinion from the model."}
+    )
+    monkeypatch.setattr(ai_coach, "coach", lambda *a, **k: ai_coach.CoachingResult(
+        report=improved, source=fallback_coach.SOURCE_GEMINI,
+        raw={"candidates": [{"content": {"parts": [{"text": improved.model_dump_json()}]}}]},
+    ))
+    monkeypatch.setenv("OFFLINE_MODE", "false")
+    monkeypatch.setenv("GEMINI_API_KEY", "placeholder-not-a-real-key")
+    monkeypatch.setenv("AZURE_SPEECH_KEY", "placeholder")
+    monkeypatch.setenv("AZURE_SPEECH_REGION", "eastus")
+    monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
+
+    app = seed_result(run_app(), assessment, attempt_id=attempt_id)
+    button = next(b for b in app.button if "Gemini" in b.label)
+    assert not button.disabled
+    app = button.click().run()
+
+    assert not app.exception
+    assert any("second opinion from the model" in m.value for m in app.markdown)
+    assert any(ai_coach.model_name() in c.value for c in app.caption)
+    assert db.get_attempt(conn, attempt_id)["coach_source"] == fallback_coach.SOURCE_GEMINI
+
+
+def test_a_second_click_cannot_spend_another_call(run_app, monkeypatch, tmp_path) -> None:
+    """Once the model has answered for this attempt, the button is spent."""
+    import ai_coach
+
+    assessment = offline_assessment()
+    report = fallback_coach.build(assessment, Mode.DRILL)
+    calls: list[int] = []
+
+    def once(*args, **kwargs):
+        calls.append(1)
+        return ai_coach.CoachingResult(
+            report=report, source=fallback_coach.SOURCE_GEMINI, raw=report.model_dump()
+        )
+
+    monkeypatch.setattr(ai_coach, "coach", once)
+    monkeypatch.setenv("OFFLINE_MODE", "false")
+    monkeypatch.setenv("GEMINI_API_KEY", "placeholder-not-a-real-key")
+    monkeypatch.setenv("AZURE_SPEECH_KEY", "placeholder")
+    monkeypatch.setenv("AZURE_SPEECH_REGION", "eastus")
+    monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
+
+    app = seed_result(run_app(), assessment)
+    app = next(b for b in app.button if "Gemini" in b.label).click().run()
+    assert len(calls) == 1
+
+    # The click is handled in the pass that rendered the button, so the button on screen is
+    # still enabled: clicking it again must cost nothing rather than buying a second call.
+    app = next(b for b in app.button if "Gemini" in b.label).click().run()
+    assert len(calls) == 1, "a second click must not re-spend"
+    assert next(b for b in app.button if "Gemini" in b.label).disabled
+    app.run()
+    assert len(calls) == 1, "and neither must an unrelated rerun"

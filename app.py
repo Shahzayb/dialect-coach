@@ -549,7 +549,12 @@ def coaching_for(
     """
     cache = _session_cache("coaching")
     cached = lru_get(cache, entry.key)
-    if cached is not None and not ask_model:
+    already_asked = cached is not None and cached[1] == fallback_coach.SOURCE_GEMINI
+    if cached is not None and (not ask_model or already_asked):
+        # `already_asked` is not redundant with the button's disabled flag. The click is
+        # handled in the same pass that rendered the button, so the button still shows as
+        # enabled until the next rerun — and a second click on it would buy a second call.
+        # The guard belongs where the spend is, the same rule the TTS cache follows.
         return cached
 
     if ask_model:

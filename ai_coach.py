@@ -171,6 +171,9 @@ def _config():
         response_schema=CoachingReport,
         system_instruction=SYSTEM_INSTRUCTION,
         temperature=TEMPERATURE,
+        # No tools are declared, so automatic function calling has nothing to do except
+        # warn on every call. Off, so a real warning in this log is worth reading.
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
         # max_output_tokens is deliberately unset. The 450-word limit is a prompt
         # constraint; capping the budget on a thinking model truncates the JSON mid-object,
         # which arrives as a parse failure and a silent fall-through instead of an error.
