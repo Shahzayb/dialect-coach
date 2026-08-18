@@ -58,6 +58,16 @@ network. The online run on 2026-08-18 used the real `.env` and the 12.8 s weathe
 - Exactly one synthesised player renders at a time, and the two offline replays sitting in
   the table are correctly excluded from the STT meter — 12.82 s charged, not 16.82 s.
 
+A second review pass driven against the running app found four more, all fixed and
+re-verified live. Failure paths were exercised by starting the app with a deliberately
+invalid `AZURE_TTS_VOICE`, which is a cheap way to reach the error branches without
+waiting for a real outage — worth reusing. Omissions were exercised by adding a word to
+the reference text that the recording does not contain; Azure marked it `Omission` itself,
+confirming `enableMiscue` really is honoured in drill mode.
+
+Total spend across all live testing: 64 s of 18,000 STT seconds and 339 of 500,000 TTS
+characters.
+
 Not built: Gemini coaching and its offline fallback, `phoneme_reference.py`, and Mode C
 (unscripted).
 

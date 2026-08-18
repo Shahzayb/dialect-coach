@@ -172,6 +172,18 @@ the project, and nothing in the app may assume a host. Practical consequences:
   the UI so no code path can slip past it.
 - **The voice comes from `AZURE_TTS_VOICE` only, with no UI picker.** The cache key is
   already `(voice, text, slow)`, so adding a picker later changes no stored shape.
+- **Nothing renders an alert from inside an `st.columns` entry.** A function called within
+  `with column:` appends its output to that column, so an `st.error` emitted there is laid
+  out at the button's width — measured live at 124 px inside a 672 px row, a couple of
+  hundred characters of message at one word per line. `play()` therefore *returns* an
+  (icon, message) pair and the caller renders it after the columns close. Any future
+  helper called from inside a column needs the same treatment.
+- **A paid call that fails after retries is still metered.** `tts.synthesise` takes an
+  `on_attempt` hook precisely because the exception carries no attempt count: when every
+  attempt fails there is no `Synthesis` to read `attempts` from, but the text reached Azure
+  each time and may have been charged. The pre-flight prices
+  `payload × MAX_SYNTHESIS_ATTEMPTS` for the same reason — pricing one attempt would let
+  the guard approve a call whose real charge lands past the budget.
 - **Colour-coded text is HTML, not Streamlit's `:red[…]` markdown.** Only an attribute can
   carry the score on hover, which §11 asks for. Both the word and the title are escaped —
   they come from the reference textarea. Colours are set as text and border colours, never
