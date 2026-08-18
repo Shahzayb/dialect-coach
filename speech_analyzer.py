@@ -318,18 +318,21 @@ def _delivery_error_types(word: dict[str, Any]) -> list[str]:
     """Pull UnexpectedBreak / MissingBreak / Monotone out of the prosody feedback block.
 
     Master plan §5 expects these as word-level `ErrorType` values. In the payload Azure
-    actually returns they live under `Feedback.Prosody`, in `Break.ErrorTypes` and
-    `Intonation.ErrorTypes`, while `ErrorType` itself carries only the miscue kinds
-    (None / Mispronunciation / Omission / Insertion). Both places are read, because the
-    delivery panel is worthless if the flat-shape response ever does use `ErrorType`.
+    actually returns (verified against tests/fixtures/) they live under `Feedback.Prosody`,
+    in `Break.ErrorTypes` and `Intonation.ErrorTypes`, while `ErrorType` carries only the
+    miscue kinds (None / Mispronunciation / Omission / Insertion). Both `Feedback` and
+    `ErrorType` sit *inside* the word's `PronunciationAssessment` object in the SDK shape,
+    not at the word's top level — hence `_scores()` rather than `word.get()`. Both places
+    are read, because the flat REST shape does put them at the top level.
     """
     found: list[str] = []
+    scores = _scores(word)
 
-    top_level = word.get("ErrorType")
+    top_level = scores.get("ErrorType")
     if top_level and top_level not in {"None", "Mispronunciation", "Omission", "Insertion"}:
         found.append(top_level)
 
-    prosody = ((word.get("Feedback") or {}).get("Prosody") or {})
+    prosody = ((scores.get("Feedback") or word.get("Feedback") or {}).get("Prosody") or {})
     for section in ("Break", "Intonation"):
         for error_type in (prosody.get(section) or {}).get("ErrorTypes", []) or []:
             if error_type and error_type != "None":
@@ -362,7 +365,7 @@ def _normalise_word(word: dict[str, Any]) -> dict[str, Any]:
     return {
         "word": word.get("Word"),
         "accuracy": accuracy,
-        "error_type": word.get("ErrorType") or "None",
+        "error_type": _scores(word).get("ErrorType") or "None",
         "error_source": "azure",
         "delivery_error_types": _delivery_error_types(word),
         "syllables": [
