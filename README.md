@@ -8,8 +8,10 @@ which sound in which word failed and what was produced instead.
 Personal training tool, not a product. It runs locally. Diagnostic specificity over polish:
 no accounts, no persistent audio storage.
 
-**Status: scaffold.** The app starts and renders a placeholder page. Recording,
-assessment, and coaching are not implemented yet.
+**Status: assessment works, coaching does not.** You can record or upload a drill sentence
+or a paragraph, get real Azure scores down to the phoneme, and have every attempt kept in a
+local SQLite file. Not built yet: the Gemini coaching report and its offline fallback,
+"Hear it" playback, unscripted mode, and the colour-coded reference text.
 
 ## Running it — Docker (preferred)
 
@@ -54,17 +56,62 @@ container start if present.
 | --- | --- | --- |
 | `AZURE_SPEECH_KEY` | yes | Azure Speech resource key (**F0** tier) |
 | `AZURE_SPEECH_REGION` | yes | Azure Speech resource region |
-| `GEMINI_API_KEY` | yes | Coaching model |
+| `GEMINI_API_KEY` | not yet | Coaching model — not read until the coaching chunk lands |
 | `GEMINI_MODEL` | no | Model ID override, so it can be swapped without a code change |
-| `AZURE_TTS_VOICE` | no | en-US neural voice for target playback |
+| `AZURE_TTS_VOICE` | not yet | en-US neural voice for target playback |
 | `MIN_DURATION_SECONDS`, `MAX_DURATION_SECONDS_*` | no | Recording length guards |
-| `UNSCRIPTED_TWO_PASS` | no | Two-pass unscripted assessment (default on) |
-| `MONTHLY_BUDGET_USD`, `AZURE_TIER_CONFIRMED_F0`, `BUDGET_STATE_PATH` | no | Budget guard |
+| `UNSCRIPTED_TWO_PASS` | not yet | Two-pass unscripted assessment; counted by the budget guard, but Mode C is not built |
+| `MONTHLY_BUDGET_USD`, `AZURE_TIER_CONFIRMED_F0` | no | Budget guard |
+| `DB_PATH` | no | Local history file (default `./data/coach.db`) |
 | `OFFLINE_MODE` | no | Replay a committed fixture; no network calls at all |
 
-See `.env.example` for the full annotated list. Nothing reads these yet.
+See `.env.example` for the full annotated list.
+
+While `MONTHLY_BUDGET_USD` is `0.00`, the app refuses to start unless
+`AZURE_TIER_CONFIRMED_F0=true`. The SDK cannot read your resource's pricing tier, so
+confirming it is F0 and not S0 is something only you can do. `OFFLINE_MODE=true` skips that
+check — nothing is being spent, so the zero-cost path should not be the harder one.
+
+## What gets stored
+
+One row per attempt in a local SQLite file, holding **both raw API responses verbatim** —
+Azure's now, Gemini's once coaching lands — alongside the scores and the recognised text.
+Keeping the responses whole means a later change of mind about what to show is a re-parse,
+not a re-recording that spends quota again.
+
+**No audio is stored**, only a SHA-256 of it, which is enough to recognise a repeat
+attempt. The database is gitignored; a committed one is a leaked one.
+
+The monthly usage meter is derived from that table rather than a separate counter file, so
+the two cannot drift apart.
+
+## Testing
+
+```bash
+make test
+```
+
+Runs offline with no API keys and no network — the suite forces `OFFLINE_MODE` and clears
+the credentials, so it can never turn into a billable call. It works against
+`tests/fixtures/`, two verbatim Azure responses captured once from a real recording. That
+is what lets the parsing, scoring, and colouring layers be developed without spending any
+of the monthly allowance.
+
+Rebuild first (`docker compose build`) if `requirements.txt` changed.
 
 ## Cost
+
+A realistic mixed month, against the F0 allowance of 5 audio hours (18,000 seconds):
+
+| Mode | Frequency | Length | Monthly seconds |
+|---|---|---|---|
+| A — Drill | 5/day x 25 days = 125 | 25 s | 3,125 |
+| B — Paragraph | 3/week = 12 | 90 s | 1,080 |
+| C — Unscripted (two-pass) | 2/week = 8 | 210 s x 2 | 3,360 |
+| **Total** | **145 attempts** | | **7,565 s (~42% of quota)** |
+
+The point that table makes: the quota is not the binding constraint once attempts stop
+being uniform length. Don't design around a fixed attempt count.
 
 Designed to run entirely on free tiers: Azure Speech **F0** (5 audio hours/month) and the
 Gemini free tier. Running locally does not change this — the APIs are remote either way, so
@@ -73,6 +120,18 @@ the same monthly allowances apply.
 An F0 resource cannot bill: it returns `403` once the monthly allowance is gone. Creating
 an **S0** resource by mistake is the only way this project costs money. Likewise a Gemini
 key from a project with no billing account attached returns `429` rather than a charge.
+
+## What leaves your machine
+
+Be clear-eyed about this rather than reassured:
+
+- Audio is **not stored** anywhere, but it **is transmitted to Azure** for processing.
+  There is no local-only mode that still scores pronunciation.
+- Azure Speech logging can be disabled in the resource's settings, under
+  [data logging](https://learn.microsoft.com/azure/ai-services/speech-service/logging-audio-transcription).
+- Once coaching lands, free-tier Gemini prompts and responses **may be used by Google to
+  improve their products**. Only the compacted analysis would be sent — never the audio —
+  but the reference text is part of it.
 
 ## Hosting it somewhere (optional)
 
