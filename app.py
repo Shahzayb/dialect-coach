@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections import OrderedDict
 
 import streamlit as st
 
@@ -87,15 +88,47 @@ def get_connection() -> sqlite3.Connection:
     return db.connect()
 
 
-def _cache_get(key: str):
-    return st.session_state.get("assessments", {}).get(key)
+def cache_fetch(cache: "OrderedDict[str, tuple]", key: str) -> tuple | None:
+    """Read an entry and mark it most-recently-used.
+
+    Pure, so the eviction policy is testable without a Streamlit runtime.
+    """
+    if key not in cache:
+        return None
+    cache.move_to_end(key)
+    return cache[key]
 
 
-def _cache_put(key: str, value) -> None:
-    cache: dict = st.session_state.setdefault("assessments", {})
-    cache[key] = value
+def cache_store(
+    cache: "OrderedDict[str, tuple]", key: str, assessment, reference_text: str
+) -> None:
+    """Store an entry, evicting the *least recently used* once over the limit.
+
+    LRU rather than insertion order because the drill loop re-assesses one sentence over
+    and over; evicting by insertion order would drop exactly the entry being re-used, and
+    re-run the whole Azure pipeline on audio already assessed.
+
+    The reference text is stored alongside the result — rendering the live textarea would
+    otherwise show freshly edited text beside scores computed from the previous version.
+    """
+    cache[key] = (assessment, reference_text)
+    cache.move_to_end(key)
     while len(cache) > CACHE_LIMIT:
-        cache.pop(next(iter(cache)))
+        cache.popitem(last=False)
+
+
+def _cache() -> "OrderedDict[str, tuple]":
+    if "assessments" not in st.session_state:
+        st.session_state["assessments"] = OrderedDict()
+    return st.session_state["assessments"]
+
+
+def _cache_get(key: str) -> tuple | None:
+    return cache_fetch(_cache(), key)
+
+
+def _cache_put(key: str, assessment, reference_text: str) -> None:
+    cache_store(_cache(), key, assessment, reference_text)
 
 
 def _metric(label: str, value: float | None) -> None:
@@ -183,7 +216,9 @@ def run_assessment(conn: sqlite3.Connection, audio: bytes, reference_text: str, 
         mode=mode,
         reference_text=reference_text,
         recognised_text=assessment.recognised_text,
-        audio_seconds=seconds,
+        # Attempts, not successes: a retry re-uploads the same audio. Offline replays
+        # report zero attempts and are excluded from the meter anyway.
+        audio_seconds=seconds * max(assessment.attempts, 1),
         audio_sha256=utils.sha256_bytes(wav_bytes),
         overall_scores=assessment.overall_scores,
         azure_raw=assessment.raw if len(assessment.raw) > 1 else assessment.raw[0],
@@ -294,19 +329,22 @@ def render() -> None:
         if validate_reference(reference_text):
             audio_bytes = source.getvalue()
             key = utils.attempt_hash(reference_text, audio_bytes)
-            assessment = _cache_get(key)
-            if assessment is None:
+            cached = _cache_get(key)
+            if cached is None:
                 assessment = run_assessment(conn, audio_bytes, reference_text, mode)
                 if assessment is not None:
-                    _cache_put(key, assessment)
+                    _cache_put(key, assessment, reference_text)
+            else:
+                assessment = cached[0]
             st.session_state["last_key"] = key if assessment is not None else None
 
     last_key = st.session_state.get("last_key")
     if last_key:
         cached = _cache_get(last_key)
         if cached is not None:
+            assessment, assessed_text = cached
             st.divider()
-            render_result(cached, reference_text)
+            render_result(assessment, assessed_text)
             if source is not None:
                 # Your own recording, directly under the scores. Comparing it against a
                 # native rendering is the "Hear it" chunk; this is half of that.

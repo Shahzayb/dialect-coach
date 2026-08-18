@@ -122,3 +122,49 @@ def test_redaction_filter_ignores_short_values() -> None:
     # A 3-character "secret" would redact ordinary words out of every log line.
     scrubbed = utils.SecretRedactingFilter(["abc"])._scrub("abc def")
     assert scrubbed == "abc def"
+
+
+def test_a_key_inside_a_traceback_is_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The gap a filter alone leaves: filters run before the formatter renders exc_text.
+
+    An SDK exception whose message embeds the subscription key would otherwise reach the
+    log in full, through the traceback rather than through the message.
+    """
+    monkeypatch.setenv("AZURE_SPEECH_KEY", FAKE_KEY)
+    record = logging.LogRecord(
+        name="test", level=logging.ERROR, pathname=__file__, lineno=1,
+        msg="assessment failed", args=(), exc_info=None,
+    )
+    try:
+        raise RuntimeError(f"azure rejected subscription {FAKE_KEY}")
+    except RuntimeError:
+        import sys
+        record.exc_info = sys.exc_info()
+
+    rendered = utils.SecretRedactingFormatter("%(message)s").format(record)
+    assert FAKE_KEY not in rendered
+    assert utils.SecretRedactingFilter.PLACEHOLDER in rendered
+
+
+def test_the_formatter_leaves_ordinary_text_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AZURE_SPEECH_KEY", FAKE_KEY)
+    record = logging.LogRecord(
+        name="test", level=logging.INFO, pathname=__file__, lineno=1,
+        msg="recorded attempt 4", args=(), exc_info=None,
+    )
+    assert utils.SecretRedactingFormatter("%(message)s").format(record) == "recorded attempt 4"
+
+
+def test_retry_reports_every_attempt_it_made() -> None:
+    """Callers pay per call: a retry re-sends the audio and can still consume allowance."""
+    seen: list[int] = []
+    calls = {"n": 0}
+
+    def flaky() -> str:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise TransientError("busy")
+        return "ok"
+
+    utils.retry_transient(flaky, sleep=lambda _: None, on_attempt=seen.append)
+    assert seen == [1, 2, 3]

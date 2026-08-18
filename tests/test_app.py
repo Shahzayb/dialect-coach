@@ -115,11 +115,17 @@ def test_presets_contain_no_digits() -> None:
 
 
 def seed_result(app: AppTest, assessment) -> AppTest:
-    """Put an assessment in the session cache the way a successful run would."""
+    """Put an assessment in the session cache the way a successful run would.
+
+    Entries are (assessment, reference_text) so the panel renders the text the scores were
+    computed against rather than whatever is in the textarea now.
+    """
+    from collections import OrderedDict
+
     import utils
 
     key = utils.attempt_hash(REFERENCE, b"audio")
-    app.session_state["assessments"] = {key: assessment}
+    app.session_state["assessments"] = OrderedDict({key: (assessment, REFERENCE)})
     app.session_state["last_key"] = key
     return app.run()
 
@@ -160,3 +166,71 @@ def test_paragraph_results_render_too(run_app) -> None:
     app = seed_result(run_app(), offline_assessment(Mode.PARAGRAPH))
     assert not app.exception
     assert app.metric
+
+
+def test_the_result_panel_shows_the_text_it_was_scored_against(run_app) -> None:
+    """Editing the textarea after assessing must not relabel an existing result."""
+    app = seed_result(run_app(), offline_assessment())
+    app.text_area[0].set_value("Something else entirely.").run()
+    assert not app.exception
+    rendered = " ".join(m.value for m in app.markdown)
+    assert "Something else entirely." not in rendered
+
+
+def test_the_result_cache_evicts_least_recently_used() -> None:
+    """The drill loop re-uses one entry; insertion-order eviction would drop that one."""
+    from collections import OrderedDict
+
+    import app as app_module
+
+    cache: OrderedDict[str, tuple] = OrderedDict()
+    for i in range(app_module.CACHE_LIMIT):
+        app_module.cache_store(cache, f"key{i}", None, "")
+
+    app_module.cache_fetch(cache, "key0")          # re-used, so it must survive
+    app_module.cache_store(cache, "overflow", None, "")
+
+    assert len(cache) == app_module.CACHE_LIMIT
+    assert "key0" in cache
+    assert "key1" not in cache, "the genuinely oldest entry is the one to drop"
+
+
+def test_the_cache_returns_none_for_a_miss() -> None:
+    from collections import OrderedDict
+
+    import app as app_module
+
+    assert app_module.cache_fetch(OrderedDict(), "nope") is None
+
+
+def test_the_cache_round_trips_the_reference_text() -> None:
+    from collections import OrderedDict
+
+    import app as app_module
+
+    cache: OrderedDict[str, tuple] = OrderedDict()
+    app_module.cache_store(cache, "k", "assessment", "the text it was scored against")
+    assert app_module.cache_fetch(cache, "k") == ("assessment", "the text it was scored against")
+
+
+def test_a_retried_assessment_charges_the_meter_for_every_attempt(tmp_path) -> None:
+    """Three attempts upload the audio three times; recording it once under-reports."""
+    import db
+    import speech_analyzer as sa
+    import utils
+    from utils import Mode
+
+    conn = db.connect(tmp_path / "meter.db")
+    assessment = sa.analyse("/nonexistent.wav", REFERENCE, Mode.DRILL)
+    assessment.attempts = 3
+
+    db.record_attempt(
+        conn, mode=Mode.DRILL, reference_text=REFERENCE,
+        recognised_text=assessment.recognised_text,
+        audio_seconds=12.0 * max(assessment.attempts, 1),
+        audio_sha256=utils.sha256_bytes(b"x"),
+        overall_scores=assessment.overall_scores, azure_raw=assessment.raw[0],
+        offline=False,
+    )
+    assert db.monthly_stt_seconds(conn) == 36.0
+    conn.close()

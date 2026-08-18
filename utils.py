@@ -47,6 +47,10 @@ MAX_REFERENCE_CHARS = 1000
 # Names of the environment variables whose values must never reach a log line.
 SECRET_VARS = ("AZURE_SPEECH_KEY", "GEMINI_API_KEY")
 
+# Below this length a "secret" is more likely to be an ordinary word, and redacting it
+# would gut every log line it appears in.
+MIN_REDACTABLE_SECRET_LENGTH = 8
+
 _REQUIRED_VARS = ("AZURE_SPEECH_KEY", "AZURE_SPEECH_REGION")
 
 _DEFAULTS: dict[str, str] = {
@@ -191,6 +195,22 @@ def normalise_words(text: str) -> list[str]:
 # --- Logging -----------------------------------------------------------------------------
 
 
+class SecretRedactingFormatter(logging.Formatter):
+    """Format a record, then scrub secrets from the *rendered* text, traceback included.
+
+    A filter cannot do this: filters run before handlers format, so `record.exc_text` is
+    still None at filter time and the traceback is rendered afterwards, unscrubbed. An SDK
+    exception whose repr embeds the subscription key would otherwise reach the log in full.
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        rendered = super().format(record)
+        for secret in _current_secrets():
+            if secret and len(secret) >= MIN_REDACTABLE_SECRET_LENGTH:
+                rendered = rendered.replace(secret, SecretRedactingFilter.PLACEHOLDER)
+        return rendered
+
+
 class SecretRedactingFilter(logging.Filter):
     """Replace any configured secret's value with a placeholder before it is emitted.
 
@@ -204,7 +224,10 @@ class SecretRedactingFilter(logging.Filter):
     def __init__(self, secrets: Iterable[str] = ()) -> None:
         super().__init__()
         # Short values would redact half the log; a real key is long.
-        self._secrets = sorted({s for s in secrets if s and len(s) >= 8}, key=len, reverse=True)
+        self._secrets = sorted(
+            {s for s in secrets if s and len(s) >= MIN_REDACTABLE_SECRET_LENGTH},
+            key=len, reverse=True,
+        )
 
     def _scrub(self, text: str) -> str:
         for secret in self._secrets:
@@ -248,7 +271,11 @@ def configure_logging(level: int = logging.INFO) -> None:
             return
 
     handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    # The formatter scrubs the rendered text (tracebacks included); the filter scrubs the
+    # message before any other handler can see it. Both, because either alone leaves a gap.
+    handler.setFormatter(
+        SecretRedactingFormatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    )
     handler.addFilter(redactor)
     root.addHandler(handler)
     root.setLevel(level)
@@ -272,14 +299,21 @@ def retry_transient(
     base_delay: float = 0.5,
     max_delay: float = 8.0,
     sleep: Callable[[float], None] = time.sleep,
+    on_attempt: Callable[[int], None] | None = None,
 ) -> T:
     """Call `fn`, retrying only `TransientError` with exponential backoff plus jitter.
 
     `PermanentError` propagates on the first raise. Retrying a 401 just burns time, and
     retrying a 403 quota response can consume more allowance for no benefit.
+
+    `on_attempt` is called with the attempt number before each try. Callers that pay per
+    call need it: a retry re-sends the same audio and can consume allowance even when it
+    ultimately fails, so the meter has to count attempts rather than successes.
     """
     last: TransientError | None = None
     for attempt in range(1, attempts + 1):
+        if on_attempt is not None:
+            on_attempt(attempt)
         try:
             return fn()
         except TransientError as exc:

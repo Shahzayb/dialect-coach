@@ -189,8 +189,9 @@ def test_continuous_completeness_is_locally_recomputed(
 
 def test_offline_mode_replays_the_fixture_without_a_network_call(reference: str) -> None:
     """conftest forces OFFLINE_MODE, and no credentials are set — this must still work."""
-    payloads, offline = sa.recognise("/nonexistent.wav", reference, Mode.DRILL)
+    payloads, offline, attempts = sa.recognise("/nonexistent.wav", reference, Mode.DRILL)
     assert offline is True
+    assert attempts == 0, "a fixture replay never reaches Azure, so it charges nothing"
     assert payloads and "NBest" in payloads[0]
 
 
@@ -203,7 +204,7 @@ def test_offline_analyse_produces_a_complete_result(reference: str) -> None:
 
 
 def test_offline_paragraph_replays_the_continuous_fixture(reference: str) -> None:
-    payloads, _ = sa.recognise("/nonexistent.wav", reference, Mode.PARAGRAPH)
+    payloads, _, _ = sa.recognise("/nonexistent.wav", reference, Mode.PARAGRAPH)
     assert isinstance(payloads, list) and payloads
 
 
@@ -219,3 +220,11 @@ def test_unscripted_mode_is_refused_rather_than_half_working(
     monkeypatch.setenv("OFFLINE_MODE", "false")
     with pytest.raises(sa.AssessmentError, match="not implemented"):
         sa.recognise("/nonexistent.wav", reference, Mode.UNSCRIPTED)
+
+
+def test_quota_exhaustion_is_a_type_not_a_marker_string() -> None:
+    """The 403 signal must not ride along in the message the user is shown."""
+    error = sa.QuotaExhausted("Azure returned 403. The monthly free allowance is used up.")
+    assert sa.is_quota_exhausted(error)
+    assert "QUOTA_EXHAUSTED" not in str(error), "internal markers must not reach the UI"
+    assert not sa.is_quota_exhausted(sa.AssessmentError("something else"))

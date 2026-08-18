@@ -51,6 +51,10 @@ class AssessmentError(RuntimeError):
     """Assessment failed in a way worth showing the user. Never carries a key."""
 
 
+class QuotaExhausted(AssessmentError):
+    """Azure itself reported the monthly allowance as gone (403). Authoritative."""
+
+
 class NoSpeechDetected(AssessmentError):
     """Azure connected fine and heard nothing. Distinct from a failure — see §10."""
 
@@ -64,6 +68,9 @@ class Assessment:
     recognised_text: str = ""
     words: list[dict[str, Any]] = field(default_factory=list)
     offline: bool = False
+    # How many times the audio was actually sent. Retries re-upload it and can consume
+    # allowance even when they fail, so the meter multiplies by this rather than by 1.
+    attempts: int = 1
 
     def as_normalised(self) -> dict[str, Any]:
         """The shape master plan §4 specifies."""
@@ -145,10 +152,9 @@ def _classify_cancellation(details) -> Exception:
             "wrong — note the key must match the region it was issued for."
         )
     if code == speechsdk.CancellationErrorCode.Forbidden:
-        return PermanentError(
+        return QuotaExhausted(
             "Azure returned 403. On an F0 resource this means the monthly free allowance "
-            "is used up; it resets at the start of the next billing month. "
-            "QUOTA_EXHAUSTED"
+            "is used up; it resets at the start of the next billing month."
         )
     if code == speechsdk.CancellationErrorCode.BadRequest:
         return PermanentError(
@@ -159,8 +165,12 @@ def _classify_cancellation(details) -> Exception:
 
 
 def is_quota_exhausted(error: BaseException) -> bool:
-    """True when the error is Azure's own 'the month is gone' signal."""
-    return "QUOTA_EXHAUSTED" in str(error)
+    """True when the error is Azure's own 'the month is gone' signal.
+
+    A dedicated exception type rather than a marker string in the message: the message is
+    rendered to the user, and matching on its text breaks the moment it is reworded.
+    """
+    return isinstance(error, QuotaExhausted)
 
 
 def _raw_json(result) -> dict[str, Any]:
@@ -271,11 +281,16 @@ def _load_fixture(mode: Mode) -> list[dict[str, Any]]:
     return data if isinstance(data, list) else [data]
 
 
-def recognise(wav_path: str, reference_text: str, mode: Mode) -> tuple[list[dict[str, Any]], bool]:
-    """Run the assessment for `mode`. Returns (verbatim payloads, came_from_fixture)."""
+def recognise(
+    wav_path: str, reference_text: str, mode: Mode
+) -> tuple[list[dict[str, Any]], bool, int]:
+    """Run the assessment for `mode`.
+
+    Returns (verbatim payloads, came_from_fixture, attempts_that_reached_azure).
+    """
     if utils.offline_mode():
         logger.info("OFFLINE_MODE: replaying the %s fixture instead of calling Azure", mode.value)
-        return _load_fixture(mode), True
+        return _load_fixture(mode), True, 0
 
     if mode is Mode.UNSCRIPTED:
         raise AssessmentError(
@@ -284,7 +299,18 @@ def recognise(wav_path: str, reference_text: str, mode: Mode) -> tuple[list[dict
         )
 
     call = _assess_single_shot if mode is Mode.DRILL else _assess_continuous
-    return utils.retry_transient(lambda: call(wav_path, reference_text)), False
+    made = 0
+
+    def count(attempt: int) -> None:
+        nonlocal made
+        made = attempt
+
+    payloads = utils.retry_transient(
+        lambda: call(wav_path, reference_text), on_attempt=count
+    )
+    if made > 1:
+        logger.warning("Assessment took %d attempts; all of them may have cost quota.", made)
+    return payloads, False, made
 
 
 # --- Normalisation ------------------------------------------------------------------------
@@ -386,23 +412,48 @@ def _diff_miscue(reference_text: str, words: list[dict[str, Any]]) -> list[dict[
     import difflib
 
     reference = utils.normalise_words(reference_text)
-    heard = utils.normalise_words(" ".join(str(w.get("word") or "") for w in words))
     if not reference:
         return words
+
+    # Tokenise per word and keep a token -> word index map. Joining the words into one
+    # string and re-splitting it would desynchronise the diff indices from `words` the
+    # moment a word does not yield exactly one token: "well-known" yields two and shifts
+    # every later index, while a punctuation-only word yields none and silently drops a
+    # real word from the result.
+    heard: list[str] = []
+    index_of_token: list[int] = []
+    for position, word in enumerate(words):
+        tokens = utils.normalise_words(str(word.get("word") or ""))
+        if not tokens:
+            # Nothing alphanumeric to align on. A token that cannot match anything in the
+            # reference keeps the mapping intact and lands the word as an Insertion.
+            tokens = [f"\x00unmatchable{position}"]
+        for token in tokens:
+            heard.append(token)
+            index_of_token.append(position)
+
+    def words_for(j1: int, j2: int) -> list[dict[str, Any]]:
+        """The distinct words covering tokens j1..j2, in order.
+
+        Deduplicated because a multi-token word contributes several tokens and must still
+        appear once in the result.
+        """
+        positions = dict.fromkeys(index_of_token[j1:j2])
+        return [words[position] for position in positions]
 
     result: list[dict[str, Any]] = []
     matcher = difflib.SequenceMatcher(a=reference, b=heard, autojunk=False)
 
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag in {"equal", "replace"}:
-            result.extend(words[j1:j2])
+            result.extend(words_for(j1, j2))
             if tag == "replace":
                 # Said something, just not the reference word: an omission of the target.
                 result.extend(_omission(word) for word in reference[i1:i2])
         elif tag == "delete":
             result.extend(_omission(word) for word in reference[i1:i2])
         elif tag == "insert":
-            for word in words[j1:j2]:
+            for word in words_for(j1, j2):
                 inserted = dict(word)
                 inserted["error_type"] = "Insertion"
                 inserted["error_source"] = "local_diff"
@@ -520,7 +571,7 @@ def normalise(
 
 def analyse(wav_path: str, reference_text: str, mode: Mode) -> Assessment:
     """Assess one recording end to end: recognise, then normalise. No storage, no UI."""
-    payloads, offline = recognise(wav_path, reference_text, mode)
+    payloads, offline, attempts = recognise(wav_path, reference_text, mode)
     overall, recognised_text, words = normalise(payloads, reference_text, mode)
     return Assessment(
         raw=payloads,
@@ -528,4 +579,5 @@ def analyse(wav_path: str, reference_text: str, mode: Mode) -> Assessment:
         recognised_text=recognised_text,
         words=words,
         offline=offline,
+        attempts=attempts,
     )

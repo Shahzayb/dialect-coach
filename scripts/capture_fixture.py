@@ -25,6 +25,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import audio_utils  # noqa: E402
+import budget  # noqa: E402
+import db  # noqa: E402
 import speech_analyzer  # noqa: E402
 import utils  # noqa: E402
 from utils import Mode  # noqa: E402
@@ -70,8 +72,29 @@ def main() -> int:
     print(f"[capture] {seconds:.1f}s of audio, mode={mode.value}")
     print(f"[capture] reference: {reference_text[:120]}{'…' if len(reference_text) > 120 else ''}")
 
+    # This script spends real quota, so it goes through the same guards as the app. Without
+    # them a resource that was never confirmed as F0 — the case the app refuses to start on
+    # — could still be billed from here.
+    conn = db.connect()
+    try:
+        budget.preflight_stt(conn, seconds, mode)
+    except budget.BudgetError as exc:
+        print(f"[capture] refused: {exc}")
+        return 1
+
     with audio_utils.temp_wav(wav_bytes) as wav_path:
-        payloads, _ = speech_analyzer.recognise(wav_path, reference_text, mode)
+        payloads, _, attempts = speech_analyzer.recognise(wav_path, reference_text, mode)
+
+    # Charge the meter for what this actually consumed, so the app's remaining-allowance
+    # figure stays honest rather than silently ignoring fixture captures.
+    db.record_attempt(
+        conn, mode=mode, reference_text=reference_text,
+        recognised_text=speech_analyzer._display_text(payloads[0]),
+        audio_seconds=seconds * max(attempts, 1),
+        audio_sha256=utils.sha256_bytes(wav_bytes),
+        overall_scores={}, azure_raw=payloads if len(payloads) > 1 else payloads[0],
+        offline=False,
+    )
 
     # Drill is a single utterance; keeping it an object rather than a one-element array
     # matches what a single-shot call actually returns.
