@@ -26,10 +26,10 @@ aggregating `UnexpectedBreak`/`MissingBreak`/`Monotone`, `tts.py`, per-word and
 full-paragraph playback cached in `st.session_state` by `(voice, text)`, and the user's own
 recording beneath it for back-to-back comparison.
 
-Deferred to the chunk after: `phoneme_reference.py`, `fallback_coach.py`, `ai_coach.py`.
-Coaching is worth building on top of a legible diagnosis rather than underneath one — and
-`attach_coaching` and the `gemini_raw_json` column are already waiting for it, so nothing
-about deferring it costs a migration later.
+Out, on the user's explicit instruction: `phoneme_reference.py`, `fallback_coach.py`,
+`ai_coach.py` — the whole coaching layer waits for a later session. It is worth building on
+top of a legible diagnosis rather than underneath one, and `attach_coaching` and the
+`gemini_raw_json` column are already waiting for it, so deferring it costs no migration.
 
 ## Active plan
 
