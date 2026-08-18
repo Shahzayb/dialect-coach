@@ -41,5 +41,5 @@ Work finishing or a decision being made means `memory-bank/` is out of date:
 - No `Co-Authored-By` lines in commits or PR titles/descriptions. No watermarks, period.
 - Commit chunks of work as you go to prevent context drift, isolate AI bugs, and create clean rollback points.
   - Only applies to any branch other than the `main`.
-- When cutting a release: bump the version in `pyproject.toml`, tag the commit in Git, push tags to remote, create a GitHub Release (`gh release create vX.Y.Z --generate-notes`), link resolved issues, and record the milestone in the Memory Bank.
+- When cutting a release: bump the version in `pyproject.toml`, tag the commit in Git, push tags to remote, create a GitHub Release (`gh release create vX.Y.Z --generate-notes`), link resolved issues, create a GitHub Milestone (if needed), and record the milestone in the Memory Bank.
 - Follow professional project standards: use conventional commit messages, enforce type hints, and ensure credentials remain strictly in `.env`.
