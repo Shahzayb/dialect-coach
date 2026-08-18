@@ -7,15 +7,29 @@ analysis is not yet turned into coaching, which is the thing the tool exists to 
 
 ## Next concrete step
 
-_Proposed, not yet agreed:_ the coaching chunk — `phoneme_reference.py`, `fallback_coach.py`,
-then `ai_coach.py`. Building the deterministic fallback **first** means the app produces a
-useful report with no Gemini key at all, and the master plan requires that fallback to be
-good enough to use permanently, since the free tier will run out. `attach_coaching` and the
-`gemini_raw_json` column already exist, so this chunk writes to them rather than migrating.
+**Agreed 2026-08-18: make the diagnosis legible and audible** — master plan §11's UI plus
+§6's "Hear it" playback, as one chunk.
 
-The alternative worth weighing is the §11 UI chunk instead — colour-coded reference text,
-the reference-vs-heard diff, the delivery panel. All the data it needs is already parsed,
-and it would make the diagnosis legible before adding another layer on top of it.
+Why this before coaching. The brief's problem statement is "I can't hear the difference
+between my pronunciation and a native speaker's", and the two core requirements that answer
+it — show expected vs. actual sound for every flagged word, and hear the correct
+pronunciation next to my own recording — are both presentation, not analysis. The data for
+the first is already parsed and stored and is currently rendered as a plain table; the
+second needs only Azure neural TTS, whose meter and `tts_usage` table already exist.
+
+The two halves belong in one chunk because a "Hear it" button lives *next to* each flagged
+word: splitting them means rebuilding the same render path twice.
+
+In scope: colour-coded reference text against the thresholds already in `utils.py`, the
+reference-vs-heard diff, expected IPA → produced IPA per flagged word, the delivery panel
+aggregating `UnexpectedBreak`/`MissingBreak`/`Monotone`, `tts.py`, per-word and
+full-paragraph playback cached in `st.session_state` by `(voice, text)`, and the user's own
+recording beneath it for back-to-back comparison.
+
+Deferred to the chunk after: `phoneme_reference.py`, `fallback_coach.py`, `ai_coach.py`.
+Coaching is worth building on top of a legible diagnosis rather than underneath one — and
+`attach_coaching` and the `gemini_raw_json` column are already waiting for it, so nothing
+about deferring it costs a migration later.
 
 ## Active plan
 
