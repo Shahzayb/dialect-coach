@@ -285,3 +285,244 @@ def recognise(wav_path: str, reference_text: str, mode: Mode) -> tuple[list[dict
 
     call = _assess_single_shot if mode is Mode.DRILL else _assess_continuous
     return utils.retry_transient(lambda: call(wav_path, reference_text)), False
+
+
+# --- Normalisation ------------------------------------------------------------------------
+# Azure returns scores in two shapes depending on the path: the SDK's JSON result nests
+# them under a "PronunciationAssessment" object at every level, while the REST short-audio
+# response flattens them straight onto the node. Reading both costs one helper and makes
+# the parser survive an SDK change that silently switches shapes.
+
+
+def _scores(node: dict[str, Any]) -> dict[str, Any]:
+    nested = node.get("PronunciationAssessment")
+    return nested if isinstance(nested, dict) else node
+
+
+def _score(node: dict[str, Any], key: str) -> float | None:
+    value = _scores(node).get(key)
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _best(payload: dict[str, Any]) -> dict[str, Any]:
+    """The top recognition hypothesis, or an empty dict if there is none."""
+    nbest = payload.get("NBest") or []
+    return nbest[0] if nbest and isinstance(nbest[0], dict) else {}
+
+
+def _display_text(payload: dict[str, Any]) -> str:
+    return (payload.get("DisplayText") or _best(payload).get("Display") or "").strip()
+
+
+def _delivery_error_types(word: dict[str, Any]) -> list[str]:
+    """Pull UnexpectedBreak / MissingBreak / Monotone out of the prosody feedback block.
+
+    Master plan §5 expects these as word-level `ErrorType` values. In the payload Azure
+    actually returns they live under `Feedback.Prosody`, in `Break.ErrorTypes` and
+    `Intonation.ErrorTypes`, while `ErrorType` itself carries only the miscue kinds
+    (None / Mispronunciation / Omission / Insertion). Both places are read, because the
+    delivery panel is worthless if the flat-shape response ever does use `ErrorType`.
+    """
+    found: list[str] = []
+
+    top_level = word.get("ErrorType")
+    if top_level and top_level not in {"None", "Mispronunciation", "Omission", "Insertion"}:
+        found.append(top_level)
+
+    prosody = ((word.get("Feedback") or {}).get("Prosody") or {})
+    for section in ("Break", "Intonation"):
+        for error_type in (prosody.get(section) or {}).get("ErrorTypes", []) or []:
+            if error_type and error_type != "None":
+                found.append(error_type)
+
+    # Order-preserving dedupe: one word can be flagged twice for the same thing.
+    return list(dict.fromkeys(found))
+
+
+def _normalise_word(word: dict[str, Any]) -> dict[str, Any]:
+    accuracy = _score(word, "AccuracyScore")
+    phonemes = []
+    for phoneme in word.get("Phonemes") or []:
+        score = _score(phoneme, "AccuracyScore")
+        nbest = [
+            {"phoneme": alt.get("Phoneme"), "score": float(alt.get("Score", 0.0))}
+            for alt in (_scores(phoneme).get("NBestPhonemes") or [])
+            if isinstance(alt, dict)
+        ]
+        phonemes.append(
+            {
+                "phoneme": phoneme.get("Phoneme"),
+                "score": score,
+                "is_mispronounced": score is not None and score < utils.PHONEME_RED,
+                # What was ACTUALLY said. Without this the report can only say a score.
+                "nbest": nbest,
+            }
+        )
+
+    return {
+        "word": word.get("Word"),
+        "accuracy": accuracy,
+        "error_type": word.get("ErrorType") or "None",
+        "error_source": "azure",
+        "delivery_error_types": _delivery_error_types(word),
+        "syllables": [
+            {"syllable": s.get("Syllable"), "score": _score(s, "AccuracyScore")}
+            for s in word.get("Syllables") or []
+        ],
+        "phonemes": phonemes,
+    }
+
+
+def _diff_miscue(reference_text: str, words: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Derive Omission and Insertion by diffing reference against recognised words.
+
+    Needed because `enableMiscue` is ignored in continuous mode, which is the only way to
+    assess a paragraph. Entries produced here are marked `error_source: "local_diff"` so
+    the UI never presents our guess as Azure's judgement.
+    """
+    import difflib
+
+    reference = utils.normalise_words(reference_text)
+    heard = utils.normalise_words(" ".join(str(w.get("word") or "") for w in words))
+    if not reference:
+        return words
+
+    result: list[dict[str, Any]] = []
+    matcher = difflib.SequenceMatcher(a=reference, b=heard, autojunk=False)
+
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in {"equal", "replace"}:
+            result.extend(words[j1:j2])
+            if tag == "replace":
+                # Said something, just not the reference word: an omission of the target.
+                result.extend(_omission(word) for word in reference[i1:i2])
+        elif tag == "delete":
+            result.extend(_omission(word) for word in reference[i1:i2])
+        elif tag == "insert":
+            for word in words[j1:j2]:
+                inserted = dict(word)
+                inserted["error_type"] = "Insertion"
+                inserted["error_source"] = "local_diff"
+                result.append(inserted)
+    return result
+
+
+def _omission(word: str) -> dict[str, Any]:
+    """A reference word that was never heard. It has no scores — it was not spoken."""
+    return {
+        "word": word,
+        "accuracy": None,
+        "error_type": "Omission",
+        "error_source": "local_diff",
+        "delivery_error_types": [],
+        "syllables": [],
+        "phonemes": [],
+    }
+
+
+def _weighted(pairs: list[tuple[float, float]]) -> float | None:
+    """Duration-weighted mean of (score, weight). Falls back to a plain mean if unweighted."""
+    scored = [(value, weight) for value, weight in pairs if value is not None]
+    if not scored:
+        return None
+    total_weight = sum(weight for _, weight in scored)
+    if total_weight <= 0:
+        logger.warning("Utterances carried no usable Duration; falling back to equal weighting.")
+        return sum(value for value, _ in scored) / len(scored)
+    return sum(value * weight for value, weight in scored) / total_weight
+
+
+def _merge_overall(
+    payloads: list[dict[str, Any]], reference_text: str, words: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Combine per-utterance scores into one set.
+
+    Duration-weighted, never a naive mean: a 2-second utterance and a 40-second one do not
+    carry equal evidence. Two departures from simply averaging:
+
+    - `completeness` is recomputed globally from the omissions. Azure scores each utterance
+      against the *whole* reference text, so per-utterance completeness is meaningless to
+      average — a five-utterance paragraph would report ~20% complete.
+    - `pron_score` as a weighted average is an approximation. Azure's composite weighting
+      is not published, so it cannot be recomputed exactly from the parts.
+    """
+    weights = [float(p.get("Duration") or 0.0) for p in payloads]
+    bests = [_best(p) for p in payloads]
+
+    merged: dict[str, Any] = {}
+    for out_key, in_key in (
+        ("pron_score", "PronScore"),
+        ("accuracy", "AccuracyScore"),
+        ("fluency", "FluencyScore"),
+        ("prosody", "ProsodyScore"),
+    ):
+        merged[out_key] = _weighted(
+            [(_score(best, in_key), weight) for best, weight in zip(bests, weights)]
+        )
+
+    reference_words = utils.normalise_words(reference_text)
+    if reference_words:
+        omitted = sum(1 for w in words if w.get("error_type") == "Omission")
+        merged["completeness"] = round(
+            100.0 * max(0, len(reference_words) - omitted) / len(reference_words), 1
+        )
+    else:
+        merged["completeness"] = _weighted(
+            [(_score(best, "CompletenessScore"), weight) for best, weight in zip(bests, weights)]
+        )
+
+    return merged
+
+
+def normalise(
+    payloads: list[dict[str, Any]], reference_text: str, mode: Mode
+) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
+    """Turn verbatim payloads into the shape master plan §4 specifies.
+
+    Returns (overall_scores, recognised_text, words).
+    """
+    if not payloads:
+        raise AssessmentError("Azure returned no assessable utterances.")
+
+    words: list[dict[str, Any]] = []
+    for payload in payloads:
+        words.extend(_normalise_word(w) for w in _best(payload).get("Words") or [])
+
+    # Single-shot had enableMiscue on, so Azure already labelled omissions and insertions.
+    if mode is not Mode.DRILL and reference_text:
+        words = _diff_miscue(reference_text, words)
+
+    recognised_text = " ".join(t for t in (_display_text(p) for p in payloads) if t)
+
+    # Drill is the only path where Azure's own overall scores can be trusted as-is: it is
+    # single-shot, so enableMiscue was honoured and CompletenessScore reflects the whole
+    # attempt. Continuous mode goes through the merge even for one utterance, because its
+    # completeness has to be recomputed from the local diff either way.
+    if mode is Mode.DRILL and len(payloads) == 1:
+        best = _best(payloads[0])
+        overall = {
+            "pron_score": _score(best, "PronScore"),
+            "accuracy": _score(best, "AccuracyScore"),
+            "fluency": _score(best, "FluencyScore"),
+            "completeness": _score(best, "CompletenessScore"),
+            # None, never 0.0 — a missing prosody score and a prosody score of zero are
+            # very different things, and the UI renders the first as "—".
+            "prosody": _score(best, "ProsodyScore"),
+        }
+    else:
+        overall = _merge_overall(payloads, reference_text, words)
+
+    return overall, recognised_text, words
+
+
+def analyse(wav_path: str, reference_text: str, mode: Mode) -> Assessment:
+    """Assess one recording end to end: recognise, then normalise. No storage, no UI."""
+    payloads, offline = recognise(wav_path, reference_text, mode)
+    overall, recognised_text, words = normalise(payloads, reference_text, mode)
+    return Assessment(
+        raw=payloads,
+        overall_scores=overall,
+        recognised_text=recognised_text,
+        words=words,
+        offline=offline,
+    )
