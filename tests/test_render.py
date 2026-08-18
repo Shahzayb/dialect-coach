@@ -217,3 +217,11 @@ def test_omissions_sort_ahead_of_merely_bad_scores() -> None:
 def test_sorting_does_not_crash_on_a_missing_score() -> None:
     words = [word("a", None, error_type="Mispronunciation"), word("b", 50.0)]
     assert len(sorted(words, key=app_module.severity_key)) == 2
+
+
+def test_a_phoneme_with_no_symbol_is_not_rendered_as_the_word_none() -> None:
+    """Showing "/None/" invents a target sound in a tool whose job is naming sounds."""
+    subject = word("odd", 40.0, phonemes=[
+        {"phoneme": None, "score": 30.0, "is_mispronounced": True, "nbest": []},
+    ])
+    assert app_module.phoneme_pairs(subject) == [(None, None, 30.0)]

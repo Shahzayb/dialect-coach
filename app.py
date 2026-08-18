@@ -320,7 +320,8 @@ def delivery_summary(words: list[dict[str, Any]]) -> dict[str, list[str]]:
 # --- Playback ---------------------------------------------------------------------------------
 
 
-def play(conn: sqlite3.Connection, text: str, *, slow: bool, label: str) -> None:
+def play(conn: sqlite3.Connection, text: str, *, slow: bool, label: str,
+         source: str) -> None:
     """Synthesise `text` unless it is already cached, then queue it for playback.
 
     The cache lookup comes **before** the pre-flight and the usage record, and that order
@@ -346,7 +347,11 @@ def play(conn: sqlite3.Connection, text: str, *, slow: bool, label: str) -> None
         except utils.ConfigError as exc:
             st.error(str(exc), icon="🔑")
             return
-        except (utils.PermanentError, utils.TransientError, tts.SynthesisError) as exc:
+        except (utils.PermanentError, utils.TransientError, tts.SynthesisError,
+                speech_analyzer.AssessmentError) as exc:
+            # AssessmentError belongs here even though this is synthesis: QuotaExhausted
+            # subclasses it, and it is shared so that one 403 type drives the budget guard
+            # for both paths. Leave it out and the branch below is unreachable.
             if speech_analyzer.is_quota_exhausted(exc):
                 # Azure is authoritative; block the rest of the month regardless of meter.
                 budget.mark_quota_exhausted()
@@ -364,7 +369,8 @@ def play(conn: sqlite3.Connection, text: str, *, slow: bool, label: str) -> None
         )
         lru_put(cache, key, result.audio, TTS_CACHE_LIMIT)
 
-    st.session_state["now_playing"] = key
+    # `source` identifies the widget that asked, so only that one renders the player.
+    st.session_state["now_playing"] = {"key": key, "source": source}
 
 
 def playback_buttons(
@@ -382,15 +388,18 @@ def playback_buttons(
     with left:
         if st.button("🔊 Hear it", key=f"{key_prefix}-normal", disabled=offline,
                      use_container_width=True):
-            play(conn, text, slow=False, label=label)
+            play(conn, text, slow=False, label=label, source=key_prefix)
     with right:
         if st.button("🐢 Slowly", key=f"{key_prefix}-slow", disabled=offline,
                      use_container_width=True):
-            play(conn, text, slow=True, label=label)
+            play(conn, text, slow=True, label=label, source=key_prefix)
 
-    now_playing = st.session_state.get("now_playing")
-    if now_playing and now_playing[1] == text:
-        audio = lru_get(_session_cache("tts_audio"), now_playing)
+    # Matched on the clicking widget, not on the text. A paragraph flags the same common
+    # word more than once, and matching by text would render an autoplaying player in
+    # every card sharing it — the same clip starting several times at once.
+    playing = st.session_state.get("now_playing")
+    if playing and playing.get("source") == key_prefix:
+        audio = lru_get(_session_cache("tts_audio"), playing["key"])
         if audio:
             # autoplay so one click plays, rather than one click to synthesise and another
             # on the player. The click itself is lost to the rerun either way.
@@ -559,6 +568,12 @@ def render_word_card(conn: sqlite3.Connection, word: dict[str, Any], index: int)
             unsafe_allow_html=True,
         )
 
+        # The headline sound, before the full phoneme list. A long word can carry a dozen
+        # phonemes, and the one that actually failed should not need hunting for.
+        summary = weakest_phoneme(word)
+        if summary:
+            st.markdown(f"**{summary}**")
+
         notes = []
         if error_type != "None":
             notes.append(f"{error_type} (flagged by {word.get('error_source') or 'azure'})")
@@ -571,9 +586,12 @@ def render_word_card(conn: sqlite3.Connection, word: dict[str, Any], index: int)
             rows = []
             for expected, produced, score_value in pairs:
                 phoneme_colour = BAND_COLOURS[utils.phoneme_band(score_value)]
-                shown = f"/{expected}/"
+                # "?" rather than "/None/": a payload can omit Phoneme, and rendering the
+                # literal string None as a target sound is worse than admitting we do not
+                # know it, in a tool whose whole job is naming sounds.
+                shown = f"/{html.escape(expected)}/" if expected else "?"
                 if produced:
-                    shown += f" → <b>/{produced}/</b>"
+                    shown += f" → <b>/{html.escape(produced)}/</b>"
                 title = f"{score_value:.0f}" if score_value is not None else "no score"
                 rows.append(
                     f'<span style="color:{phoneme_colour};margin-right:1.1rem;" '

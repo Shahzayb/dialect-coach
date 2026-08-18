@@ -211,3 +211,19 @@ def test_a_busy_service_is_classified_as_retryable() -> None:
         bad_request_hint=tts.BAD_REQUEST_HINT,
     )
     assert isinstance(error, utils.TransientError)
+
+
+def test_a_synthesis_403_is_caught_by_the_handler_that_acts_on_it() -> None:
+    """QuotaExhausted is an AssessmentError, not a PermanentError or a SynthesisError.
+
+    `play()` marks the month exhausted on a 403, but only if the exception reaches its
+    handler. Leaving AssessmentError out of that tuple made the branch unreachable and let
+    the error escape into an uncaught Streamlit traceback instead.
+    """
+    import speech_analyzer as sa
+
+    handled = (utils.PermanentError, utils.TransientError, tts.SynthesisError,
+               sa.AssessmentError)
+    assert issubclass(sa.QuotaExhausted, handled)
+    assert not issubclass(sa.QuotaExhausted, (utils.PermanentError, utils.TransientError,
+                                              tts.SynthesisError))

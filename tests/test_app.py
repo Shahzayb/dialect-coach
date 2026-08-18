@@ -226,9 +226,11 @@ def test_a_cached_phrase_is_not_charged_to_the_meter_twice(tmp_path, monkeypatch
     monkeypatch.setattr(app_module.st, "session_state", state, raising=False)
 
     for _ in range(4):
-        app_module.play(conn, "weather", slow=False, label="test")
+        app_module.play(conn, "weather", slow=False, label="test", source="word-0")
 
     assert db.monthly_tts_characters(conn) == len("weather"), "charged once, not four times"
+    assert state["now_playing"] == {"key": ("en-US-AvaNeural", "weather", False),
+                                    "source": "word-0"}
     conn.close()
 
 
