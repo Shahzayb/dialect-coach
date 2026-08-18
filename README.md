@@ -8,10 +8,13 @@ which sound in which word failed and what was produced instead.
 Personal training tool, not a product. It runs locally. Diagnostic specificity over polish:
 no accounts, no persistent audio storage.
 
-**Status: assessment works, coaching does not.** You can record or upload a drill sentence
-or a paragraph, get real Azure scores down to the phoneme, and have every attempt kept in a
-local SQLite file. Not built yet: the Gemini coaching report and its offline fallback,
-"Hear it" playback, unscripted mode, and the colour-coded reference text.
+**Status: the diagnosis works, the coaching does not.** You can record or upload a drill
+sentence or a paragraph and get real Azure scores down to the phoneme, rendered as
+colour-coded reference text, a script-versus-heard diff, and a card per flagged word naming
+the sound you actually produced in place of the target — plus "Hear it" playback of a native
+rendering, at normal speed or slowed, next to your own recording. Every attempt is kept in a
+local SQLite file. Not built yet: the Gemini coaching report and its offline fallback, and
+unscripted mode.
 
 ## Running it — Docker (preferred)
 
@@ -58,7 +61,7 @@ container start if present.
 | `AZURE_SPEECH_REGION` | yes | Azure Speech resource region |
 | `GEMINI_API_KEY` | not yet | Coaching model — not read until the coaching chunk lands |
 | `GEMINI_MODEL` | no | Model ID override, so it can be swapped without a code change |
-| `AZURE_TTS_VOICE` | not yet | en-US neural voice for target playback |
+| `AZURE_TTS_VOICE` | no | en-US neural voice for "Hear it" playback (default `en-US-AvaNeural`) |
 | `MIN_DURATION_SECONDS`, `MAX_DURATION_SECONDS_*` | no | Recording length guards |
 | `UNSCRIPTED_TWO_PASS` | not yet | Two-pass unscripted assessment; counted by the budget guard, but Mode C is not built |
 | `MONTHLY_BUDGET_USD`, `AZURE_TIER_CONFIRMED_F0` | no | Budget guard |
