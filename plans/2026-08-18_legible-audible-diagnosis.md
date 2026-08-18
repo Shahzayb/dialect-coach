@@ -27,7 +27,7 @@ path twice.
 | Question | Decision |
 | --- | --- |
 | "Hear it" under `OFFLINE_MODE` | Buttons render **disabled** with a caption saying why. `OFFLINE_MODE` means *no network call, ever* — that contract stays absolute. |
-| Voice selection | `AZURE_TTS_VOICE` env var only (defaults to `en-US-AvaNeural`). No picker. |
+| Voice selection | `AZURE_TTS_VOICE` env var only (defaults to `en-US-BrianNeural`). No picker. |
 | Slow playback | **In scope.** Each flagged word gets "Hear it" and "Hear it slowly" (SSML `prosody rate="-35%"`). |
 
 ### Verified against the installed SDK, not recalled

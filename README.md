@@ -61,7 +61,7 @@ container start if present.
 | `AZURE_SPEECH_REGION` | yes | Azure Speech resource region |
 | `GEMINI_API_KEY` | not yet | Coaching model — not read until the coaching chunk lands |
 | `GEMINI_MODEL` | no | Model ID override, so it can be swapped without a code change |
-| `AZURE_TTS_VOICE` | no | en-US neural voice for "Hear it" playback (default `en-US-AvaNeural`) |
+| `AZURE_TTS_VOICE` | no | en-US neural voice for "Hear it" playback (default `en-US-BrianNeural`) |
 | `MIN_DURATION_SECONDS`, `MAX_DURATION_SECONDS_*` | no | Recording length guards |
 | `UNSCRIPTED_TWO_PASS` | not yet | Two-pass unscripted assessment; counted by the budget guard, but Mode C is not built |
 | `MONTHLY_BUDGET_USD`, `AZURE_TIER_CONFIRMED_F0` | no | Budget guard |

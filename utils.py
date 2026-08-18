@@ -96,7 +96,7 @@ _REQUIRED_VARS = ("AZURE_SPEECH_KEY", "AZURE_SPEECH_REGION")
 
 _DEFAULTS: dict[str, str] = {
     "GEMINI_MODEL": "gemini-3.6-flash",
-    "AZURE_TTS_VOICE": "en-US-AvaNeural",
+    "AZURE_TTS_VOICE": "en-US-BrianNeural",
     "DB_PATH": "./data/coach.db",
     "MIN_DURATION_SECONDS": "1.5",
     "MAX_DURATION_SECONDS_DRILL": "30",

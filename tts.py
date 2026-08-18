@@ -58,7 +58,7 @@ class Synthesis:
 
 def voice_name() -> str:
     """The configured neural voice. `AZURE_TTS_VOICE` has a default, so this cannot fail."""
-    return utils.get("AZURE_TTS_VOICE") or "en-US-AvaNeural"
+    return utils.get("AZURE_TTS_VOICE") or "en-US-BrianNeural"
 
 
 def slow_ssml(text: str, voice: str, rate: str = SLOW_RATE) -> str:

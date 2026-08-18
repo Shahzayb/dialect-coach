@@ -217,7 +217,7 @@ def test_a_cached_phrase_is_not_charged_to_the_meter_twice(tmp_path, monkeypatch
     monkeypatch.setattr(
         tts, "synthesise",
         lambda text, **kw: tts.Synthesis(audio=b"WAV", characters=len(text),
-                                         voice="en-US-AvaNeural", attempts=1),
+                                         voice="en-US-BrianNeural", attempts=1),
     )
 
     cache: OrderedDict = OrderedDict()
@@ -229,7 +229,7 @@ def test_a_cached_phrase_is_not_charged_to_the_meter_twice(tmp_path, monkeypatch
         app_module.play(conn, "weather", slow=False, label="test", source="word-0")
 
     assert db.monthly_tts_characters(conn) == len("weather"), "charged once, not four times"
-    assert state["now_playing"] == {"key": ("en-US-AvaNeural", "weather", False),
+    assert state["now_playing"] == {"key": ("en-US-BrianNeural", "weather", False),
                                     "source": "word-0"}
     conn.close()
 

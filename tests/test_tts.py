@@ -30,15 +30,15 @@ def online(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_slow_ssml_carries_the_rate_and_the_voice() -> None:
-    ssml = tts.slow_ssml("hello", "en-US-AvaNeural")
+    ssml = tts.slow_ssml("hello", "en-US-BrianNeural")
     assert 'rate="-35%"' in ssml
-    assert 'name="en-US-AvaNeural"' in ssml
+    assert 'name="en-US-BrianNeural"' in ssml
     assert "hello" in ssml
 
 
 def test_slow_ssml_escapes_text_that_would_break_the_request() -> None:
     """An unescaped & or < is rejected as malformed — the whole phrase fails, not one word."""
-    ssml = tts.slow_ssml("Tom & Jerry <fast>", "en-US-AvaNeural")
+    ssml = tts.slow_ssml("Tom & Jerry <fast>", "en-US-BrianNeural")
     assert "&amp;" in ssml
     assert "&lt;fast&gt;" in ssml
     assert "<fast>" not in ssml
