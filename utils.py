@@ -76,6 +76,11 @@ def phoneme_band(score: float | None) -> Band:
     return score_band(score, PHONEME_RED, PHONEME_AMBER)
 
 
+# How many times a paid call may be sent before giving up. Named here because the budget
+# guard has to price the worst case (every attempt reaches the provider and is charged),
+# not the lucky case, and the guard and the retry loop must not drift apart.
+MAX_SYNTHESIS_ATTEMPTS = 3
+
 # Reference text limits. Azure aligns words against the reference, and a very long one
 # both costs alignment quality and is not a realistic single attempt.
 MAX_REFERENCE_CHARS = 1000
@@ -331,7 +336,7 @@ class PermanentError(RuntimeError):
 def retry_transient(
     fn: Callable[[], T],
     *,
-    attempts: int = 3,
+    attempts: int = MAX_SYNTHESIS_ATTEMPTS,
     base_delay: float = 0.5,
     max_delay: float = 8.0,
     sleep: Callable[[float], None] = time.sleep,

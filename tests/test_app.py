@@ -311,3 +311,74 @@ def test_a_retried_assessment_charges_the_meter_for_every_attempt(tmp_path) -> N
     )
     assert db.monthly_stt_seconds(conn) == 36.0
     conn.close()
+
+
+def test_a_failed_synthesis_is_returned_not_rendered_in_a_narrow_column(
+    tmp_path, monkeypatch
+) -> None:
+    """`play` must hand the message back, not emit it inside an `st.columns` entry.
+
+    Measured against the running app: an alert emitted from inside the button column laid
+    out at 124px in a 672px row — a couple of hundred characters of error at one word per
+    line. The caller renders it after the columns close.
+    """
+    from collections import OrderedDict
+
+    import app as app_module
+    import db
+    import tts
+
+    conn = db.connect(tmp_path / "fail.db")
+    monkeypatch.setenv("OFFLINE_MODE", "false")
+    monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
+    monkeypatch.setattr(app_module, "_session_cache", lambda _n: OrderedDict())
+    monkeypatch.setattr(app_module.st, "session_state", {}, raising=False)
+
+    def boom(text, **kw):
+        raise tts.SynthesisError("Azure rejected the request as malformed.")
+
+    monkeypatch.setattr(tts, "synthesise", boom)
+    outcome = app_module.play(conn, "weather", slow=False, label="x", source="word-0")
+
+    assert outcome is not None, "the failure must come back to the caller"
+    icon, message = outcome
+    assert "malformed" in message
+    conn.close()
+
+
+def test_a_run_that_fails_after_retries_still_charges_the_meter(tmp_path, monkeypatch) -> None:
+    """Three uploads reached Azure and may have been billed; recording zero under-reports."""
+    from collections import OrderedDict
+
+    import app as app_module
+    import db
+    import tts
+    import utils
+
+    conn = db.connect(tmp_path / "retry.db")
+    monkeypatch.setenv("OFFLINE_MODE", "false")
+    monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
+    monkeypatch.setattr(app_module, "_session_cache", lambda _n: OrderedDict())
+    monkeypatch.setattr(app_module.st, "session_state", {}, raising=False)
+
+    def exhaust(text, *, slow=False, on_attempt=None, **kw):
+        for attempt in (1, 2, 3):
+            on_attempt(attempt)
+        raise utils.TransientError("Azure was temporarily unavailable")
+
+    monkeypatch.setattr(tts, "synthesise", exhaust)
+    assert app_module.play(conn, "weather", slow=False, label="x", source="w") is not None
+    assert db.monthly_tts_characters(conn) == len("weather") * 3
+    conn.close()
+
+
+def test_omitted_words_still_offer_playback(run_app) -> None:
+    """A word you skipped is the one you most need to hear a native rendering of."""
+    assessment = offline_assessment()
+    assessment.words = [dict(assessment.words[0], word="unpredictable", accuracy=None,
+                             error_type="Omission", error_source="local_diff",
+                             phonemes=[], syllables=[])]
+    app = seed_result(run_app(), assessment)
+    assert not app.exception
+    assert any("Hear it" in b.label for b in app.button)
+    assert any("did not say this one" in c.value for c in app.caption)

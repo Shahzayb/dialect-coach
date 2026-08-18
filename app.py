@@ -321,8 +321,14 @@ def delivery_summary(words: list[dict[str, Any]]) -> dict[str, list[str]]:
 
 
 def play(conn: sqlite3.Connection, text: str, *, slow: bool, label: str,
-         source: str) -> None:
+         source: str) -> tuple[str, str] | None:
     """Synthesise `text` unless it is already cached, then queue it for playback.
+
+    Returns None on success, or an (icon, message) pair for the caller to render. It does
+    **not** render the failure itself: every call site is inside a narrow `st.columns`
+    entry, and an alert emitted here would be laid out at that column's width — a couple of
+    hundred characters of error wrapped into ~120 pixels, one word per line. The caller
+    renders it once the columns have closed.
 
     The cache lookup comes **before** the pre-flight and the usage record, and that order
     is the entire point. Streamlit re-runs this script top to bottom on every widget
@@ -334,19 +340,26 @@ def play(conn: sqlite3.Connection, text: str, *, slow: bool, label: str,
     key = (tts.voice_name(), text, slow)
 
     if lru_get(cache, key) is None:
+        payload_characters = len(tts.payload_for(text, slow=slow))
         try:
-            # Price exactly what will be sent, SSML markup included.
-            budget.preflight_tts(conn, len(tts.payload_for(text, slow=slow)))
+            # Price what a *failing* call can cost, not what a lucky one does: the meter
+            # below charges every attempt, so pricing a single attempt here would let the
+            # guard approve a call whose real charge lands past the budget.
+            budget.preflight_tts(conn, payload_characters * utils.MAX_SYNTHESIS_ATTEMPTS)
         except budget.BudgetError as exc:
-            st.error(str(exc), icon="💸")
-            return
+            return ("💸", str(exc))
+
+        attempts_made = 0
+
+        def note_attempt(attempt: int) -> None:
+            nonlocal attempts_made
+            attempts_made = attempt
 
         try:
             with st.spinner(f"Synthesising {label}…"):
-                result = tts.synthesise(text, slow=slow)
+                result = tts.synthesise(text, slow=slow, on_attempt=note_attempt)
         except utils.ConfigError as exc:
-            st.error(str(exc), icon="🔑")
-            return
+            return ("🔑", str(exc))
         except (utils.PermanentError, utils.TransientError, tts.SynthesisError,
                 speech_analyzer.AssessmentError) as exc:
             # AssessmentError belongs here even though this is synthesis: QuotaExhausted
@@ -355,10 +368,17 @@ def play(conn: sqlite3.Connection, text: str, *, slow: bool, label: str,
             if speech_analyzer.is_quota_exhausted(exc):
                 # Azure is authoritative; block the rest of the month regardless of meter.
                 budget.mark_quota_exhausted()
+            # A run that reached Azure and then failed still consumed allowance, so it is
+            # metered here rather than only on the success path. Nothing reached Azure on
+            # a ConfigError (caught above) or when no attempt was ever started.
+            if attempts_made:
+                db.record_tts_usage(
+                    conn, characters=payload_characters * attempts_made,
+                    voice=tts.voice_name(),
+                )
             # redact() rather than str(): SDK error details can echo request context.
-            st.error(utils.redact(str(exc)), icon="🔇")
             logger.error("Synthesis failed", exc_info=True)
-            return
+            return ("🔇", utils.redact(str(exc)))
 
         db.record_tts_usage(
             conn,
@@ -371,6 +391,7 @@ def play(conn: sqlite3.Connection, text: str, *, slow: bool, label: str,
 
     # `source` identifies the widget that asked, so only that one renders the player.
     st.session_state["now_playing"] = {"key": key, "source": source}
+    return None
 
 
 def playback_buttons(
@@ -384,15 +405,23 @@ def playback_buttons(
     is a hard Streamlit error, not a cosmetic one.
     """
     offline = utils.offline_mode()
+    failure: tuple[str, str] | None = None
+
     left, right, _ = st.columns([1, 1, 3])
     with left:
         if st.button("🔊 Hear it", key=f"{key_prefix}-normal", disabled=offline,
                      use_container_width=True):
-            play(conn, text, slow=False, label=label, source=key_prefix)
+            failure = play(conn, text, slow=False, label=label, source=key_prefix)
     with right:
         if st.button("🐢 Slowly", key=f"{key_prefix}-slow", disabled=offline,
                      use_container_width=True):
-            play(conn, text, slow=True, label=label, source=key_prefix)
+            failure = play(conn, text, slow=True, label=label, source=key_prefix)
+
+    # Rendered here, outside the columns, so a long message gets the full width instead of
+    # the button's ~120 pixels.
+    if failure is not None:
+        icon, message = failure
+        st.error(message, icon=icon)
 
     # Matched on the clicking widget, not on the text. A paragraph flags the same common
     # word more than once, and matching by text would render an autoplaying player in
@@ -614,8 +643,11 @@ def render_word_card(conn: sqlite3.Connection, word: dict[str, Any], index: int)
             )
             st.caption(f"Syllables: {rendered}")
 
-        if error_type != "Omission":
-            playback_buttons(conn, text, key_prefix=f"word-{index}", label=f"“{text}”")
+        if error_type == "Omission":
+            # It was never spoken, which is exactly why the target is worth hearing. The
+            # word comes from the reference, so there is always something to synthesise.
+            st.caption("You did not say this one. Hear what it should sound like:")
+        playback_buttons(conn, text, key_prefix=f"word-{index}", label=f"“{text}”")
 
 
 def render_delivery(assessment) -> None:

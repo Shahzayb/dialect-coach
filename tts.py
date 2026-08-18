@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Callable
 from xml.sax.saxutils import escape as xml_escape, quoteattr
 
 import utils
@@ -126,13 +127,18 @@ def _speak(payload: str, voice: str, *, is_ssml: bool) -> bytes:
     raise SynthesisError(f"Unexpected synthesis result: {result.reason}")
 
 
-def synthesise(text: str, *, voice: str | None = None, slow: bool = False) -> Synthesis:
+def synthesise(text: str, *, voice: str | None = None, slow: bool = False,
+               on_attempt: Callable[[int], None] | None = None) -> Synthesis:
     """Synthesise `text` with the configured neural voice. Returns audio and billing info.
 
     `characters` counts the **full payload sent to Azure**, SSML markup included. If Azure
     excludes markup from billing this over-counts; over-counting is the correct direction
     for a spend guard, and erring toward "less remaining than you think" is the rule the
     rest of `budget.py` already follows.
+
+    `on_attempt` is called with the attempt number before each try. A caller that pays per
+    call needs it on the *failing* path too: when every attempt fails, the exception carries
+    no attempt count, but the text still reached Azure each time and may have been charged.
     """
     text = (text or "").strip()
     if not text:
@@ -154,6 +160,8 @@ def synthesise(text: str, *, voice: str | None = None, slow: bool = False) -> Sy
     def count(attempt: int) -> None:
         nonlocal made
         made = attempt
+        if on_attempt is not None:
+            on_attempt(attempt)
 
     audio = utils.retry_transient(
         lambda: _speak(payload, chosen, is_ssml=slow), on_attempt=count

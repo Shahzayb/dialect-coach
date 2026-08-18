@@ -227,3 +227,31 @@ def test_a_synthesis_403_is_caught_by_the_handler_that_acts_on_it() -> None:
     assert issubclass(sa.QuotaExhausted, handled)
     assert not issubclass(sa.QuotaExhausted, (utils.PermanentError, utils.TransientError,
                                               tts.SynthesisError))
+
+
+def test_the_caller_sees_attempts_even_when_every_one_fails(
+    online, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failing path is the one that needs this: the exception carries no count.
+
+    Three transient failures mean the text reached Azure three times and may have been
+    charged three times, but `synthesise` raises rather than returning a Synthesis, so
+    without `on_attempt` the caller has nothing to meter.
+    """
+    seen: list[int] = []
+    monkeypatch.setattr(tts, "_speak", lambda *a, **k: (_ for _ in ()).throw(
+        utils.TransientError("busy")))
+    monkeypatch.setattr(utils.time, "sleep", lambda _s: None)
+
+    with pytest.raises(utils.TransientError):
+        tts.synthesise("weather", on_attempt=seen.append)
+
+    assert seen == [1, 2, 3]
+    assert len(seen) == utils.MAX_SYNTHESIS_ATTEMPTS
+
+
+def test_on_attempt_is_optional() -> None:
+    """Every existing caller omits it; adding the hook must not make it mandatory."""
+    import inspect
+
+    assert inspect.signature(tts.synthesise).parameters["on_attempt"].default is None
