@@ -852,7 +852,7 @@ def render() -> None:
     if st.button("Assess", type="primary", disabled=source is None):
         if validate_reference(reference_text):
             audio_bytes = source.getvalue()
-            key = utils.attempt_hash(reference_text, audio_bytes)
+            key = utils.attempt_hash(reference_text, audio_bytes, mode)
             cached = _cache_get(key)
             if cached is None:
                 assessment, attempt_id = run_assessment(conn, audio_bytes, reference_text, mode)

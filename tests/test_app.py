@@ -128,7 +128,7 @@ def seed_result(app: AppTest, assessment, *, attempt_id: int | None = None,
     """
     from collections import OrderedDict
 
-    key = utils.attempt_hash(REFERENCE, b"audio")
+    key = utils.attempt_hash(REFERENCE, b"audio", mode)
     app.session_state["assessments"] = OrderedDict({
         key: app_module.CachedAttempt(
             key=key, assessment=assessment, reference_text=REFERENCE,
