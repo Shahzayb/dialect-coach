@@ -47,11 +47,27 @@ def test_max_duration_is_per_mode() -> None:
 
 def test_attempt_hash_separates_text_from_audio() -> None:
     # Without a delimiter, ("ab", b"c") and ("a", b"bc") would collide.
-    assert utils.attempt_hash("ab", b"c") != utils.attempt_hash("a", b"bc")
+    assert utils.attempt_hash("ab", b"c", Mode.DRILL) != utils.attempt_hash("a", b"bc", Mode.DRILL)
 
 
 def test_attempt_hash_is_stable() -> None:
-    assert utils.attempt_hash("hello", b"\x01\x02") == utils.attempt_hash("hello", b"\x01\x02")
+    assert (
+        utils.attempt_hash("hello", b"\x01\x02", Mode.DRILL)
+        == utils.attempt_hash("hello", b"\x01\x02", Mode.DRILL)
+    )
+
+
+def test_attempt_hash_separates_mode_from_the_rest() -> None:
+    """The same text read into the same recording is assessed differently per mode —
+
+    Drill is single-shot, Paragraph is continuous — so the same (text, audio) pair must
+    not collide across modes. A collision would silently serve the other mode's cached
+    result on Assess: no error, no re-assessment, just the wrong report on screen.
+    """
+    assert (
+        utils.attempt_hash("hello", b"\x01\x02", Mode.DRILL)
+        != utils.attempt_hash("hello", b"\x01\x02", Mode.PARAGRAPH)
+    )
 
 
 def test_normalise_words_strips_punctuation_and_case() -> None:

@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS attempts (
   completeness     REAL,
   prosody          REAL,               -- NULL, never 0.0, when Azure did not return one
   azure_raw_json   TEXT    NOT NULL,   -- verbatim; a JSON array in continuous mode
-  gemini_raw_json  TEXT,               -- NULL until the coaching chunk fills it in
+  gemini_raw_json  TEXT,               -- NULL when the offline coach wrote the report
   coach_source     TEXT,               -- 'gemini' | 'fallback' | NULL
   offline          INTEGER NOT NULL DEFAULT 0  -- 1 when replayed from the fixture
 );
@@ -124,7 +124,7 @@ def record_attempt(
 ) -> int:
     """Store one assessment. `azure_raw` is serialised as given, not reshaped.
 
-    Returns the new row's id, which the coaching chunk uses to attach its own response.
+    Returns the new row's id, which `attach_coaching` uses to attach the coaching report.
     """
     scores = overall_scores or {}
     cursor = conn.execute(
@@ -166,8 +166,9 @@ def attach_coaching(
 ) -> None:
     """Attach the coaching response to an existing attempt.
 
-    Unused until the coaching chunk lands. The columns exist from schema version 1 so that
-    chunk is an UPDATE rather than a migration over rows already recorded.
+    Called once per attempt, right after `ai_coach.coach` returns — whichever coach wrote
+    the report. The columns have existed since schema version 1, so this was always an
+    UPDATE over rows already recorded rather than a migration.
     """
     conn.execute(
         "UPDATE attempts SET gemini_raw_json = ?, coach_source = ? WHERE id = ?",

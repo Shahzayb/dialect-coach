@@ -215,9 +215,20 @@ def max_duration_seconds(mode: Mode) -> float:
     return get_float(f"MAX_DURATION_SECONDS_{mode.value.upper()}")
 
 
-def attempt_hash(reference_text: str, audio_bytes: bytes) -> str:
-    """SHA-256 over the reference text and the audio, used as the session cache key."""
+def attempt_hash(reference_text: str, audio_bytes: bytes, mode: Mode) -> str:
+    """SHA-256 over the mode, the reference text and the audio — the session cache key.
+
+    `mode` has to be part of the digest: the same reference text read into the same
+    recording is a legitimate thing to assess in Drill and then in Paragraph, and each
+    goes through a different Azure code path (single-shot versus continuous) with a
+    different result shape. Without `mode` in the key, switching modes and re-assessing
+    identical (text, audio) would hit the other mode's cached entry and silently show a
+    stale result — no error, no re-assessment, and a `CachedAttempt.mode` that disagrees
+    with what is on screen.
+    """
     digest = hashlib.sha256()
+    digest.update(mode.value.encode("utf-8"))
+    digest.update(b"\x00")
     digest.update(reference_text.encode("utf-8"))
     digest.update(b"\x00")
     digest.update(audio_bytes)

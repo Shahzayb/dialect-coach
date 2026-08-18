@@ -590,3 +590,63 @@ def analyse(wav_path: str, reference_text: str, mode: Mode) -> Assessment:
         offline=offline,
         attempts=attempts,
     )
+
+
+# --- Reading the normalised shape ------------------------------------------------------
+# Pure readers of the structure `normalise` produces: no Streamlit, no network, no SDK.
+# They live here rather than in `app.py` because the coaching layer needs them too and
+# cannot import a module that pulls in Streamlit. One definition of "what you actually
+# produced", so the word card and the coaching report can never disagree about it.
+
+
+def is_flagged(word: dict[str, Any]) -> bool:
+    """Whether a word is worth showing a card for, and worth coaching on.
+
+    One predicate for both, so the coaching report can never discuss a word the UI has
+    not flagged, or stay silent about one it has.
+    """
+    accuracy = word.get("accuracy")
+    return bool(
+        (word.get("error_type") or "None") != "None"
+        or (isinstance(accuracy, (int, float)) and accuracy < utils.WORD_AMBER)
+        or word.get("delivery_error_types")
+    )
+
+
+def phoneme_pairs(
+    word: dict[str, Any]
+) -> list[tuple[str | None, str | None, float | None]]:
+    """(expected IPA, produced IPA, score) for each phoneme in a word.
+
+    The produced phoneme is the highest-scoring nbest alternate that differs from the
+    target, or None when Azure's best guess agrees with it. This is the whole point of the
+    tool: "you produced /d/ where /ð/ was expected" is actionable, "your /ð/ scored 80" is
+    not. Takes the maximum rather than trusting nbest to arrive sorted.
+    """
+    pairs: list[tuple[str | None, str | None, float | None]] = []
+    for phoneme in word.get("phonemes") or []:
+        expected = phoneme.get("phoneme")
+        alternates = [a for a in (phoneme.get("nbest") or []) if a.get("phoneme")]
+        produced = None
+        if alternates:
+            best = max(alternates, key=lambda a: a.get("score") or 0.0)
+            if best.get("phoneme") != expected:
+                produced = best.get("phoneme")
+        pairs.append((expected, produced, phoneme.get("score")))
+    return pairs
+
+
+def delivery_summary(words: list[dict[str, Any]]) -> dict[str, list[str]]:
+    """Which words carry each delivery fault, in reading order.
+
+    These are not `ErrorType` values — they live under `Feedback.Prosody` in the payload
+    (see `_delivery_error_types` above). Aggregating them into counts plus the
+    specific words involved is what §5 asks for, and it is what turns a pronunciation
+    scorer into something that also fixes speaking flow.
+    """
+    summary: dict[str, list[str]] = {}
+    for word in words:
+        for fault in word.get("delivery_error_types") or []:
+            summary.setdefault(fault, []).append(str(word.get("word") or ""))
+    return summary
+

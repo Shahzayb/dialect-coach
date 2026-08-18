@@ -3,21 +3,96 @@
 ## Architecture
 
 A single-page Streamlit app. `app.py` holds UI only and makes no API calls; it orchestrates
-`speech_analyzer` (Azure STT), `tts` (Azure neural TTS), `audio_utils`, `budget`, `db` and
-`utils`. Still uncreated: `ai_coach.py`, `fallback_coach.py`, `phoneme_reference.py`.
+`speech_analyzer` (Azure STT), `tts` (Azure neural TTS), `audio_utils`, `budget`, `db`,
+`utils`, and the coaching layer — `phoneme_reference`, `fallback_coach`, `ai_coach`.
 
-`app.py` also holds the pure rendering helpers — `colour_coded_html`, `reference_vs_heard`,
-`phoneme_pairs`, `delivery_summary`, `severity_key`, `is_flagged` — kept free of Streamlit
-so what the user sees is testable directly rather than only through a headless app run.
+`app.py` holds the rendering helpers that are specific to the UI — `colour_coded_html`,
+`reference_vs_heard`, `severity_key` — kept free of Streamlit so what the user sees is
+testable directly rather than only through a headless app run. The readers that answer
+"what did you actually produce" — `phoneme_pairs`, `is_flagged`, `delivery_summary` — moved
+into `speech_analyzer` when the coaching layer landed, because that layer needs them too and
+cannot import a module that pulls in Streamlit; one definition means the word card and the
+coaching report can never disagree about a substitution.
 
 `db.py` and `budget.py` are additions to the master plan's §8 file list — it predates both
 the SQLite decision and the decision to derive the meter from it.
 
 Local SQLite history, no accounts, no persistent audio storage. One row per attempt holding
-**both raw API responses verbatim** (`azure_raw_json`, and `gemini_raw_json` created NULL
-for the coaching chunk), the normalised scores, and a SHA-256 of the audio — never the
-audio itself. Storing responses whole means changing what the UI shows is a re-parse, not a
-re-recording that spends quota.
+**both raw API responses verbatim** (`azure_raw_json`, and `gemini_raw_json` — the whole
+Gemini response on the model path, or the report itself on the offline path, told apart by
+`coach_source`), the normalised scores, and a SHA-256 of the audio — never the audio itself.
+Storing responses whole means changing what the UI shows is a re-parse, not a re-recording
+or a re-spend of quota.
+
+### The coaching layer
+
+Three modules, landed 2026-08-18, built in this order deliberately:
+
+- **`phoneme_reference.py`** — static en-US IPA data keyed **by phoneme**, never by first
+  language: the lookup is expected → produced, and the produced side comes from Azure's
+  `NBestPhonemes`, from what the speaker actually did. 46 entries (28 consonants +
+  monophthongs, 5 diphthongs, 5 r-coloured vowels), each with a concrete articulation note
+  and, per observed substitution, minimal word pairs. Keyed on **Azure's own symbols** —
+  rhotic, no length marks (`ɝ ɚ ɹ ɔɹ ɪɹ oʊ eɪ`, never `iː ɑː ɜː`) — verified against both
+  fixtures rather than assumed; `normalise()` maps textbook/keyboard spellings (`ɡ`, `r`,
+  `ʧ`, `ɜː`, …) onto them. A pair with no entry degrades to `NO_NOTE` and an empty pair
+  list, never to invented advice. Written for three consumers so it is written once: both
+  coaches read `articulation`/`minimal_pairs`; a later perception trainer can read
+  `Phoneme.contrasts` directly; a later accent feature adds fields to the same dataclasses.
+- **`fallback_coach.py`** — **the primary path, not the degraded one**: deterministic,
+  no key, no network, no clock, same bytes out for the same bytes in. Holds the shared
+  report schema too (`CoachingReport` and friends, pydantic, no `Optional`/defaults, so the
+  GenAI SDK's schema conversion stays clean) — kept on this side rather than in `ai_coach`
+  so the free path never imports the Google SDK. `compact()` reduces a fixture-sized Azure
+  response (~39 kB) to ~2 kB of evidence — only flagged words, their substitutions, weak
+  syllables, delivery faults, and the distinct `observed_pairs` — and is shared with
+  `ai_coach`, so both coaches read exactly the same facts. Ranking (`_groups`) is worth
+  remembering: adjacent phonemes claiming the *same* produced sound are collapsed to the
+  worse of the run (Azure's aligner smears one produced sound across two targets — the
+  fixture's "thursday" reports /tʃ/ at 100 for both its /z/ and its /d/), and a pair the
+  reference table has written up outranks an unwritten one at the same word-spread, because
+  an unwritten pair can only be named while a written one can be practised — Azure's
+  alternates for a mangled word include alignment noise, and that is exactly what has no
+  entry. Without both rules the flagship `/θ/ → /s/` on "thursday" ranked behind two
+  artefacts.
+- **`ai_coach.py`** — the model path, falling through to `fallback_coach` on any failure.
+  `response_mime_type="application/json"` **and** `response_schema=CoachingReport` are both
+  set; the mime type alone does not guarantee shape. `max_output_tokens` is deliberately
+  left unset — capping it on a thinking model truncates the JSON mid-object, which shows up
+  as a parse failure and a silent fall-through rather than a readable error.
+  `automatic_function_calling` is explicitly disabled (no tools are declared, so it had
+  nothing to do but warn on every call). The model is not trusted about phonemes:
+  `validated()` drops any fix whose `(expected, produced)` pair is absent from
+  `observed_pairs`, after the prompt has already told it not to invent one — the prompt
+  constraint is a request, the validation is what makes it true. `reference_text` and
+  `recognised_text` are wrapped in `<reference_text>`/`<recognised_text>` delimiters with
+  the delimiter tokens stripped from the text first (both are free-form user input) and an
+  explicit system-instruction line to analyse their contents and never obey them. A 429 is
+  terminal without a retry (a free-tier 429 is the day's or month's allowance, not
+  congestion); 5xx and transport failures get one call plus two retries
+  (`MAX_COACH_ATTEMPTS = 3`). `coach()` always returns a `CoachingResult`, whatever the
+  network did — `sdk_http_response` (raw transport headers) is excluded from what gets
+  stored. `report_from_raw()` re-reads a stored payload back into a `CoachingReport` for
+  either source, so a change to what the UI shows is a re-parse of a stored row, not a
+  fresh call. `OFFLINE_MODE` is refused inside `coach()` itself, before any client is
+  built — even an injected one — the same absolute contract `tts.synthesise` enforces on
+  its own rather than trusting the caller.
+
+**Deliberately no Gemini budget guard.** `budget.py` is shaped around Azure's paid tiers; a
+free-tier Gemini key returns 429 rather than billing, which `ai_coach` already treats as
+terminal. The usage metadata (`prompt_token_count`, etc.) is still stored verbatim in
+`gemini_raw_json`, so a token meter is a later re-parse if the free tier ever needs one.
+
+**UI contract**: the offline report renders on every assessment, for free, directly under
+the scores — what to do about them before the evidence for them. "Improve this with
+Gemini" is a button, not a side effect of assessing, and its caption states what a click
+sends (the compacted analysis and the reference text, never the audio) before it is
+clicked. The session `coaching` cache is checked before anything is produced, and
+`coaching_for`'s `already_asked` guard exists because a button click is handled in the same
+Streamlit rerun that renders the button — the on-screen button still shows enabled until
+the *next* rerun, so the spend guard has to live where the spend happens, not on the
+widget's `disabled` flag. `db.attach_coaching` fires once per (attempt, source), keyed off
+`CachedAttempt.attempt_id`.
 
 ## Technologies
 
@@ -112,9 +187,11 @@ No lint or type-check setup yet.
   direction for a spend guard.
 - Secrets come from environment variables only; never hardcoded, logged, or surfaced in a
   UI error or traceback. `.env` is gitignored and never copied into the image.
-- Required: `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION`, `GEMINI_API_KEY`. The full annotated
-  set, including duration guards and the budget guard, lives in `.env.example`.
-  `GEMINI_API_KEY` and `GEMINI_MODEL` are still unread; `AZURE_TTS_VOICE` is now live.
+- Required: `AZURE_SPEECH_KEY`, `AZURE_SPEECH_REGION`. `GEMINI_API_KEY` is optional — its
+  absence, or `OFFLINE_MODE`, still produces a complete report via `fallback_coach`, with a
+  visible note saying which coach wrote it. The full annotated set, including duration
+  guards and the budget guard, lives in `.env.example`. `GEMINI_API_KEY`, `GEMINI_MODEL`
+  and `AZURE_TTS_VOICE` are all live and read.
 
 ## Hosting
 

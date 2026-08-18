@@ -13,6 +13,7 @@ import json
 import pytest
 
 import speech_analyzer as sa
+import utils
 from utils import Mode
 
 
@@ -228,3 +229,88 @@ def test_quota_exhaustion_is_a_type_not_a_marker_string() -> None:
     assert sa.is_quota_exhausted(error)
     assert "QUOTA_EXHAUSTED" not in str(error), "internal markers must not reach the UI"
     assert not sa.is_quota_exhausted(sa.AssessmentError("something else"))
+
+
+def word(text: str, accuracy=None, error_type="None", error_source="azure",
+         delivery=None, phonemes=None, syllables=None) -> dict:
+    """One normalised word, hand-built. The captured fixtures carry no delivery faults."""
+    return {
+        "word": text,
+        "accuracy": accuracy,
+        "error_type": error_type,
+        "error_source": error_source,
+        "delivery_error_types": delivery or [],
+        "syllables": syllables or [],
+        "phonemes": phonemes or [],
+    }
+
+
+# --- Reading the normalised shape ---------------------------------------------------------
+# These read the structure `normalise` produces and are shared with the coaching layer,
+# which cannot import `app.py`. Their tests live beside the parser for the same reason.
+
+
+def test_the_produced_phoneme_is_the_best_alternate_that_differs() -> None:
+    """'/ð/ → /d/' is actionable; '/ð/ scored 80' is not. This is the tool's whole point."""
+    subject = word("this", 97.0, phonemes=[
+        {"phoneme": "ð", "score": 80.0, "is_mispronounced": False,
+         "nbest": [{"phoneme": "d", "score": 100.0}, {"phoneme": "ð", "score": 92.0}]},
+    ])
+    assert sa.phoneme_pairs(subject) == [("ð", "d", 80.0)]
+
+
+def test_no_substitution_is_reported_when_the_target_wins() -> None:
+    subject = word("this", 97.0, phonemes=[
+        {"phoneme": "ð", "score": 99.0, "is_mispronounced": False,
+         "nbest": [{"phoneme": "ð", "score": 100.0}, {"phoneme": "d", "score": 20.0}]},
+    ])
+    assert sa.phoneme_pairs(subject) == [("ð", None, 99.0)]
+
+
+def test_the_best_alternate_is_taken_by_score_not_by_position() -> None:
+    subject = word("this", 50.0, phonemes=[
+        {"phoneme": "θ", "score": 40.0, "is_mispronounced": True,
+         "nbest": [{"phoneme": "s", "score": 30.0}, {"phoneme": "t", "score": 90.0}]},
+    ])
+    assert sa.phoneme_pairs(subject)[0][1] == "t"
+
+
+def test_a_phoneme_with_no_symbol_is_not_rendered_as_the_word_none() -> None:
+    """Showing "/None/" invents a target sound in a tool whose job is naming sounds."""
+    subject = word("odd", 40.0, phonemes=[
+        {"phoneme": None, "score": 30.0, "is_mispronounced": True, "nbest": []},
+    ])
+    assert sa.phoneme_pairs(subject) == [(None, None, 30.0)]
+
+
+def test_delivery_faults_are_aggregated_with_the_words_involved() -> None:
+    """Synthetic payload: the captured fixture contains no delivery faults at all.
+
+    Noted in memory-bank/progress.md — the real 12.8s recording came back clean on
+    Break and Intonation, so this path can only be covered by a hand-built payload.
+    """
+    words = [
+        word("the", 90.0, delivery=["UnexpectedBreak"]),
+        word("weather", 88.0, delivery=["UnexpectedBreak", "Monotone"]),
+        word("today", 95.0),
+    ]
+    summary = sa.delivery_summary(words)
+    assert summary["UnexpectedBreak"] == ["the", "weather"]
+    assert summary["Monotone"] == ["weather"]
+    assert "MissingBreak" not in summary
+
+
+def test_a_clean_attempt_has_no_delivery_entries() -> None:
+    assert sa.delivery_summary([word("the", 99.0)]) == {}
+
+
+def test_a_clean_high_scoring_word_is_not_flagged() -> None:
+    assert not sa.is_flagged(word("weather", 99.0))
+
+
+def test_a_delivery_only_fault_still_flags_the_word() -> None:
+    assert sa.is_flagged(word("weather", 99.0, delivery=["Monotone"]))
+
+
+def test_a_word_below_the_amber_cut_is_flagged() -> None:
+    assert sa.is_flagged(word("weather", utils.WORD_AMBER - 0.1))
