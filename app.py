@@ -159,18 +159,10 @@ def _cache_put(key: str, assessment: Any, reference_text: str) -> None:
 
 
 # --- Pure rendering helpers -----------------------------------------------------------------
-# Kept free of Streamlit so the diffing, banding and aggregation can be tested directly
-# rather than through a headless app run.
-
-
-def is_flagged(word: dict[str, Any]) -> bool:
-    """Whether a word is worth showing a card for."""
-    accuracy = word.get("accuracy")
-    return bool(
-        (word.get("error_type") or "None") != "None"
-        or (isinstance(accuracy, (int, float)) and accuracy < utils.WORD_AMBER)
-        or word.get("delivery_error_types")
-    )
+# Kept free of Streamlit so the diffing, banding and ordering can be tested directly rather
+# than through a headless app run. The readers that answer "what did you actually produce"
+# — `phoneme_pairs`, `is_flagged`, `delivery_summary` — live in `speech_analyzer` instead,
+# because the coaching layer needs them and cannot import a module that pulls in Streamlit.
 
 
 def severity_key(word: dict[str, Any]) -> tuple[int, float]:
@@ -268,53 +260,15 @@ def diff_html(pairs: list[tuple[str, str]]) -> str:
     return '<div style="line-height:2;">' + " ".join(spans) + "</div>"
 
 
-def phoneme_pairs(
-    word: dict[str, Any]
-) -> list[tuple[str | None, str | None, float | None]]:
-    """(expected IPA, produced IPA, score) for each phoneme in a word.
-
-    The produced phoneme is the highest-scoring nbest alternate that differs from the
-    target, or None when Azure's best guess agrees with it. This is the whole point of the
-    tool: "you produced /d/ where /ð/ was expected" is actionable, "your /ð/ scored 80" is
-    not. Takes the maximum rather than trusting nbest to arrive sorted.
-    """
-    pairs: list[tuple[str | None, str | None, float | None]] = []
-    for phoneme in word.get("phonemes") or []:
-        expected = phoneme.get("phoneme")
-        alternates = [a for a in (phoneme.get("nbest") or []) if a.get("phoneme")]
-        produced = None
-        if alternates:
-            best = max(alternates, key=lambda a: a.get("score") or 0.0)
-            if best.get("phoneme") != expected:
-                produced = best.get("phoneme")
-        pairs.append((expected, produced, phoneme.get("score")))
-    return pairs
-
-
 def weakest_phoneme(word: dict[str, Any]) -> str:
     """One-line summary of a word's worst sound, for the card header."""
-    pairs = [p for p in phoneme_pairs(word) if p[2] is not None]
+    pairs = [p for p in speech_analyzer.phoneme_pairs(word) if p[2] is not None]
     if not pairs:
         return ""
     expected, produced, score = min(pairs, key=lambda p: p[2])
     if produced:
         return f"/{expected}/ → sounded like /{produced}/"
     return f"/{expected}/ ({score:.0f})"
-
-
-def delivery_summary(words: list[dict[str, Any]]) -> dict[str, list[str]]:
-    """Which words carry each delivery fault, in reading order.
-
-    These are not `ErrorType` values — they live under `Feedback.Prosody` in the payload
-    (see `speech_analyzer._delivery_error_types`). Aggregating them into counts plus the
-    specific words involved is what §5 asks for, and it is what turns a pronunciation
-    scorer into something that also fixes speaking flow.
-    """
-    summary: dict[str, list[str]] = {}
-    for word in words:
-        for fault in word.get("delivery_error_types") or []:
-            summary.setdefault(fault, []).append(str(word.get("word") or ""))
-    return summary
 
 
 # --- Playback ---------------------------------------------------------------------------------
@@ -610,7 +564,7 @@ def render_word_card(conn: sqlite3.Connection, word: dict[str, Any], index: int)
         if notes:
             st.caption(" · ".join(notes))
 
-        pairs = phoneme_pairs(word)
+        pairs = speech_analyzer.phoneme_pairs(word)
         if pairs:
             rows = []
             for expected, produced, score_value in pairs:
@@ -653,7 +607,7 @@ def render_word_card(conn: sqlite3.Connection, word: dict[str, Any], index: int)
 def render_delivery(assessment) -> None:
     """Counts and locations of UnexpectedBreak / MissingBreak / Monotone."""
     st.subheader("Delivery")
-    summary = delivery_summary(assessment.words)
+    summary = speech_analyzer.delivery_summary(assessment.words)
     if not summary:
         st.success("No pausing or intonation problems flagged in that attempt.")
         return
@@ -682,7 +636,9 @@ def render_result(conn: sqlite3.Connection, assessment, reference_text: str, sou
             "for audio the way there is for an assessment. Unset it to hear the target."
         )
 
-    flagged = sorted((w for w in assessment.words if is_flagged(w)), key=severity_key)
+    flagged = sorted(
+        (w for w in assessment.words if speech_analyzer.is_flagged(w)), key=severity_key
+    )
     st.subheader(f"Flagged words ({len(flagged)} of {len(assessment.words)})")
     if not flagged:
         st.success("Nothing flagged in that attempt.")
