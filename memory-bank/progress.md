@@ -13,6 +13,13 @@ remains is Mode C (unscripted), which is also what unblocks #12's remaining half
 
 ## Releases
 
+**v0.3.0 — 2026-08-19.** Score breakdown, headline mispronunciation/delivery-fault counts,
+and the per-word phoneme hover tooltip, merged via
+[PR #21](https://github.com/Shahzayb/pronunciation-analyzer/pull/21), tagged, and released
+(`gh release create v0.3.0`). Closes #10, #11, #13. Splits #12 — its content-score half
+(vocabulary/grammar/topic) retitled and moved to milestone v0.12.0, since that data only
+comes from unscripted assessment, not built yet. Milestone v0.3.0 closed.
+
 **v0.2.0 — 2026-08-19.** Stop, reset and delete controls on the record-and-assess surface,
 merged via [PR #20](https://github.com/Shahzayb/pronunciation-analyzer/pull/20), tagged, and
 released (`gh release create v0.2.0`). Closes #4, #5, #6, #7, #8. Milestone v0.2.0 closed.
