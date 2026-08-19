@@ -40,7 +40,7 @@ Published bands are deliberately given no chart ink anywhere in this project. Wi
 same-pipeline baseline on the same axes, plotting a band that cannot be compared to it would
 only invite the comparison.
 
-## Two biases worth knowing about
+## Three biases worth knowing about
 
 `speech_analyzer._timing` establishes that Azure appears to report `Duration` as
 `(frames - 1) * 10 ms`, so every segment's true extent is about 10 ms longer than stated. The
@@ -51,6 +51,14 @@ is measured through this identical code.
 
 nPVI also rises with a slower, more deliberate reading and falls with a rushed one, on the
 same speaker. The benchmark passage exists so that at least the text is held still.
+
+**The audio codec is worth more than you would guess.** Measured against Azure live: one
+unchanged take of the same passage scores 55.26 as a WAV and 53.10 as an m4a — same duration,
+same words, same 25 pairs, a 2.16-point swing from lossy compression alone. That is larger
+than the seam bias above. Azure's segmentation is otherwise **exactly reproducible**: the same
+bytes assessed twice returned identical durations to the tick. So a change in this number is
+trustworthy only when the recording format has not changed underneath it, and a reading
+uploaded from a phone is not comparable to one recorded in the browser.
 """
 
 from __future__ import annotations

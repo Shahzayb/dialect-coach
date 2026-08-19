@@ -543,6 +543,18 @@ synthesiser's rhythm is its own, and the UI says so.
   the same order), so the demo shows a real trend rather than a random walk. Without that fixture
   the seeded rows carry no timing and the rhythm chart renders its empty state.
 
+**Two things measured live against Azure on 2026-08-19, after the chunk was built:**
+
+- **Azure's segmentation is exactly reproducible.** The same bytes assessed twice returned
+  identical offsets and durations to the tick, and a fresh live call on the recording the
+  fixtures came from reproduced the committed `sample_azure_continuous.json` figure of
+  **55.26** to two decimal places. There is no run-to-run noise to average out.
+- **The audio codec moves nPVI by more than the seam bias does.** The same unchanged take
+  scores **55.26 as a WAV and 53.10 as an m4a** — same duration, same words, same 25 pairs.
+  2.16 points from lossy compression alone. So a reading uploaded from a phone is not
+  comparable to one recorded in the browser, and the number is trustworthy over time only if
+  the recording format is held still. Stated in `rhythm.py` and in the UI caption.
+
 **Audio on disk is now permitted but not built.** The user lifted the "no stored audio" rule on
 2026-08-19: recordings may be kept on disk, never committed, with the path and hash in the
 database. Nothing in v0.6.0 needed it, so no column was added and `SCHEMA_VERSION` stays 1 — a

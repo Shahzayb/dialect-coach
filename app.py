@@ -1277,7 +1277,9 @@ def render_rhythm(assessment, reference_text: str) -> None:
         f"A **lower** nPVI than the reference means your vowels are closer to equal in "
         f"length, which is what a syllable-timed rhythm carried into English sounds like. "
         f"Measured over {measured.pairs} vowel pairs in {measured.runs} "
-        f"{'stretch' if measured.runs == 1 else 'stretches'} of unbroken speech."
+        f"{'stretch' if measured.runs == 1 else 'stretches'} of unbroken speech. Keep the "
+        f"recording format the same between reads — the identical take scores two points "
+        f"lower as a compressed upload than as a WAV, which is enough to look like a change."
     )
     if not progress_view.is_benchmark(reference_text):
         st.caption(
