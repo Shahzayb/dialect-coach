@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Iterable, Mapping, Sequence
+from datetime import UTC, datetime
+from typing import Any
 
 import altair as alt
 import pandas as pd
@@ -90,27 +91,74 @@ BENCHMARK_COVERAGE: Mapping[str, tuple[str, ...]] = {
     "θ": ("three", "things", "through", "thoughts", "third", "month", "breath", "thought"),
     "ð": ("these", "them", "that", "whether", "brother", "breathe"),
     "v": ("value", "voice", "never", "every", "vowel", "believe", "above", "moves"),
-    "w": ("words", "word", "way", "week", "whatever", "where", "while", "when", "world",
-          "would"),
+    "w": ("words", "word", "way", "week", "whatever", "where", "while", "when", "world", "would"),
     "t": ("two", "tired", "take", "still", "sit", "stop", "next", "apart", "last", "first"),
-    "d": ("said", "read", "world", "cold", "would", "third", "during", "end", "mind",
-          "hard", "hold", "slide", "loud"),
-    "l (dark, coda)": ("whole", "value", "helps", "world", "vowel", "full", "still",
-                       "school", "careful", "cold", "while"),
+    "d": (
+        "said",
+        "read",
+        "world",
+        "cold",
+        "would",
+        "third",
+        "during",
+        "end",
+        "mind",
+        "hard",
+        "hold",
+        "slide",
+        "loud",
+    ),
+    "l (dark, coda)": (
+        "whole",
+        "value",
+        "helps",
+        "world",
+        "vowel",
+        "full",
+        "still",
+        "school",
+        "careful",
+        "cold",
+        "while",
+    ),
     "l (clear, onset)": ("loud", "listener", "let", "like", "long", "last"),
     "ʃ": ("short", "should", "sure", "finish"),
-    "s": ("same", "said", "so", "sit", "sounds", "still", "second", "slide", "school",
-          "stayed", "pace", "voice", "soft"),
-    "z": ("these", "changes", "words", "moves", "sounds", "pause", "things", "goes",
-          "excuses"),
+    "s": (
+        "same",
+        "said",
+        "so",
+        "sit",
+        "sounds",
+        "still",
+        "second",
+        "slide",
+        "school",
+        "stayed",
+        "pace",
+        "voice",
+        "soft",
+    ),
+    "z": ("these", "changes", "words", "moves", "sounds", "pause", "things", "goes", "excuses"),
     "dʒ": ("join", "joy", "judge"),
-    "final clusters": ("asked", "helped", "next", "world", "month", "first", "words",
-                       "sounds", "thoughts", "helps", "cold", "hold", "mind", "end"),
-
+    "final clusters": (
+        "asked",
+        "helped",
+        "next",
+        "world",
+        "month",
+        "first",
+        "words",
+        "sounds",
+        "thoughts",
+        "helps",
+        "cold",
+        "hold",
+        "mind",
+        "end",
+    ),
     # --- The full en-US vowel inventory, for the calibration read ------------------------
     "æ": ("passage", "asked", "last", "answer", "catch"),
-    "ɛ": ("breath", "end", "every", "let", "helps", "helped", "second", "next", "said",
-          "went"),
+    "ɛ": ("breath", "end", "every", "let", "helps", "helped", "second", "next", "said", "went"),
     "ɪ": ("this", "things", "still", "sit", "finish", "listener"),
     "i": ("these", "read", "week", "breathe", "believe", "three", "each", "me"),
     "ɑ": ("not", "honest", "stop"),
@@ -249,7 +297,14 @@ METRICS: tuple[tuple[str, str], ...] = (
 METRIC_ORDER: tuple[str, ...] = tuple(label for _, label in METRICS)
 
 FRAME_COLUMNS: tuple[str, ...] = (
-    "when", "attempt_id", "metric", "value", "series", "mode", "label", "shadowed",
+    "when",
+    "attempt_id",
+    "metric",
+    "value",
+    "series",
+    "mode",
+    "label",
+    "shadowed",
 )
 
 # How much of the reference text the tooltip shows. Enough to tell two free-practice texts
@@ -262,7 +317,7 @@ def _parse_when(created_at: str | None) -> datetime | None:
     if not created_at:
         return None
     try:
-        return datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        return datetime.strptime(created_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
     except ValueError:
         logger.warning("Unparseable created_at %r — attempt left out of the chart", created_at)
         return None
@@ -275,7 +330,7 @@ def _label(reference_text: str | None, benchmark: bool) -> str:
     text = " ".join((reference_text or "").split())
     if not text:
         return "(no reference text)"
-    return text if len(text) <= _LABEL_CHARS else text[:_LABEL_CHARS - 1] + "…"
+    return text if len(text) <= _LABEL_CHARS else text[: _LABEL_CHARS - 1] + "…"
 
 
 def score_frame(rows: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
@@ -293,7 +348,7 @@ def score_frame(rows: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
             continue
         benchmark = is_benchmark(row["reference_text"])
         shadowed = is_shadowed(row)
-        if benchmark:
+        if benchmark:  # noqa: SIM108 — the else branch's comment is the point of the branch
             series = SHADOWED_SERIES if shadowed else BENCHMARK_SERIES
         else:
             # A shadowed free-practice read stays in the cloud rather than earning a fourth
@@ -328,8 +383,7 @@ def score_chart(frame: pd.DataFrame) -> alt.Chart:
     """
     base = alt.Chart(frame)
     x = alt.X("when:T", title=None)
-    y = alt.Y("value:Q", title=None, scale=alt.Scale(domain=[0, 100]),
-              axis=alt.Axis(tickCount=5))
+    y = alt.Y("value:Q", title=None, scale=alt.Scale(domain=[0, 100]), axis=alt.Axis(tickCount=5))
 
     # Only the modes actually present get a shape. Mode C is declared in `utils.Mode` but is
     # not built, and a legend entry for it would advertise something that cannot happen.
@@ -337,33 +391,46 @@ def score_chart(frame: pd.DataFrame) -> alt.Chart:
 
     # Free practice: points only, never joined. Shape carries the mode, so Mode A and Mode B
     # are distinguishable and there is no line for them to share.
-    cloud = base.transform_filter(
-        alt.datum.series == FREE_SERIES
-    ).mark_point(size=45, filled=True, opacity=0.28).encode(
-        x=x,
-        y=y,
-        shape=alt.Shape("mode:N", title="Free practice",
-                        scale=alt.Scale(domain=modes,
-                                        range=["triangle-up", "circle", "square"][:len(modes)])),
-        color=alt.value("#8a8a8a"),
-        tooltip=[alt.Tooltip("when:T", title="When"), alt.Tooltip("mode:N", title="Mode"),
-                 alt.Tooltip("metric:N", title="Metric"),
-                 alt.Tooltip("value:Q", title="Score", format=".1f"),
-                 alt.Tooltip("label:N", title="Text"),
-                 alt.Tooltip("shadowed:N", title="Shadowed")],
+    cloud = (
+        base.transform_filter(alt.datum.series == FREE_SERIES)
+        .mark_point(size=45, filled=True, opacity=0.28)
+        .encode(
+            x=x,
+            y=y,
+            shape=alt.Shape(
+                "mode:N",
+                title="Free practice",
+                scale=alt.Scale(
+                    domain=modes, range=["triangle-up", "circle", "square"][: len(modes)]
+                ),
+            ),
+            color=alt.value("#8a8a8a"),
+            tooltip=[
+                alt.Tooltip("when:T", title="When"),
+                alt.Tooltip("mode:N", title="Mode"),
+                alt.Tooltip("metric:N", title="Metric"),
+                alt.Tooltip("value:Q", title="Score", format=".1f"),
+                alt.Tooltip("label:N", title="Text"),
+                alt.Tooltip("shadowed:N", title="Shadowed"),
+            ],
+        )
     )
 
     # The benchmark: the only layer with a line mark, and it encodes no mode at all — it
     # cannot, because the passage is only ever read in one mode.
-    benchmark = base.transform_filter(
-        alt.datum.series == BENCHMARK_SERIES
-    ).mark_line(point=True, strokeWidth=2, color="#2f6fd0").encode(
-        x=x,
-        y=y,
-        tooltip=[alt.Tooltip("when:T", title="When"),
-                 alt.Tooltip("metric:N", title="Metric"),
-                 alt.Tooltip("value:Q", title="Score", format=".1f"),
-                 alt.Tooltip("label:N", title="Text")],
+    benchmark = (
+        base.transform_filter(alt.datum.series == BENCHMARK_SERIES)
+        .mark_line(point=True, strokeWidth=2, color="#2f6fd0")
+        .encode(
+            x=x,
+            y=y,
+            tooltip=[
+                alt.Tooltip("when:T", title="When"),
+                alt.Tooltip("metric:N", title="Metric"),
+                alt.Tooltip("value:Q", title="Score", format=".1f"),
+                alt.Tooltip("label:N", title="Text"),
+            ],
+        )
     )
 
     # The same passage read along with the model. Dashed, and in its own colour, because it is
@@ -371,21 +438,35 @@ def score_chart(frame: pd.DataFrame) -> alt.Chart:
     # converging over weeks is the whole claim shadowing makes; if they stay apart, the model
     # is a crutch that carries the read and puts nothing down, and that is a finding to report
     # rather than a defect to hide.
-    shadowed = base.transform_filter(
-        alt.datum.series == SHADOWED_SERIES
-    ).mark_line(point=True, strokeWidth=2, strokeDash=[5, 3], color="#c46b1c").encode(
-        x=x,
-        y=y,
-        tooltip=[alt.Tooltip("when:T", title="When"),
-                 alt.Tooltip("metric:N", title="Metric"),
-                 alt.Tooltip("value:Q", title="Score", format=".1f"),
-                 alt.Tooltip("label:N", title="Text")],
+    shadowed = (
+        base.transform_filter(alt.datum.series == SHADOWED_SERIES)
+        .mark_line(point=True, strokeWidth=2, strokeDash=[5, 3], color="#c46b1c")
+        .encode(
+            x=x,
+            y=y,
+            tooltip=[
+                alt.Tooltip("when:T", title="When"),
+                alt.Tooltip("metric:N", title="Metric"),
+                alt.Tooltip("value:Q", title="Score", format=".1f"),
+                alt.Tooltip("label:N", title="Text"),
+            ],
+        )
     )
 
-    return alt.layer(cloud, benchmark, shadowed).properties(height=130).facet(
-        row=alt.Row("metric:N", title=None, sort=list(METRIC_ORDER),
-                    header=alt.Header(labelFontWeight="bold", labelAnchor="start")),
-    ).properties(title="Scores over time").resolve_scale(y="shared")
+    return (
+        alt.layer(cloud, benchmark, shadowed)
+        .properties(height=130)
+        .facet(
+            row=alt.Row(
+                "metric:N",
+                title=None,
+                sort=list(METRIC_ORDER),
+                header=alt.Header(labelFontWeight="bold", labelAnchor="start"),
+            ),
+        )
+        .properties(title="Scores over time")
+        .resolve_scale(y="shared")
+    )
 
 
 # --- Rhythm over time -------------------------------------------------------------------------
@@ -426,13 +507,15 @@ def rhythm_frame(parsed: Sequence[ParsedAttempt]) -> pd.DataFrame:
         measured = rhythm.npvi(attempt.words)
         if not measured.measured:
             continue
-        records.append({
-            "when": when,
-            "attempt_id": attempt.attempt_id,
-            "npvi": float(measured.npvi),
-            "pairs": measured.pairs,
-            "runs": measured.runs,
-        })
+        records.append(
+            {
+                "when": when,
+                "attempt_id": attempt.attempt_id,
+                "npvi": float(measured.npvi),
+                "pairs": measured.pairs,
+                "runs": measured.runs,
+            }
+        )
 
     if not records:
         return pd.DataFrame({name: pd.Series(dtype="object") for name in RHYTHM_COLUMNS})
@@ -450,28 +533,43 @@ def rhythm_chart(frame: pd.DataFrame, baseline: float | None = None) -> alt.Char
     The baseline is drawn as a rule rather than a second series because it does not move — it
     is one capture, not a history, and drawing it as a line over time would imply otherwise.
     """
-    points = alt.Chart(frame).mark_line(point=True, strokeWidth=2, color="#2f6fd0").encode(
-        x=alt.X("when:T", title=None),
-        y=alt.Y("npvi:Q", title="nPVI", scale=alt.Scale(zero=False)),
-        tooltip=[alt.Tooltip("when:T", title="When"),
-                 alt.Tooltip("npvi:Q", title="nPVI", format=".1f"),
-                 alt.Tooltip("pairs:Q", title="Vowel pairs"),
-                 alt.Tooltip("runs:Q", title="Unbroken stretches")],
+    points = (
+        alt.Chart(frame)
+        .mark_line(point=True, strokeWidth=2, color="#2f6fd0")
+        .encode(
+            x=alt.X("when:T", title=None),
+            y=alt.Y("npvi:Q", title="nPVI", scale=alt.Scale(zero=False)),
+            tooltip=[
+                alt.Tooltip("when:T", title="When"),
+                alt.Tooltip("npvi:Q", title="nPVI", format=".1f"),
+                alt.Tooltip("pairs:Q", title="Vowel pairs"),
+                alt.Tooltip("runs:Q", title="Unbroken stretches"),
+            ],
+        )
     )
     if baseline is None:
         return points.properties(height=170, title="Rhythm (nPVI) over time")
 
-    rule = alt.Chart(pd.DataFrame({"baseline": [baseline]})).mark_rule(
-        color="#8a8a8a", strokeDash=[6, 4], strokeWidth=2,
-    ).encode(y=alt.Y("baseline:Q", scale=alt.Scale(zero=False)))
+    rule = (
+        alt.Chart(pd.DataFrame({"baseline": [baseline]}))
+        .mark_rule(
+            color="#8a8a8a",
+            strokeDash=[6, 4],
+            strokeWidth=2,
+        )
+        .encode(y=alt.Y("baseline:Q", scale=alt.Scale(zero=False)))
+    )
 
-    return alt.layer(points, rule).properties(
-        height=170, title="Rhythm (nPVI) over time"
-    ).resolve_scale(y="shared")
+    return (
+        alt.layer(points, rule)
+        .properties(height=170, title="Rhythm (nPVI) over time")
+        .resolve_scale(y="shared")
+    )
 
 
-def days_since_benchmark(rows: Iterable[Mapping[str, Any]], *, now: datetime | None = None
-                         ) -> int | None:
+def days_since_benchmark(
+    rows: Iterable[Mapping[str, Any]], *, now: datetime | None = None
+) -> int | None:
     """Whole days since the benchmark passage was last read **cold**, or None if it never has.
 
     Stated as a fact, not as a nudge: nothing here decides the passage is due. The cadence
@@ -482,14 +580,17 @@ def days_since_benchmark(rows: Iterable[Mapping[str, Any]], *, now: datetime | N
     unassisted series — the one the whole view is about — quietly went stale.
     """
     moments = [
-        when for when in (
-            _parse_when(row["created_at"]) for row in cold_attempts(rows)
+        when
+        for when in (
+            _parse_when(row["created_at"])
+            for row in cold_attempts(rows)
             if is_benchmark(row["reference_text"])
-        ) if when is not None
+        )
+        if when is not None
     ]
     if not moments:
         return None
-    return max(0, ((now or datetime.now(timezone.utc)) - max(moments)).days)
+    return max(0, ((now or datetime.now(UTC)) - max(moments)).days)
 
 
 # --- Shadowed against cold --------------------------------------------------------------------
@@ -517,8 +618,15 @@ SHADOW_METRICS: tuple[tuple[str, str], ...] = (
 )
 
 SHADOW_COLUMNS: tuple[str, ...] = (
-    "when", "passage", "metric", "shadowed_score", "cold_score", "delta", "days_apart",
-    "shadowed_id", "cold_id",
+    "when",
+    "passage",
+    "metric",
+    "shadowed_score",
+    "cold_score",
+    "delta",
+    "days_apart",
+    "shadowed_id",
+    "cold_id",
 )
 
 
@@ -576,17 +684,19 @@ def shadow_pairs(rows: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
             here, there = row[column], cold_row[column]
             if here is None or there is None:
                 continue
-            records.append({
-                "when": when,
-                "passage": _label(row["reference_text"], is_benchmark(row["reference_text"])),
-                "metric": metric,
-                "shadowed_score": float(here),
-                "cold_score": float(there),
-                "delta": float(here) - float(there),
-                "days_apart": abs((when - cold_when).days),
-                "shadowed_id": int(row["id"]),
-                "cold_id": int(cold_row["id"]),
-            })
+            records.append(
+                {
+                    "when": when,
+                    "passage": _label(row["reference_text"], is_benchmark(row["reference_text"])),
+                    "metric": metric,
+                    "shadowed_score": float(here),
+                    "cold_score": float(there),
+                    "delta": float(here) - float(there),
+                    "days_apart": abs((when - cold_when).days),
+                    "shadowed_id": int(row["id"]),
+                    "cold_id": int(cold_row["id"]),
+                }
+            )
 
     if not records:
         return pd.DataFrame({name: pd.Series(dtype="object") for name in SHADOW_COLUMNS})
@@ -597,8 +707,7 @@ def unpaired_passages(rows: Iterable[Mapping[str, Any]]) -> list[str]:
     """Passages shadowed but never read cold, so their comparison has nothing to stand on."""
     everything = spoken_attempts(rows)
     cold_keys = {
-        shadowing.passage_key(row["reference_text"]) for row in everything
-        if not is_shadowed(row)
+        shadowing.passage_key(row["reference_text"]) for row in everything if not is_shadowed(row)
     }
     missing: dict[str, str] = {}
     for row in everything:
@@ -606,9 +715,7 @@ def unpaired_passages(rows: Iterable[Mapping[str, Any]]) -> list[str]:
             continue
         key = shadowing.passage_key(row["reference_text"])
         if key and key not in cold_keys:
-            missing[key] = _label(
-                row["reference_text"], is_benchmark(row["reference_text"])
-            )
+            missing[key] = _label(row["reference_text"], is_benchmark(row["reference_text"]))
     return list(missing.values())
 
 
@@ -670,20 +777,31 @@ def shadow_gap_chart(frame: pd.DataFrame) -> alt.Chart:
     points = base.mark_line(point=True, strokeWidth=2, color="#c46b1c").encode(
         x=alt.X("when:T", title=None),
         y=alt.Y("delta:Q", title=None, axis=alt.Axis(tickCount=5)),
-        tooltip=[alt.Tooltip("when:T", title="When"),
-                 alt.Tooltip("metric:N", title="Metric"),
-                 alt.Tooltip("shadowed_score:Q", title="Shadowed", format=".1f"),
-                 alt.Tooltip("cold_score:Q", title="Cold", format=".1f"),
-                 alt.Tooltip("delta:Q", title="Gap", format="+.1f"),
-                 alt.Tooltip("days_apart:Q", title="Days between the two reads"),
-                 alt.Tooltip("passage:N", title="Passage")],
+        tooltip=[
+            alt.Tooltip("when:T", title="When"),
+            alt.Tooltip("metric:N", title="Metric"),
+            alt.Tooltip("shadowed_score:Q", title="Shadowed", format=".1f"),
+            alt.Tooltip("cold_score:Q", title="Cold", format=".1f"),
+            alt.Tooltip("delta:Q", title="Gap", format="+.1f"),
+            alt.Tooltip("days_apart:Q", title="Days between the two reads"),
+            alt.Tooltip("passage:N", title="Passage"),
+        ],
     )
 
-    return alt.layer(zero, points).properties(height=130).facet(
-        row=alt.Row("metric:N", title=None,
-                    sort=[label for _, label in SHADOW_METRICS],
-                    header=alt.Header(labelFontWeight="bold", labelAnchor="start")),
-    ).properties(title="Shadowed minus cold, over time").resolve_scale(y="shared")
+    return (
+        alt.layer(zero, points)
+        .properties(height=130)
+        .facet(
+            row=alt.Row(
+                "metric:N",
+                title=None,
+                sort=[label for _, label in SHADOW_METRICS],
+                header=alt.Header(labelFontWeight="bold", labelAnchor="start"),
+            ),
+        )
+        .properties(title="Shadowed minus cold, over time")
+        .resolve_scale(y="shared")
+    )
 
 
 # --- What keeps going wrong -----------------------------------------------------------------
@@ -729,19 +847,24 @@ def parse_attempts(rows: Iterable[Mapping[str, Any]]) -> list[ParsedAttempt]:
             mode = Mode(str(row["mode"]))
             reference_text = row["reference_text"] or ""
             _, _, words = speech_analyzer.normalise(payloads, reference_text, mode)
-        except Exception:  # noqa: BLE001 — a corrupt row is a skip, not a broken page
-            logger.warning("Attempt %s could not be re-parsed; left out of the totals",
-                           row["id"], exc_info=True)
+        except Exception:  # a corrupt row is a skip, not a broken page
+            logger.warning(
+                "Attempt %s could not be re-parsed; left out of the totals",
+                row["id"],
+                exc_info=True,
+            )
             continue
-        parsed.append(ParsedAttempt(
-            attempt_id=int(row["id"]),
-            created_at=str(row["created_at"]),
-            mode=mode,
-            reference_text=reference_text,
-            benchmark=is_benchmark(reference_text),
-            words=words,
-            shadowed=is_shadowed(row),
-        ))
+        parsed.append(
+            ParsedAttempt(
+                attempt_id=int(row["id"]),
+                created_at=str(row["created_at"]),
+                mode=mode,
+                reference_text=reference_text,
+                benchmark=is_benchmark(reference_text),
+                words=words,
+                shadowed=is_shadowed(row),
+            )
+        )
     return parsed
 
 
@@ -771,8 +894,12 @@ def _tally(per_attempt: Sequence[tuple[bool, Sequence[str]]]) -> list[dict[str, 
             if benchmark:
                 benchmark_attempts[name] = benchmark_attempts.get(name, 0) + 1
     rows = [
-        {"attempts": count, "benchmark_attempts": benchmark_attempts.get(name, 0),
-         "tokens": tokens[name], "_name": name}
+        {
+            "attempts": count,
+            "benchmark_attempts": benchmark_attempts.get(name, 0),
+            "tokens": tokens[name],
+            "_name": name,
+        }
         for name, count in attempts.items()
     ]
     rows.sort(key=lambda r: (-r["attempts"], -r["tokens"], r["_name"]))
@@ -808,15 +935,32 @@ def flagged_phonemes(parsed: Sequence[ParsedAttempt]) -> pd.DataFrame:
 
     rows = _tally(per_attempt)
     if not rows:
-        return pd.DataFrame({name: pd.Series(dtype="object") for name in
-                             ("label", "expected", "produced", "attempts",
-                              "benchmark_attempts", "tokens")})
-    return pd.DataFrame([
-        {"label": row["_name"], "expected": detail[row["_name"]][0],
-         "produced": detail[row["_name"]][1], "attempts": row["attempts"],
-         "benchmark_attempts": row["benchmark_attempts"], "tokens": row["tokens"]}
-        for row in rows
-    ])
+        return pd.DataFrame(
+            {
+                name: pd.Series(dtype="object")
+                for name in (
+                    "label",
+                    "expected",
+                    "produced",
+                    "attempts",
+                    "benchmark_attempts",
+                    "tokens",
+                )
+            }
+        )
+    return pd.DataFrame(
+        [
+            {
+                "label": row["_name"],
+                "expected": detail[row["_name"]][0],
+                "produced": detail[row["_name"]][1],
+                "attempts": row["attempts"],
+                "benchmark_attempts": row["benchmark_attempts"],
+                "tokens": row["tokens"],
+            }
+            for row in rows
+        ]
+    )
 
 
 def flagged_words(parsed: Sequence[ParsedAttempt]) -> pd.DataFrame:
@@ -825,19 +969,30 @@ def flagged_words(parsed: Sequence[ParsedAttempt]) -> pd.DataFrame:
     for attempt in parsed:
         occurrences = [
             str(word.get("word") or "").lower()
-            for word in attempt.words if speech_analyzer.is_flagged(word)
+            for word in attempt.words
+            if speech_analyzer.is_flagged(word)
         ]
         per_attempt.append((attempt.benchmark, [w for w in occurrences if w]))
 
     rows = _tally(per_attempt)
     if not rows:
-        return pd.DataFrame({name: pd.Series(dtype="object") for name in
-                             ("word", "attempts", "benchmark_attempts", "tokens")})
-    return pd.DataFrame([
-        {"word": row["_name"], "attempts": row["attempts"],
-         "benchmark_attempts": row["benchmark_attempts"], "tokens": row["tokens"]}
-        for row in rows
-    ])
+        return pd.DataFrame(
+            {
+                name: pd.Series(dtype="object")
+                for name in ("word", "attempts", "benchmark_attempts", "tokens")
+            }
+        )
+    return pd.DataFrame(
+        [
+            {
+                "word": row["_name"],
+                "attempts": row["attempts"],
+                "benchmark_attempts": row["benchmark_attempts"],
+                "tokens": row["tokens"],
+            }
+            for row in rows
+        ]
+    )
 
 
 def weak_syllables(parsed: Sequence[ParsedAttempt]) -> pd.DataFrame:
@@ -856,8 +1011,7 @@ def weak_syllables(parsed: Sequence[ParsedAttempt]) -> pd.DataFrame:
     for attempt in parsed:
         occurrences: list[str] = []
         for word in attempt.words:
-            syllables = [s for s in (word.get("syllables") or [])
-                         if s.get("score") is not None]
+            syllables = [s for s in (word.get("syllables") or []) if s.get("score") is not None]
             if len(syllables) < 2:
                 continue
             weakest = min(syllables, key=lambda s: s["score"])
@@ -872,15 +1026,24 @@ def weak_syllables(parsed: Sequence[ParsedAttempt]) -> pd.DataFrame:
 
     rows = _tally(per_attempt)
     if not rows:
-        return pd.DataFrame({name: pd.Series(dtype="object") for name in
-                             ("word", "syllable", "attempts", "benchmark_attempts",
-                              "tokens")})
-    return pd.DataFrame([
-        {"word": row["_name"], "syllable": detail[row["_name"]],
-         "attempts": row["attempts"], "benchmark_attempts": row["benchmark_attempts"],
-         "tokens": row["tokens"]}
-        for row in rows
-    ])
+        return pd.DataFrame(
+            {
+                name: pd.Series(dtype="object")
+                for name in ("word", "syllable", "attempts", "benchmark_attempts", "tokens")
+            }
+        )
+    return pd.DataFrame(
+        [
+            {
+                "word": row["_name"],
+                "syllable": detail[row["_name"]],
+                "attempts": row["attempts"],
+                "benchmark_attempts": row["benchmark_attempts"],
+                "tokens": row["tokens"],
+            }
+            for row in rows
+        ]
+    )
 
 
 # How many bars each ranking shows. Long enough to see a pattern, short enough that the bar
@@ -889,22 +1052,33 @@ TOP_PHONEMES = 12
 TOP_WORDS = 15
 
 
-def _ranking_chart(frame: pd.DataFrame, field: str, title: str, colour: str,
-                   limit: int) -> alt.Chart:
+def _ranking_chart(
+    frame: pd.DataFrame, field: str, title: str, colour: str, limit: int
+) -> alt.Chart:
     """One horizontal bar ranking, ordered worst-first by attempts."""
     data = frame.head(limit)
-    return alt.Chart(data).mark_bar(color=colour, cornerRadiusEnd=2).encode(
-        x=alt.X("attempts:Q", title="Attempts it was flagged in",
-                axis=alt.Axis(tickMinStep=1)),
-        # labelOverlap=False: Vega drops every other label when the band is tight, and a
-        # ranking whose bars are half unlabelled says nothing at all.
-        y=alt.Y(f"{field}:N", title=None, sort="-x",
-                axis=alt.Axis(labelOverlap=False, labelLimit=180)),
-        tooltip=[alt.Tooltip(f"{field}:N", title=title),
-                 alt.Tooltip("attempts:Q", title="Attempts"),
-                 alt.Tooltip("benchmark_attempts:Q", title="of those, benchmark reads"),
-                 alt.Tooltip("tokens:Q", title="Times in total")],
-    ).properties(title=title, height=alt.Step(20))
+    return (
+        alt.Chart(data)
+        .mark_bar(color=colour, cornerRadiusEnd=2)
+        .encode(
+            x=alt.X("attempts:Q", title="Attempts it was flagged in", axis=alt.Axis(tickMinStep=1)),
+            # labelOverlap=False: Vega drops every other label when the band is tight, and a
+            # ranking whose bars are half unlabelled says nothing at all.
+            y=alt.Y(
+                f"{field}:N",
+                title=None,
+                sort="-x",
+                axis=alt.Axis(labelOverlap=False, labelLimit=180),
+            ),
+            tooltip=[
+                alt.Tooltip(f"{field}:N", title=title),
+                alt.Tooltip("attempts:Q", title="Attempts"),
+                alt.Tooltip("benchmark_attempts:Q", title="of those, benchmark reads"),
+                alt.Tooltip("tokens:Q", title="Times in total"),
+            ],
+        )
+        .properties(title=title, height=alt.Step(20))
+    )
 
 
 def phoneme_chart(frame: pd.DataFrame, limit: int = TOP_PHONEMES) -> alt.Chart:
@@ -924,8 +1098,7 @@ def word_chart(frame: pd.DataFrame, limit: int = TOP_WORDS) -> alt.Chart:
 # `alternatives` column rather than assumed, so rows from a task with a different number of
 # choices keep reporting their own.
 
-PERCEPTION_COLUMNS = ("when", "item", "accuracy", "correct", "total",
-                      "novel", "chance", "review")
+PERCEPTION_COLUMNS = ("when", "item", "accuracy", "correct", "total", "novel", "chance", "review")
 
 
 def perception_frame(trials: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
@@ -953,20 +1126,21 @@ def perception_frame(trials: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
         total = len(rows)
         correct = sum(1 for r in rows if r.get("correct"))
         alternatives = int(rows[0].get("alternatives") or 2)
-        records.append({
-            "when": when,
-            "item": str(rows[0].get("item") or ""),
-            "accuracy": 100.0 * correct / total if total else 0.0,
-            "correct": correct,
-            "total": total,
-            "novel": sum(1 for r in rows if r.get("novel")),
-            "chance": 100.0 / alternatives if alternatives else 50.0,
-            "review": bool(rows[0].get("review")),
-        })
+        records.append(
+            {
+                "when": when,
+                "item": str(rows[0].get("item") or ""),
+                "accuracy": 100.0 * correct / total if total else 0.0,
+                "correct": correct,
+                "total": total,
+                "novel": sum(1 for r in rows if r.get("novel")),
+                "chance": 100.0 / alternatives if alternatives else 50.0,
+                "review": bool(rows[0].get("review")),
+            }
+        )
 
     if not records:
-        return pd.DataFrame({name: pd.Series(dtype="object")
-                             for name in PERCEPTION_COLUMNS})
+        return pd.DataFrame({name: pd.Series(dtype="object") for name in PERCEPTION_COLUMNS})
     return pd.DataFrame.from_records(records)[list(PERCEPTION_COLUMNS)]
 
 
@@ -978,24 +1152,39 @@ def perception_chart(frame: pd.DataFrame) -> alt.Chart:
     own `chance` column, so it follows a facet whose task had a different number of choices
     instead of being drawn once at a hardcoded 50.
     """
-    points = alt.Chart(frame).mark_line(point=True, strokeWidth=2).encode(
-        x=alt.X("when:T", title=None),
-        y=alt.Y("accuracy:Q", title="Correct (%)",
-                scale=alt.Scale(domain=[0, 100], nice=False)),
-        color=alt.Color("item:N", title="Contrast"),
-        tooltip=[alt.Tooltip("when:T", title="When"),
-                 alt.Tooltip("item:N", title="Contrast"),
-                 alt.Tooltip("accuracy:Q", title="Correct (%)", format=".0f"),
-                 alt.Tooltip("correct:Q", title="Right"),
-                 alt.Tooltip("total:Q", title="Trials"),
-                 alt.Tooltip("novel:Q", title="Never heard before"),
-                 alt.Tooltip("chance:Q", title="Guessing scores (%)", format=".0f"),
-                 alt.Tooltip("review:N", title="Spaced review")],
+    points = (
+        alt.Chart(frame)
+        .mark_line(point=True, strokeWidth=2)
+        .encode(
+            x=alt.X("when:T", title=None),
+            y=alt.Y(
+                "accuracy:Q", title="Correct (%)", scale=alt.Scale(domain=[0, 100], nice=False)
+            ),
+            color=alt.Color("item:N", title="Contrast"),
+            tooltip=[
+                alt.Tooltip("when:T", title="When"),
+                alt.Tooltip("item:N", title="Contrast"),
+                alt.Tooltip("accuracy:Q", title="Correct (%)", format=".0f"),
+                alt.Tooltip("correct:Q", title="Right"),
+                alt.Tooltip("total:Q", title="Trials"),
+                alt.Tooltip("novel:Q", title="Never heard before"),
+                alt.Tooltip("chance:Q", title="Guessing scores (%)", format=".0f"),
+                alt.Tooltip("review:N", title="Spaced review"),
+            ],
+        )
     )
-    chance = alt.Chart(frame).mark_rule(
-        color="#8a8a8a", strokeDash=[6, 4], strokeWidth=2,
-    ).encode(y=alt.Y("chance:Q", scale=alt.Scale(domain=[0, 100], nice=False)))
+    chance = (
+        alt.Chart(frame)
+        .mark_rule(
+            color="#8a8a8a",
+            strokeDash=[6, 4],
+            strokeWidth=2,
+        )
+        .encode(y=alt.Y("chance:Q", scale=alt.Scale(domain=[0, 100], nice=False)))
+    )
 
-    return alt.layer(points, chance).properties(
-        height=200, title="Hearing the contrast — per block, against the chance floor"
-    ).resolve_scale(y="shared")
+    return (
+        alt.layer(points, chance)
+        .properties(height=200, title="Hearing the contrast — per block, against the chance floor")
+        .resolve_scale(y="shared")
+    )

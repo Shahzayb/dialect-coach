@@ -15,7 +15,7 @@ import logging
 import math
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 
 import db
 import utils
@@ -93,9 +93,8 @@ def stt_cost_usd(seconds: float) -> float:
     apply. Always rounds the estimate up: erring toward "less remaining than you think" is
     the correct direction for a guard.
     """
-    per_hour = (
-        utils.get_float("AZURE_STT_USD_PER_HOUR")
-        + utils.get_float("AZURE_PRON_ADDON_USD_PER_HOUR")
+    per_hour = utils.get_float("AZURE_STT_USD_PER_HOUR") + utils.get_float(
+        "AZURE_PRON_ADDON_USD_PER_HOUR"
     )
     billable_seconds = math.ceil(seconds)
     return (billable_seconds / SECONDS_PER_HOUR) * per_hour
@@ -145,8 +144,9 @@ def require_f0_acknowledgement() -> None:
     )
 
 
-def preflight_stt(conn: sqlite3.Connection, seconds: float, mode: Mode,
-                  when: datetime | None = None) -> None:
+def preflight_stt(
+    conn: sqlite3.Connection, seconds: float, mode: Mode, when: datetime | None = None
+) -> None:
     """Refuse the *next* STT call if it would push spend past the budget.
 
     Pre-flight, not post-hoc: duration is known before the call, so an overspend is never
@@ -184,8 +184,7 @@ def preflight_stt(conn: sqlite3.Connection, seconds: float, mode: Mode,
         )
 
 
-def preflight_tts(conn: sqlite3.Connection, characters: int,
-                  when: datetime | None = None) -> None:
+def preflight_tts(conn: sqlite3.Connection, characters: int, when: datetime | None = None) -> None:
     """The same guard for the separate TTS bucket. Unused until the TTS chunk lands."""
     if utils.offline_mode():
         return

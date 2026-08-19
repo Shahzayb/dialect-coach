@@ -9,13 +9,19 @@ from __future__ import annotations
 import pytest
 
 import app as app_module
-import speech_analyzer as sa
 import utils
 from utils import AzureBand, Band
 
 
-def word(text: str, accuracy=None, error_type="None", error_source="azure",
-         delivery=None, phonemes=None, syllables=None) -> dict:
+def word(
+    text: str,
+    accuracy=None,
+    error_type="None",
+    error_source="azure",
+    delivery=None,
+    phonemes=None,
+    syllables=None,
+) -> dict:
     return {
         "word": text,
         "accuracy": accuracy,
@@ -32,8 +38,14 @@ def word(text: str, accuracy=None, error_type="None", error_source="azure",
 
 @pytest.mark.parametrize(
     "score, expected",
-    [(0.0, Band.RED), (79.9, Band.RED), (80.0, Band.AMBER), (94.9, Band.AMBER),
-     (95.0, Band.GREEN), (100.0, Band.GREEN)],
+    [
+        (0.0, Band.RED),
+        (79.9, Band.RED),
+        (80.0, Band.AMBER),
+        (94.9, Band.AMBER),
+        (95.0, Band.GREEN),
+        (100.0, Band.GREEN),
+    ],
 )
 def test_word_banding_follows_the_documented_cut_points(score, expected) -> None:
     assert utils.word_band(score) is expected
@@ -51,9 +63,16 @@ def test_phonemes_are_cut_lower_than_words() -> None:
 
 @pytest.mark.parametrize(
     "score, expected",
-    [(0.0, AzureBand.LOW), (59.9, AzureBand.LOW), (60.0, AzureBand.FAIR),
-     (79.9, AzureBand.FAIR), (80.0, AzureBand.GOOD), (89.9, AzureBand.GOOD),
-     (90.0, AzureBand.EXCELLENT), (100.0, AzureBand.EXCELLENT)],
+    [
+        (0.0, AzureBand.LOW),
+        (59.9, AzureBand.LOW),
+        (60.0, AzureBand.FAIR),
+        (79.9, AzureBand.FAIR),
+        (80.0, AzureBand.GOOD),
+        (89.9, AzureBand.GOOD),
+        (90.0, AzureBand.EXCELLENT),
+        (100.0, AzureBand.EXCELLENT),
+    ],
 )
 def test_azure_score_banding_follows_azures_own_cut_points(score, expected) -> None:
     """0-59 / 60-79 / 80-89 / 90-100 — Azure's own convention, not this project's word/
@@ -78,7 +97,7 @@ def test_colour_coded_text_escapes_markup_from_the_reference() -> None:
 
 def test_a_quote_in_the_word_is_escaped_in_the_tooltip() -> None:
     rendered = app_module.colour_coded_html([word('say "this"', 90.0)])
-    assert '&quot;' in rendered
+    assert "&quot;" in rendered
     assert 'say "this"' not in rendered
 
 
@@ -124,11 +143,15 @@ def test_a_word_never_spoken_says_so_rather_than_a_score() -> None:
 
 
 def test_the_tooltip_lays_out_phonemes_and_their_scores_as_two_rows() -> None:
-    subject = word("long", 96.0, phonemes=[
-        {"phoneme": "l", "score": 91.0, "is_mispronounced": False, "nbest": []},
-        {"phoneme": "ɔ", "score": 100.0, "is_mispronounced": False, "nbest": []},
-        {"phoneme": "ŋ", "score": 100.0, "is_mispronounced": False, "nbest": []},
-    ])
+    subject = word(
+        "long",
+        96.0,
+        phonemes=[
+            {"phoneme": "l", "score": 91.0, "is_mispronounced": False, "nbest": []},
+            {"phoneme": "ɔ", "score": 100.0, "is_mispronounced": False, "nbest": []},
+            {"phoneme": "ŋ", "score": 100.0, "is_mispronounced": False, "nbest": []},
+        ],
+    )
     text = app_module.word_tooltip_html(subject)
     # Symbol row first, score row underneath it — matching the issue-13 image's two stacked
     # rows, not the flagged-word card's inline "expected → produced" pairing.
@@ -136,9 +159,13 @@ def test_the_tooltip_lays_out_phonemes_and_their_scores_as_two_rows() -> None:
 
 
 def test_a_missing_phoneme_score_shows_a_dash_not_zero() -> None:
-    subject = word("long", 96.0, phonemes=[
-        {"phoneme": "l", "score": None, "is_mispronounced": False, "nbest": []},
-    ])
+    subject = word(
+        "long",
+        96.0,
+        phonemes=[
+            {"phoneme": "l", "score": None, "is_mispronounced": False, "nbest": []},
+        ],
+    )
     text = app_module.word_tooltip_html(subject)
     assert ">—<" in text
     assert ">0<" not in text
@@ -188,11 +215,19 @@ def test_a_word_with_no_phonemes_summarises_to_nothing() -> None:
 
 
 def test_the_weakest_phoneme_names_the_substitution() -> None:
-    subject = word("thought", 55.0, phonemes=[
-        {"phoneme": "θ", "score": 30.0, "is_mispronounced": True,
-         "nbest": [{"phoneme": "t", "score": 95.0}]},
-        {"phoneme": "ɔː", "score": 90.0, "is_mispronounced": False, "nbest": []},
-    ])
+    subject = word(
+        "thought",
+        55.0,
+        phonemes=[
+            {
+                "phoneme": "θ",
+                "score": 30.0,
+                "is_mispronounced": True,
+                "nbest": [{"phoneme": "t", "score": 95.0}],
+            },
+            {"phoneme": "ɔː", "score": 90.0, "is_mispronounced": False, "nbest": []},
+        ],
+    )
     assert app_module.weakest_phoneme(subject) == "/θ/ → sounded like /t/"
 
 
@@ -218,5 +253,3 @@ def test_omissions_sort_ahead_of_merely_bad_scores() -> None:
 def test_sorting_does_not_crash_on_a_missing_score() -> None:
     words = [word("a", None, error_type="Mispronunciation"), word("b", 50.0)]
     assert len(sorted(words, key=app_module.severity_key)) == 2
-
-

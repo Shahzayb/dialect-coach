@@ -7,6 +7,7 @@ or that always puts the answer on the left, would still look correct on screen.
 
 from __future__ import annotations
 
+import itertools
 import random
 
 import pytest
@@ -21,8 +22,7 @@ ITEM = "/θ/ → /s/"
 
 
 def build(**kwargs):
-    defaults = dict(item=ITEM, expected=EXPECTED, produced=PRODUCED,
-                    rng=random.Random(7))
+    defaults = {"item": ITEM, "expected": EXPECTED, "produced": PRODUCED, "rng": random.Random(7)}
     defaults.update(kwargs)
     return pt.build_block(**defaults)
 
@@ -84,8 +84,8 @@ def test_consonants_and_vowels_are_told_apart_by_the_reference_table() -> None:
     assert pt.kind_for("θ") == pt.CONTRAST
     assert pt.kind_for("v") == pt.CONTRAST
     assert pt.kind_for("æ") == pt.VOWEL
-    assert pt.kind_for("eɪ") == pt.VOWEL     # diphthong
-    assert pt.kind_for("ɝ") == pt.VOWEL      # r-coloured
+    assert pt.kind_for("eɪ") == pt.VOWEL  # diphthong
+    assert pt.kind_for("ɝ") == pt.VOWEL  # r-coloured
 
 
 def test_every_vowel_kind_in_the_reference_table_reads_as_a_vowel_gap() -> None:
@@ -99,7 +99,7 @@ def test_every_vowel_kind_in_the_reference_table_reads_as_a_vowel_gap() -> None:
 
 def test_a_block_uses_every_voice() -> None:
     block = build()
-    assert set(t.voice for t in block.trials) == set(pt.VOICES)
+    assert {t.voice for t in block.trials} == set(pt.VOICES)
 
 
 def test_consecutive_trials_never_repeat_a_voice() -> None:
@@ -107,13 +107,13 @@ def test_consecutive_trials_never_repeat_a_voice() -> None:
     for seed in range(20):
         block = build(rng=random.Random(seed))
         voices = [t.voice for t in block.trials]
-        assert all(a != b for a, b in zip(voices, voices[1:])), seed
+        assert all(a != b for a, b in itertools.pairwise(voices)), seed
 
 
 def test_consecutive_trials_avoid_repeating_a_pair() -> None:
     block = build()
     pairs = [frozenset({t.word, t.other}) for t in block.trials]
-    assert all(a != b for a, b in zip(pairs, pairs[1:]))
+    assert all(a != b for a, b in itertools.pairwise(pairs))
 
 
 def test_both_words_of_a_pair_come_up_as_the_played_word() -> None:
@@ -155,18 +155,20 @@ def test_unheard_combinations_are_preferred_over_heard_ones() -> None:
     second = build(heard=heard, rng=random.Random(11))
     reused = [t for t in second.trials if not t.novel]
     assert reused == []
-    assert not (set((t.word, t.voice) for t in second.trials) & set(heard))
+    assert not ({(t.word, t.voice) for t in second.trials} & set(heard))
 
 
 def test_once_novelty_runs_out_the_least_recently_heard_comes_back() -> None:
     # The whole pool, so nothing unheard is left for the block to prefer.
-    pool = [(word, voice)
-            for first, second in pt.pairs_for(EXPECTED, PRODUCED)
-            for word in (first, second)
-            for voice in pt.VOICES]
+    pool = [
+        (word, voice)
+        for first, second in pt.pairs_for(EXPECTED, PRODUCED)
+        for word in (first, second)
+        for voice in pt.VOICES
+    ]
     half = len(pool) // 2
-    old = {stimulus: "2026-08-01T00:00:00Z" for stimulus in pool[:half]}
-    recent = {stimulus: "2026-08-09T00:00:00Z" for stimulus in pool[half:]}
+    old = dict.fromkeys(pool[:half], "2026-08-01T00:00:00Z")
+    recent = dict.fromkeys(pool[half:], "2026-08-09T00:00:00Z")
 
     block = build(heard={**old, **recent}, rng=random.Random(3))
     assert block.novel_count == 0
@@ -176,8 +178,9 @@ def test_once_novelty_runs_out_the_least_recently_heard_comes_back() -> None:
 def test_a_short_pool_caps_the_block_rather_than_repeating_a_stimulus() -> None:
     """/ð/ → /z/ has three pairs, so the pool is 3 x 2 words x however many voices."""
     expected_pool = len(pt.pairs_for("ð", "z")) * 2 * len(pt.VOICES)
-    block = pt.build_block(item="/ð/ → /z/", expected="ð", produced="z",
-                           trials=1000, rng=random.Random(1))
+    block = pt.build_block(
+        item="/ð/ → /z/", expected="ð", produced="z", trials=1000, rng=random.Random(1)
+    )
     stimuli = [(t.word, t.voice) for t in block.trials]
     assert len(stimuli) == expected_pool
     assert len(set(stimuli)) == expected_pool, "a stimulus was played twice in one block"
@@ -201,7 +204,7 @@ def test_block_and_review_lengths_come_from_the_conventions() -> None:
 
 
 def test_stimuli_cover_both_words_of_every_pair_in_the_trial_voice() -> None:
-    """"Replay both" is on every reveal, so the other half cannot be missing."""
+    """ "Replay both" is on every reveal, so the other half cannot be missing."""
     block = build()
     needed = set(pt.stimuli(block))
     for trial in block.trials:

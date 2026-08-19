@@ -24,8 +24,8 @@ from __future__ import annotations
 
 import logging
 import random
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Mapping, Sequence
 
 import phoneme_reference
 import utils
@@ -98,9 +98,9 @@ def chance_caption(alternatives: int) -> str:
 
 # --- What can be trained ------------------------------------------------------------------------
 
-CONTRAST = "contrast"   # a consonant substitution
-VOWEL = "vowel"         # a vowel, diphthong or r-coloured substitution — a "vowel gap"
-STRESS = "stress"       # not trained here: a stress item is a drill, not a block
+CONTRAST = "contrast"  # a consonant substitution
+VOWEL = "vowel"  # a vowel, diphthong or r-coloured substitution — a "vowel gap"
+STRESS = "stress"  # not trained here: a stress item is a drill, not a block
 
 # `Phoneme.kind` values that make a substitution a vowel gap rather than a consonant contrast.
 # The mechanics of the block are identical; the label and the reason differ, and the queue
@@ -142,11 +142,11 @@ def trainable(expected: str, produced: str) -> bool:
 class Trial:
     """One forced choice: a word, played in one voice, against the other half of its pair."""
 
-    word: str                          # what is actually played
-    other: str                         # the other word of the pair — replayable on demand
-    alternatives: tuple[str, ...]      # on-screen order, shuffled per trial
+    word: str  # what is actually played
+    other: str  # the other word of the pair — replayable on demand
+    alternatives: tuple[str, ...]  # on-screen order, shuffled per trial
     voice: str
-    novel: bool                        # this (word, voice) had never been presented before
+    novel: bool  # this (word, voice) had never been presented before
 
 
 @dataclass(frozen=True)
@@ -209,9 +209,7 @@ def build_block(
             f"needs {utils.MIN_PAIRS_FOR_BLOCK}. There is nothing to drill it with yet."
         )
 
-    wanted = trials or (
-        utils.PERCEPTION_REVIEW_TRIALS if review else utils.PERCEPTION_BLOCK_TRIALS
-    )
+    wanted = trials or (utils.PERCEPTION_REVIEW_TRIALS if review else utils.PERCEPTION_BLOCK_TRIALS)
 
     # Every (word, voice) the pairs allow. Both words of each pair are playable targets — the
     # task is "which did you hear", so the expected word and the produced word each have to
@@ -236,14 +234,24 @@ def build_block(
         # Shuffled per trial, so the button position never carries the answer. Without this a
         # block teaches "the target is on the left", which scores well and trains nothing.
         rng.shuffle(options)
-        planned.append(Trial(
-            word=word, other=other, alternatives=tuple(options), voice=voice,
-            novel=last == "",
-        ))
+        planned.append(
+            Trial(
+                word=word,
+                other=other,
+                alternatives=tuple(options),
+                voice=voice,
+                novel=last == "",
+            )
+        )
 
     return Block(
-        item=item, kind=kind_for(expected), expected=expected, produced=produced,
-        voices=tuple(voice_list), trials=tuple(planned), review=review,
+        item=item,
+        kind=kind_for(expected),
+        expected=expected,
+        produced=produced,
+        voices=tuple(voice_list),
+        trials=tuple(planned),
+        review=review,
     )
 
 
@@ -292,8 +300,11 @@ def _interleave(
             # wrong trade, so it falls back to the head.
             tier = queue[0][3]
             index = next(
-                (i for i, entry in enumerate(queue)
-                 if entry[3] == tier and frozenset({entry[0], entry[1]}) != last_pair),
+                (
+                    i
+                    for i, entry in enumerate(queue)
+                    if entry[3] == tier and frozenset({entry[0], entry[1]}) != last_pair
+                ),
                 0,
             )
             entry = queue.pop(index)
@@ -359,8 +370,7 @@ class BlockResult:
         return self.accuracy > self.chance
 
 
-def score(answers: Sequence[bool], *, alternatives: int, novel: int, planned: int
-          ) -> BlockResult:
+def score(answers: Sequence[bool], *, alternatives: int, novel: int, planned: int) -> BlockResult:
     """Turn a list of right/wrong into a result. Pure arithmetic, no interpretation."""
     return BlockResult(
         correct=sum(1 for answer in answers if answer),

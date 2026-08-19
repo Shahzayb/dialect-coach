@@ -38,8 +38,8 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Mapping, Sequence
 
 import utils
 
@@ -177,7 +177,7 @@ def evidence_for(session: Session) -> dict[str, object]:
         "title": session.title,
         "passage_key": session.key,
         "why": (
-            f"You started shadowing \"{session.title}\". It is a standing practice rather "
+            f'You started shadowing "{session.title}". It is a standing practice rather '
             f"than a flagged sound, so nothing promoted it and nothing takes it off."
         ),
     }

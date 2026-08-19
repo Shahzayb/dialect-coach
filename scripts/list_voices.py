@@ -58,8 +58,10 @@ def main() -> int:
 
     result = synthesizer.get_voices_async(LOCALE).get()
     if result.reason != speechsdk.ResultReason.VoicesListRetrieved:
-        print(f"[voices] Could not list voices: {result.reason} — "
-              f"{utils.redact(str(getattr(result, 'error_details', '')))}")
+        print(
+            f"[voices] Could not list voices: {result.reason} — "
+            f"{utils.redact(str(getattr(result, 'error_details', '')))}"
+        )
         return 1
 
     voices = sorted(result.voices, key=lambda v: v.short_name)
@@ -77,13 +79,17 @@ def main() -> int:
         print(f"  [{mark}] {name}")
     absent = [name for name in perception_trainer.VOICES if name not in available]
     if absent:
-        print(f"\n[voices] {len(absent)} configured voice(s) no longer exist. Replace them "
-              f"before running a block — a block refuses to start under "
-              f"{perception_trainer.MIN_VOICES} voices rather than degrading.")
+        print(
+            f"\n[voices] {len(absent)} configured voice(s) no longer exist. Replace them "
+            f"before running a block — a block refuses to start under "
+            f"{perception_trainer.MIN_VOICES} voices rather than degrading."
+        )
 
     after = db.monthly_tts_characters(conn)
-    print(f"\n[voices] TTS meter before {before}, after {after} — "
-          f"{'unchanged, as expected' if before == after else 'CHANGED, which it should not'}")
+    print(
+        f"\n[voices] TTS meter before {before}, after {after} — "
+        f"{'unchanged, as expected' if before == after else 'CHANGED, which it should not'}"
+    )
     return 0 if before == after and not absent else (0 if before == after else 1)
 
 

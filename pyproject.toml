@@ -1,4 +1,65 @@
 # pyproject.toml
+#
+# Tool configuration only. There is no build backend and the project is never packaged or
+# installed — it runs from a checkout, in a container. `name`/`version` exist so the release
+# tag has one place to be recorded.
+
 [project]
 name = "dialect-coach"
 version = "0.8.0"
+
+# --- Ruff ---------------------------------------------------------------------------------
+[tool.ruff]
+# 100, not the default 88. The prose comments in this codebase are hand-wrapped near 96:
+# 2,035 lines exceed 88 and only 23 exceed 100, so 88 would rewrap essentially every comment
+# in the repo for no gain.
+line-length = 100
+target-version = "py312"
+# The source root, so isort classifies `utils`, `db`, `speech_analyzer` and friends as
+# first-party rather than third-party. The modules are flat under src/, not a package.
+src = ["src"]
+# Python source only. Ruff also formats Python fenced in Markdown, which would rewrite the
+# code blocks in plans/ and memory-bank/ — those are historical records of what was
+# intended at the time, not source, and reformatting them falsifies them.
+include = ["*.py", "*.pyi"]
+
+[tool.ruff.lint]
+# BLE is selected because the codebase already writes for it: twelve `except Exception`
+# handlers carry a `# noqa: BLE001` and a sentence saying why that one is deliberate.
+# Leaving BLE unselected would make RUF100 delete all twelve explanations as dead noqa.
+select = ["E", "W", "F", "I", "UP", "B", "BLE", "C4", "SIM", "RET", "RUF"]
+
+# Every ignore below is a decision, not a backlog. Recorded so nobody re-litigates them.
+ignore = [
+    # IPA symbols, en dashes and em dashes are deliberate and everywhere — in the phoneme
+    # reference, the coaching templates and the comments. This rule would fire on the data.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # str+Enum -> StrEnum changes what str() returns, and these values are written to SQLite.
+    # A cosmetic rewrite is not worth re-reading stored rows differently.
+    "UP042",
+    # zip(strict=) changes behaviour: it raises on a length mismatch. That is a decision to
+    # make per call site with a test, not something a formatting pass should introduce.
+    "B905",
+    # list(x)[0] -> next(iter(x)) raises StopIteration where the original raised IndexError.
+    "RUF015",
+    # A named return before `return` is used deliberately here, to give the value a name the
+    # reader can check against the docstring.
+    "RET504",
+]
+
+# Deliberately NOT selected, and why:
+#   ANN  312 hits. Annotations are mypy's job, and mypy says something truer about them.
+#   T20   81 hits, every one a legitimate `print` in scripts/, which are CLI diagnostics.
+#   ARG  107 hits, nearly all Streamlit callback signatures and monkeypatch stubs.
+#   TRY   43 hits of TRY003 (message-in-raise), a style opinion this codebase disagrees with.
+#   N    N818 would rename TierNotAcknowledged -> TierNotAcknowledgedError: a public API
+#        change dressed as a lint fix.
+#   PTH    8 os.path -> pathlib rewrites. A fine follow-up chunk; not a formatting pass.
+#   D    Would fight docstrings that are already the best documentation in the repo.
+
+[tool.ruff.lint.isort]
+# `conftest` is neither third-party nor a src/ module — it is the test package's own file.
+# Without this it sorts in among pytest and streamlit, which reads as a dependency.
+known-local-folder = ["conftest"]

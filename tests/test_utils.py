@@ -51,9 +51,8 @@ def test_attempt_hash_separates_text_from_audio() -> None:
 
 
 def test_attempt_hash_is_stable() -> None:
-    assert (
-        utils.attempt_hash("hello", b"\x01\x02", Mode.DRILL)
-        == utils.attempt_hash("hello", b"\x01\x02", Mode.DRILL)
+    assert utils.attempt_hash("hello", b"\x01\x02", Mode.DRILL) == utils.attempt_hash(
+        "hello", b"\x01\x02", Mode.DRILL
     )
 
 
@@ -64,9 +63,8 @@ def test_attempt_hash_separates_mode_from_the_rest() -> None:
     not collide across modes. A collision would silently serve the other mode's cached
     result on Assess: no error, no re-assessment, just the wrong report on screen.
     """
-    assert (
-        utils.attempt_hash("hello", b"\x01\x02", Mode.DRILL)
-        != utils.attempt_hash("hello", b"\x01\x02", Mode.PARAGRAPH)
+    assert utils.attempt_hash("hello", b"\x01\x02", Mode.DRILL) != utils.attempt_hash(
+        "hello", b"\x01\x02", Mode.PARAGRAPH
     )
 
 
@@ -126,8 +124,13 @@ def test_log_record_never_carries_the_key(
 ) -> None:
     monkeypatch.setenv("AZURE_SPEECH_KEY", FAKE_KEY)
     record = logging.LogRecord(
-        name="test", level=logging.ERROR, pathname=__file__, lineno=1,
-        msg="auth failed with %s", args=(FAKE_KEY,), exc_info=None,
+        name="test",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="auth failed with %s",
+        args=(FAKE_KEY,),
+        exc_info=None,
     )
     utils.SecretRedactingFilter([FAKE_KEY]).filter(record)
     assert FAKE_KEY not in record.getMessage()
@@ -148,13 +151,19 @@ def test_a_key_inside_a_traceback_is_redacted(monkeypatch: pytest.MonkeyPatch) -
     """
     monkeypatch.setenv("AZURE_SPEECH_KEY", FAKE_KEY)
     record = logging.LogRecord(
-        name="test", level=logging.ERROR, pathname=__file__, lineno=1,
-        msg="assessment failed", args=(), exc_info=None,
+        name="test",
+        level=logging.ERROR,
+        pathname=__file__,
+        lineno=1,
+        msg="assessment failed",
+        args=(),
+        exc_info=None,
     )
     try:
         raise RuntimeError(f"azure rejected subscription {FAKE_KEY}")
     except RuntimeError:
         import sys
+
         record.exc_info = sys.exc_info()
 
     rendered = utils.SecretRedactingFormatter("%(message)s").format(record)
@@ -165,8 +174,13 @@ def test_a_key_inside_a_traceback_is_redacted(monkeypatch: pytest.MonkeyPatch) -
 def test_the_formatter_leaves_ordinary_text_alone(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AZURE_SPEECH_KEY", FAKE_KEY)
     record = logging.LogRecord(
-        name="test", level=logging.INFO, pathname=__file__, lineno=1,
-        msg="recorded attempt 4", args=(), exc_info=None,
+        name="test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="recorded attempt 4",
+        args=(),
+        exc_info=None,
     )
     assert utils.SecretRedactingFormatter("%(message)s").format(record) == "recorded attempt 4"
 

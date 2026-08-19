@@ -15,9 +15,9 @@ synthesiser's rhythm is its own. What earns it the place is that it does not mov
 
 Costs 975 TTS characters and about 62 seconds of STT, once, against free tiers of 500,000
 characters and 18,000 seconds a month. (62, not the ~85 a human takes over the same passage:
-the neural voice reads it faster than the estimate assumed.) Both are metered like any other call so the app's
-remaining-allowance figure stays honest. Run inside the container, since only it has the
-pinned deps:
+the neural voice reads it faster than the estimate assumed.) Both are metered like any other
+call so the app's remaining-allowance figure stays honest. Run inside the container, since only
+it has the pinned deps:
 
     docker compose run --rm app python scripts/capture_baseline.py
 
@@ -33,7 +33,7 @@ import argparse
 import json
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -62,8 +62,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", default=None, help=f"Defaults to {DEFAULT_OUT.name}")
     parser.add_argument("--wav", default=None, help=f"Defaults to {DEFAULT_WAV}")
-    parser.add_argument("--force", action="store_true",
-                        help="Overwrite an existing baseline instead of refusing")
+    parser.add_argument(
+        "--force", action="store_true", help="Overwrite an existing baseline instead of refusing"
+    )
     args = parser.parse_args()
 
     utils.configure_logging(logging.INFO)
@@ -83,9 +84,11 @@ def main() -> int:
     # and, worse, move the fixed point every stored reading is plotted against — the one
     # thing about the baseline that must not change without someone meaning it.
     if out_path.exists() and not args.force:
-        print(f"[baseline] {out_path.name} already exists. The baseline is meant to be "
-              f"captured once and left alone — re-capturing moves the line every past "
-              f"reading is measured against. Pass --force if that is really what you want.")
+        print(
+            f"[baseline] {out_path.name} already exists. The baseline is meant to be "
+            f"captured once and left alone — re-capturing moves the line every past "
+            f"reading is measured against. Pass --force if that is really what you want."
+        )
         return 1
 
     text = progress_view.BENCHMARK_PASSAGE
@@ -94,8 +97,10 @@ def main() -> int:
     # The plain text, never `slow_ssml`. Slowed synthesis would stretch exactly the durations
     # this exists to measure, and the resulting nPVI would describe the SSML, not the voice.
     payload = tts.payload_for(text, slow=False, voice=voice)
-    print(f"[baseline] voice={voice}, benchmark v{progress_view.BENCHMARK_VERSION}, "
-          f"{len(payload)} characters")
+    print(
+        f"[baseline] voice={voice}, benchmark v{progress_view.BENCHMARK_VERSION}, "
+        f"{len(payload)} characters"
+    )
 
     conn = db.connect()
     try:
@@ -106,7 +111,8 @@ def main() -> int:
 
     synthesis = tts.synthesise(text, voice=voice, slow=False)
     db.record_tts_usage(
-        conn, characters=synthesis.characters * max(synthesis.attempts, 1),
+        conn,
+        characters=synthesis.characters * max(synthesis.attempts, 1),
         voice=synthesis.voice,
     )
     print(f"[baseline] synthesised {len(synthesis.audio)} bytes")
@@ -122,8 +128,10 @@ def main() -> int:
         wav_path.parent.mkdir(parents=True, exist_ok=True)
         wav_path.write_bytes(wav_bytes)
         print(f"[baseline] refused before assessment: {exc}")
-        print(f"[baseline] the audio is kept at {wav_path} — re-run to assess it without "
-              f"paying for synthesis again.")
+        print(
+            f"[baseline] the audio is kept at {wav_path} — re-run to assess it without "
+            f"paying for synthesis again."
+        )
         return 1
 
     with audio_utils.temp_wav(wav_bytes) as temp_path:
@@ -133,12 +141,14 @@ def main() -> int:
     # Recorded rather than skipped because this really was billable seconds and the meter
     # derives from this table — the row must be honest about the money and about the voice.
     db.record_attempt(
-        conn, mode=MODE,
+        conn,
+        mode=MODE,
         reference_text=f"{rhythm.BASELINE_CAPTURE_MARKER} {voice}",
         recognised_text=speech_analyzer._display_text(payloads[0]),
         audio_seconds=seconds * max(attempts, 1),
         audio_sha256=utils.sha256_bytes(wav_bytes),
-        overall_scores={}, azure_raw=payloads if len(payloads) > 1 else payloads[0],
+        overall_scores={},
+        azure_raw=payloads if len(payloads) > 1 else payloads[0],
         offline=False,
     )
 
@@ -151,7 +161,7 @@ def main() -> int:
     # from the reading it is supposed to anchor.
     document = {
         "voice": synthesis.voice,
-        "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "captured_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "benchmark_version": progress_view.BENCHMARK_VERSION,
         "mode": MODE.value,
         "reference_text": text,
@@ -166,15 +176,19 @@ def main() -> int:
     rhythm.reset_baseline_cache()
     captured = rhythm.baseline(out_path)
     if captured is None or not captured.rhythm.measured:
-        print("[baseline] WARNING: the payload was written but produced no nPVI. Check it "
-              "before committing — a baseline that cannot be measured is not a baseline.")
+        print(
+            "[baseline] WARNING: the payload was written but produced no nPVI. Check it "
+            "before committing — a baseline that cannot be measured is not a baseline."
+        )
         return 1
 
     shown = out_path.resolve()
     shown = shown.relative_to(ROOT) if shown.is_relative_to(ROOT) else shown
     print(f"[baseline] wrote {shown} ({len(payloads)} utterance(s))")
-    print(f"[baseline] nPVI {captured.rhythm.npvi:.2f} over {captured.rhythm.pairs} pairs "
-          f"in {captured.rhythm.runs} runs")
+    print(
+        f"[baseline] nPVI {captured.rhythm.npvi:.2f} over {captured.rhythm.pairs} pairs "
+        f"in {captured.rhythm.runs} runs"
+    )
     print(f"[baseline] audio kept at {wav_path} (not committed)")
     print("[baseline] read the JSON before committing — it should contain no key.")
     return 0

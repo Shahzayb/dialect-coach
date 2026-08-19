@@ -13,24 +13,43 @@ import speech_analyzer as sa
 from utils import Mode
 
 
-def utterance(duration_ticks: int, *, pron=None, accuracy=None, fluency=None,
-              prosody=None, completeness=None, words=(), display="") -> dict:
+def utterance(
+    duration_ticks: int,
+    *,
+    pron=None,
+    accuracy=None,
+    fluency=None,
+    prosody=None,
+    completeness=None,
+    words=(),
+    display="",
+) -> dict:
     scores = {}
-    for key, value in (("PronScore", pron), ("AccuracyScore", accuracy),
-                       ("FluencyScore", fluency), ("ProsodyScore", prosody),
-                       ("CompletenessScore", completeness)):
+    for key, value in (
+        ("PronScore", pron),
+        ("AccuracyScore", accuracy),
+        ("FluencyScore", fluency),
+        ("ProsodyScore", prosody),
+        ("CompletenessScore", completeness),
+    ):
         if value is not None:
             scores[key] = value
     return {
         "Duration": duration_ticks,
         "DisplayText": display,
-        "NBest": [{
-            "Display": display,
-            "PronunciationAssessment": scores,
-            "Words": [{"Word": w, "PronunciationAssessment": {"AccuracyScore": 90.0,
-                                                              "ErrorType": "None"}}
-                      for w in words],
-        }],
+        "NBest": [
+            {
+                "Display": display,
+                "PronunciationAssessment": scores,
+                "Words": [
+                    {
+                        "Word": w,
+                        "PronunciationAssessment": {"AccuracyScore": 90.0, "ErrorType": "None"},
+                    }
+                    for w in words
+                ],
+            }
+        ],
     }
 
 
@@ -45,16 +64,14 @@ def test_merge_is_duration_weighted_not_a_naive_mean() -> None:
         utterance(1 * SECOND, accuracy=50.0, words=["b"]),
     ]
     overall, _, _ = sa.normalise(payloads, "a b", Mode.PARAGRAPH)
-    assert overall["accuracy"] == pytest.approx(86.0)   # (90*9 + 50*1) / 10
-    assert overall["accuracy"] != pytest.approx(70.0)   # the naive mean
+    assert overall["accuracy"] == pytest.approx(86.0)  # (90*9 + 50*1) / 10
+    assert overall["accuracy"] != pytest.approx(70.0)  # the naive mean
 
 
 def test_merge_weights_every_overall_score() -> None:
     payloads = [
-        utterance(3 * SECOND, pron=80.0, accuracy=80.0, fluency=60.0, prosody=40.0,
-                  words=["a"]),
-        utterance(1 * SECOND, pron=40.0, accuracy=40.0, fluency=100.0, prosody=80.0,
-                  words=["b"]),
+        utterance(3 * SECOND, pron=80.0, accuracy=80.0, fluency=60.0, prosody=40.0, words=["a"]),
+        utterance(1 * SECOND, pron=40.0, accuracy=40.0, fluency=100.0, prosody=80.0, words=["b"]),
     ]
     overall, _, _ = sa.normalise(payloads, "a b", Mode.PARAGRAPH)
     assert overall["pron_score"] == pytest.approx(70.0)
@@ -72,15 +89,16 @@ def test_prosody_is_weighted_over_only_the_utterances_that_have_it() -> None:
 
 
 def test_prosody_is_none_not_zero_when_absent_everywhere() -> None:
-    payloads = [utterance(SECOND, accuracy=90.0, words=["a"]),
-                utterance(SECOND, accuracy=90.0, words=["b"])]
+    payloads = [
+        utterance(SECOND, accuracy=90.0, words=["a"]),
+        utterance(SECOND, accuracy=90.0, words=["b"]),
+    ]
     overall, _, _ = sa.normalise(payloads, "a b", Mode.PARAGRAPH)
     assert overall["prosody"] is None
 
 
 def test_missing_durations_fall_back_to_equal_weighting() -> None:
-    payloads = [utterance(0, accuracy=100.0, words=["a"]),
-                utterance(0, accuracy=50.0, words=["b"])]
+    payloads = [utterance(0, accuracy=100.0, words=["a"]), utterance(0, accuracy=50.0, words=["b"])]
     overall, _, _ = sa.normalise(payloads, "a b", Mode.PARAGRAPH)
     assert overall["accuracy"] == pytest.approx(75.0)
 
@@ -103,8 +121,10 @@ def test_completeness_drops_when_words_are_omitted() -> None:
 
 
 def test_recognised_text_is_joined_across_utterances() -> None:
-    payloads = [utterance(SECOND, accuracy=90.0, words=["one"], display="One."),
-                utterance(SECOND, accuracy=90.0, words=["two"], display="Two.")]
+    payloads = [
+        utterance(SECOND, accuracy=90.0, words=["one"], display="One."),
+        utterance(SECOND, accuracy=90.0, words=["two"], display="Two."),
+    ]
     _, recognised, _ = sa.normalise(payloads, "one two", Mode.PARAGRAPH)
     assert recognised == "One. Two."
 
@@ -145,15 +165,17 @@ def test_normalise_rejects_an_empty_payload_list() -> None:
 def test_miscue_is_on_for_drill_and_off_for_paragraph() -> None:
     """enableMiscue is only honoured single-shot; True in continuous mode may be rejected."""
     import json
+
     assert json.loads(sa.assessment_config_json("x", Mode.DRILL))["enableMiscue"] is True
     assert json.loads(sa.assessment_config_json("x", Mode.PARAGRAPH))["enableMiscue"] is False
 
 
 def test_assessment_config_requests_prosody_ipa_and_nbest() -> None:
     import json
+
     config = json.loads(sa.assessment_config_json("hello", Mode.DRILL))
-    assert config["enableProsodyAssessment"] is True   # else ProsodyScore never appears
+    assert config["enableProsodyAssessment"] is True  # else ProsodyScore never appears
     assert config["phonemeAlphabet"] == "IPA"
-    assert config["nBestPhonemeCount"] == 5            # what was actually produced
+    assert config["nBestPhonemeCount"] == 5  # what was actually produced
     assert config["granularity"] == "Phoneme"
     assert config["gradingSystem"] == "HundredMark"

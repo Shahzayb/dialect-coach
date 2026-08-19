@@ -16,9 +16,10 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from datetime import datetime, timezone
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 import utils
 from shadowing import SHADOW_TAG
@@ -132,15 +133,15 @@ CREATE INDEX IF NOT EXISTS idx_attempt_tags_tag ON attempt_tags(tag);
 
 def utc_now_iso() -> str:
     """UTC, second precision, 'Z'-suffixed — so string comparison is chronological."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def month_prefix(when: datetime | None = None) -> str:
     """'YYYY-MM' for the UTC month `when` falls in. The meter's bucket key."""
-    moment = when or datetime.now(timezone.utc)
+    moment = when or datetime.now(UTC)
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    return moment.astimezone(timezone.utc).strftime("%Y-%m")
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone(UTC).strftime("%Y-%m")
 
 
 def connect(path: str | Path | None = None) -> sqlite3.Connection:
@@ -264,14 +265,20 @@ def attach_coaching(
     """
     conn.execute(
         "UPDATE attempts SET gemini_raw_json = ?, coach_source = ? WHERE id = ?",
-        (json.dumps(gemini_raw, ensure_ascii=False) if gemini_raw is not None else None,
-         coach_source, attempt_id),
+        (
+            json.dumps(gemini_raw, ensure_ascii=False) if gemini_raw is not None else None,
+            coach_source,
+            attempt_id,
+        ),
     )
     conn.commit()
 
 
 def record_tts_usage(
-    conn: sqlite3.Connection, *, characters: int, voice: str | None = None,
+    conn: sqlite3.Connection,
+    *,
+    characters: int,
+    voice: str | None = None,
     created_at: str | None = None,
 ) -> None:
     """Charge the TTS meter. Unused until the TTS chunk lands."""
@@ -300,8 +307,7 @@ def monthly_stt_seconds(conn: sqlite3.Connection, when: datetime | None = None) 
 def monthly_tts_characters(conn: sqlite3.Connection, when: datetime | None = None) -> int:
     """Characters synthesised this UTC month."""
     row = conn.execute(
-        "SELECT COALESCE(SUM(characters), 0) AS total FROM tts_usage "
-        "WHERE created_at LIKE ?",
+        "SELECT COALESCE(SUM(characters), 0) AS total FROM tts_usage WHERE created_at LIKE ?",
         (f"{month_prefix(when)}-%",),
     ).fetchone()
     return int(row["total"])
@@ -425,9 +431,7 @@ def upsert_target(
 def targets(conn: sqlite3.Connection, state: str | None = None) -> Sequence[sqlite3.Row]:
     """Every target, oldest first, optionally filtered to one state."""
     if state is None:
-        return conn.execute(
-            "SELECT * FROM practice_targets ORDER BY added, id"
-        ).fetchall()
+        return conn.execute("SELECT * FROM practice_targets ORDER BY added, id").fetchall()
     return conn.execute(
         "SELECT * FROM practice_targets WHERE state = ? ORDER BY added, id", (state,)
     ).fetchall()
@@ -446,8 +450,10 @@ def update_target(
     sets: list[str] = []
     values: list[Any] = []
     for column, value in (
-        ("state", state), ("next_due", next_due),
-        ("last_seen", last_seen), ("reviews_passed", reviews_passed),
+        ("state", state),
+        ("next_due", next_due),
+        ("last_seen", last_seen),
+        ("reviews_passed", reviews_passed),
     ):
         if value is not None:
             sets.append(f"{column} = ?")
@@ -461,8 +467,7 @@ def update_target(
 
 def remove_target(conn: sqlite3.Connection, target_id: int) -> None:
     """Drop a target. Its trials keep their own `item` string, so the history survives it."""
-    conn.execute("UPDATE perception_trials SET target_id = NULL WHERE target_id = ?",
-                 (target_id,))
+    conn.execute("UPDATE perception_trials SET target_id = NULL WHERE target_id = ?", (target_id,))
     conn.execute("DELETE FROM practice_targets WHERE id = ?", (target_id,))
     conn.commit()
 
@@ -495,8 +500,19 @@ def record_trial(
             alternatives, answered, correct, review
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (block_id, target_id, created_at or utc_now_iso(), item, word, voice,
-         int(novel), int(alternatives), answered, int(correct), int(review)),
+        (
+            block_id,
+            target_id,
+            created_at or utc_now_iso(),
+            item,
+            word,
+            voice,
+            int(novel),
+            int(alternatives),
+            answered,
+            int(correct),
+            int(review),
+        ),
     )
     conn.commit()
 
@@ -510,9 +526,7 @@ def trials_for(conn: sqlite3.Connection, item: str) -> Sequence[sqlite3.Row]:
 
 def all_trials(conn: sqlite3.Connection) -> Sequence[sqlite3.Row]:
     """Every trial, oldest first. The perception chart's input."""
-    return conn.execute(
-        "SELECT * FROM perception_trials ORDER BY created_at, id"
-    ).fetchall()
+    return conn.execute("SELECT * FROM perception_trials ORDER BY created_at, id").fetchall()
 
 
 def heard_stimuli(conn: sqlite3.Connection, item: str) -> dict[tuple[str, str], str]:

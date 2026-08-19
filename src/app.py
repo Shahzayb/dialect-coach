@@ -24,8 +24,8 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 import streamlit as st
@@ -126,21 +126,21 @@ ERROR_BADGES: list[tuple[str, str | None, str]] = [
 # which breaks word alignment.
 PRESETS: dict[Mode, dict[str, str]] = {
     Mode.DRILL: {
-        "Th (/θ/, /ð/)":
-            "These three brothers thought the weather was worth the trouble.",
-        "V versus W":
-            "Very well, we will invite the whole village to the west wing.",
-        "Short a versus short e (/æ/, /ɛ/)":
-            "That bad man had a red cap and a black pen in his hand.",
-        "Sibilants (/s/, /ʃ/, /z/, /dʒ/)":
-            "She chose the usual visual measure just as the season closed.",
+        "Th (/θ/, /ð/)": "These three brothers thought the weather was worth the trouble.",
+        "V versus W": "Very well, we will invite the whole village to the west wing.",
+        "Short a versus short e (/æ/, /ɛ/)": (
+            "That bad man had a red cap and a black pen in his hand."
+        ),
+        "Sibilants (/s/, /ʃ/, /z/, /dʒ/)": (
+            "She chose the usual visual measure just as the season closed."
+        ),
     },
     Mode.PARAGRAPH: {
         # First, and deliberately so. The progress view identifies a benchmark read by
         # matching this text, so it has to be selected rather than typed from memory — a
         # hand-typed near-copy would quietly start a second series.
         progress_view.BENCHMARK_TITLE: progress_view.BENCHMARK_PASSAGE,
-        "Mixed diagnostic paragraph":
+        "Mixed diagnostic paragraph": (
             "There are three things I think about whenever I have to explain my work to "
             "someone else. The first is whether the other person actually needs the "
             "detail, or whether they would rather hear the result and move on. The "
@@ -148,15 +148,17 @@ PRESETS: dict[Mode, dict[str, str]] = {
             "ends of my words disappear. The third is that I value being understood far "
             "more than sounding clever. When I remember all three, the conversation goes "
             "well. When I forget them, I watch the listener's face change and I know I "
-            "have lost them somewhere in the middle of a long sentence.",
-        "Workplace explanation":
+            "have lost them somewhere in the middle of a long sentence."
+        ),
+        "Workplace explanation": (
             "The problem was not that the tests failed. The problem was that they passed "
             "for the wrong reason, and nobody thought to check. We had been measuring "
             "whether the service responded at all, rather than whether it responded with "
             "the right thing. Those are very different questions. Once we changed what we "
             "measured, the same code that had looked healthy for months started failing "
             "immediately, which was uncomfortable but useful. I would rather find a bug "
-            "on a Wednesday afternoon than have a customer find it for me on a weekend.",
+            "on a Wednesday afternoon than have a customer find it for me on a weekend."
+        ),
     },
 }
 
@@ -176,7 +178,7 @@ def get_connection() -> sqlite3.Connection:
 # --- Session caches -------------------------------------------------------------------------
 
 
-def lru_get(cache: "OrderedDict[Any, Any]", key: Any) -> Any | None:
+def lru_get(cache: OrderedDict[Any, Any], key: Any) -> Any | None:
     """Read an entry and mark it most-recently-used.
 
     Pure, so the eviction policy is testable without a Streamlit runtime.
@@ -187,7 +189,7 @@ def lru_get(cache: "OrderedDict[Any, Any]", key: Any) -> Any | None:
     return cache[key]
 
 
-def lru_put(cache: "OrderedDict[Any, Any]", key: Any, value: Any, limit: int) -> None:
+def lru_put(cache: OrderedDict[Any, Any], key: Any, value: Any, limit: int) -> None:
     """Store an entry, evicting the *least recently used* once over `limit`.
 
     LRU rather than insertion order because the drill loop re-uses one entry over and over:
@@ -200,7 +202,7 @@ def lru_put(cache: "OrderedDict[Any, Any]", key: Any, value: Any, limit: int) ->
         cache.popitem(last=False)
 
 
-def _session_cache(name: str) -> "OrderedDict[Any, Any]":
+def _session_cache(name: str) -> OrderedDict[Any, Any]:
     if name not in st.session_state:
         st.session_state[name] = OrderedDict()
     return st.session_state[name]
@@ -325,7 +327,11 @@ def word_tooltip_html(word: dict[str, Any]) -> str:
         f"{html.escape(text)} : {html.escape(score_text)}</div>"
     ]
 
-    pairs = [(expected, score) for expected, _produced, score in speech_analyzer.phoneme_pairs(word) if expected]
+    pairs = [
+        (expected, score)
+        for expected, _produced, score in speech_analyzer.phoneme_pairs(word)
+        if expected
+    ]
     if pairs:
         symbol_cells = "".join(
             f'<span style="color:{BAND_COLOURS[utils.phoneme_band(score)]};min-width:1.6rem;'
@@ -339,7 +345,7 @@ def word_tooltip_html(word: dict[str, Any]) -> str:
             "</span>"
             for _symbol, score in pairs
         )
-        parts.append(f'<div>{symbol_cells}</div><div>{score_cells}</div>')
+        parts.append(f"<div>{symbol_cells}</div><div>{score_cells}</div>")
 
     notes = []
     error_type = word.get("error_type") or "None"
@@ -461,8 +467,9 @@ def weakest_phoneme(word: dict[str, Any]) -> str:
 # --- Playback ---------------------------------------------------------------------------------
 
 
-def play(conn: sqlite3.Connection, text: str, *, slow: bool, label: str,
-         source: str) -> tuple[str, str] | None:
+def play(
+    conn: sqlite3.Connection, text: str, *, slow: bool, label: str, source: str
+) -> tuple[str, str] | None:
     """Synthesise `text` unless it is already cached, then queue it for playback.
 
     Returns None on success, or an (icon, message) pair for the caller to render. It does
@@ -501,8 +508,12 @@ def play(conn: sqlite3.Connection, text: str, *, slow: bool, label: str,
                 result = tts.synthesise(text, slow=slow, on_attempt=note_attempt)
         except utils.ConfigError as exc:
             return ("🔑", str(exc))
-        except (utils.PermanentError, utils.TransientError, tts.SynthesisError,
-                speech_analyzer.AssessmentError) as exc:
+        except (
+            utils.PermanentError,
+            utils.TransientError,
+            tts.SynthesisError,
+            speech_analyzer.AssessmentError,
+        ) as exc:
             # AssessmentError belongs here even though this is synthesis: QuotaExhausted
             # subclasses it, and it is shared so that one 403 type drives the budget guard
             # for both paths. Leave it out and the branch below is unreachable.
@@ -514,7 +525,8 @@ def play(conn: sqlite3.Connection, text: str, *, slow: bool, label: str,
             # a ConfigError (caught above) or when no attempt was ever started.
             if attempts_made:
                 db.record_tts_usage(
-                    conn, characters=payload_characters * attempts_made,
+                    conn,
+                    characters=payload_characters * attempts_made,
                     voice=tts.voice_name(),
                 )
             # redact() rather than str(): SDK error details can echo request context.
@@ -535,9 +547,7 @@ def play(conn: sqlite3.Connection, text: str, *, slow: bool, label: str,
     return None
 
 
-def playback_buttons(
-    conn: sqlite3.Connection, text: str, *, key_prefix: str, label: str
-) -> None:
+def playback_buttons(conn: sqlite3.Connection, text: str, *, key_prefix: str, label: str) -> None:
     """A "Hear it" / "Hear it slowly" pair, plus the player for whichever was clicked.
 
     The player renders here rather than in one fixed place on the page, so the audio
@@ -550,12 +560,10 @@ def playback_buttons(
 
     left, right, _ = st.columns([1, 1, 3])
     with left:
-        if st.button("🔊 Hear it", key=f"{key_prefix}-normal", disabled=offline,
-                     width="stretch"):
+        if st.button("🔊 Hear it", key=f"{key_prefix}-normal", disabled=offline, width="stretch"):
             failure = play(conn, text, slow=False, label=label, source=key_prefix)
     with right:
-        if st.button("🐢 Slowly", key=f"{key_prefix}-slow", disabled=offline,
-                     width="stretch"):
+        if st.button("🐢 Slowly", key=f"{key_prefix}-slow", disabled=offline, width="stretch"):
             failure = play(conn, text, slow=True, label=label, source=key_prefix)
 
     # Rendered here, outside the columns, so a long message gets the full width instead of
@@ -670,8 +678,8 @@ def validate_reference(text: str) -> bool:
     if any(char.isdigit() for char in text):
         # Not fatal, but it does degrade the result, so say why rather than just warning.
         st.warning(
-            "The reference text contains digits. Azure normalises \"33\" and "
-            "\"thirty-three\" differently, which can throw the word alignment off — "
+            'The reference text contains digits. Azure normalises "33" and '
+            '"thirty-three" differently, which can throw the word alignment off — '
             "spell numbers out for a cleaner result.",
             icon="⚠️",
         )
@@ -732,8 +740,11 @@ def run_assessment_job(
     try:
         with audio_utils.temp_wav(wav_bytes) as wav_path:
             assessment = speech_analyzer.analyse(
-                wav_path, reference_text, mode,
-                cancel_event=cancel_event, on_attempt=note_attempt,
+                wav_path,
+                reference_text,
+                mode,
+                cancel_event=cancel_event,
+                on_attempt=note_attempt,
             )
 
         if cancel_event.is_set():
@@ -774,21 +785,27 @@ def run_assessment_job(
         return AssessOutcome(error=("🚫", utils.redact(str(exc))))
     except utils.ConfigError as exc:
         return AssessOutcome(error=("🔑", str(exc)))
-    except Exception as exc:  # noqa: BLE001 — nothing may escape a worker thread
+    except Exception as exc:  # nothing may escape a worker thread
         logger.error("Unexpected assessment failure", exc_info=True)
-        return AssessOutcome(
-            error=("🚫", f"{type(exc).__name__}: {utils.redact(str(exc))}")
-        )
+        return AssessOutcome(error=("🚫", f"{type(exc).__name__}: {utils.redact(str(exc))}"))
 
 
 def start_assessment(
-    conn: sqlite3.Connection, wav_bytes: bytes, seconds: float,
-    reference_text: str, mode: Mode, key: str, tags: tuple[str, ...] = (),
+    conn: sqlite3.Connection,
+    wav_bytes: bytes,
+    seconds: float,
+    reference_text: str,
+    mode: Mode,
+    key: str,
+    tags: tuple[str, ...] = (),
 ) -> None:
     """Spawn the worker for one assessment and remember it for the poll loop."""
     cancel_event = threading.Event()
     job = AssessJob(
-        cancel_event=cancel_event, key=key, reference_text=reference_text, mode=mode,
+        cancel_event=cancel_event,
+        key=key,
+        reference_text=reference_text,
+        mode=mode,
         tags=tags,
     )
 
@@ -838,10 +855,15 @@ def collect_finished_job() -> None:
         st.error(message, icon=icon)
         return
 
-    _cache_put(CachedAttempt(
-        key=job.key, assessment=outcome.assessment, reference_text=job.reference_text,
-        attempt_id=outcome.attempt_id, mode=job.mode,
-    ))
+    _cache_put(
+        CachedAttempt(
+            key=job.key,
+            assessment=outcome.assessment,
+            reference_text=job.reference_text,
+            attempt_id=outcome.attempt_id,
+            mode=job.mode,
+        )
+    )
     st.session_state["last_key"] = job.key
     # A fresh result must not open with the previous attempt's word still queued.
     st.session_state["now_playing"] = None
@@ -901,9 +923,11 @@ def render_scores(assessment) -> None:
     st.markdown(
         "".join(
             _score_bar_html(label, scores.get(key))
-            for label, key in
-            [("Accuracy score", "accuracy"), ("Fluency score", "fluency"),
-             ("Prosody score", "prosody")]
+            for label, key in [
+                ("Accuracy score", "accuracy"),
+                ("Fluency score", "fluency"),
+                ("Prosody score", "prosody"),
+            ]
         ),
         unsafe_allow_html=True,
     )
@@ -987,7 +1011,7 @@ def coaching_for(
     else:
         try:
             report = fallback_coach.build(entry.assessment, entry.mode)
-        except Exception as exc:  # noqa: BLE001 — a report is promised on every assessment
+        except Exception as exc:  # a report is promised on every assessment
             logger.error("Could not build the offline report", exc_info=True)
             report = fallback_coach.emergency_report(f"{type(exc).__name__}: {exc}")
         result = ai_coach.CoachingResult(
@@ -1009,9 +1033,9 @@ def render_fix(fix: Any, rank: int) -> None:
     with st.container(border=True):
         st.markdown(
             f'<div style="font-size:1.7rem;font-weight:700;line-height:1.3;">'
-            f'{rank}. /{html.escape(fix.expected_phoneme)}/ '
+            f"{rank}. /{html.escape(fix.expected_phoneme)}/ "
             f'<span style="opacity:0.55;">→</span> '
-            f'/{html.escape(fix.produced_phoneme)}/</div>',
+            f"/{html.escape(fix.produced_phoneme)}/</div>",
             unsafe_allow_html=True,
         )
         if fix.affected_words:
@@ -1293,8 +1317,10 @@ def render_rhythm(assessment, reference_text: str) -> None:
 
     difference = measured.npvi - baseline.rhythm.npvi
     st.metric(
-        "nPVI", f"{measured.npvi:.1f}",
-        delta=f"{difference:+.1f} vs baseline", delta_color="off",
+        "nPVI",
+        f"{measured.npvi:.1f}",
+        delta=f"{difference:+.1f} vs baseline",
+        delta_color="off",
     )
     st.caption(
         f"Baseline {baseline.rhythm.npvi:.1f} — the benchmark passage read by **"
@@ -1566,9 +1592,7 @@ def queue_candidates(_conn: sqlite3.Connection, fingerprint: tuple[int, int]):
     parsed = parsed_attempts(_conn, fingerprint)
     phonemes = progress_view.flagged_phonemes(parsed)
     syllables = progress_view.weak_syllables(parsed)
-    return practice_queue.candidates(
-        phonemes.to_dict("records"), syllables.to_dict("records")
-    )
+    return practice_queue.candidates(phonemes.to_dict("records"), syllables.to_dict("records"))
 
 
 def sync_queue(conn: sqlite3.Connection) -> list[Any]:
@@ -1589,7 +1613,9 @@ def sync_queue(conn: sqlite3.Connection) -> list[Any]:
         with _DB_LOCK:
             for candidate in fresh:
                 db.upsert_target(
-                    conn, item=candidate.item, kind=candidate.kind,
+                    conn,
+                    item=candidate.item,
+                    kind=candidate.kind,
                     evidence={**candidate.evidence, "why": candidate.why},
                 )
         logger.info("Promoted %d new practice target(s)", len(fresh))
@@ -1616,8 +1642,9 @@ def _accuracy_line(summaries: list[Any]) -> str:
     )
 
 
-def render_target_card(conn: sqlite3.Connection, target: dict[str, Any],
-                       still_flagged: set[str]) -> None:
+def render_target_card(
+    conn: sqlite3.Connection, target: dict[str, Any], still_flagged: set[str]
+) -> None:
     """One queue item: what it is, why it is here, and what takes it off.
 
     Both halves are required by the brief and both are rendered from real values rather than
@@ -1658,15 +1685,19 @@ def render_target_card(conn: sqlite3.Connection, target: dict[str, Any],
         st.markdown(f"**What takes it off.** {practice_queue.graduation_rule(kind)}")
         st.markdown(f"**Where it stands.** {decision.reason}")
         if str(target["state"]) == practice_queue.GRADUATED:
-            st.caption(practice_queue.review_horizon(
-                int(target.get("reviews_passed") or 0)))
+            st.caption(practice_queue.review_horizon(int(target.get("reviews_passed") or 0)))
         added = str(target.get("added") or "")
         due_at = str(target.get("next_due") or "")
         st.caption(f"Added {added or 'unknown'} · next due {due_at or 'unscheduled'}")
 
 
-def apply_decisions(conn: sqlite3.Connection, targets: list[dict[str, Any]],
-                    still_flagged: set[str], *, now: datetime) -> None:
+def apply_decisions(
+    conn: sqlite3.Connection,
+    targets: list[dict[str, Any]],
+    still_flagged: set[str],
+    *,
+    now: datetime,
+) -> None:
     """Write the scheduling consequences of what the evidence now says.
 
     Separate from rendering so the page never shows one verdict while the database holds
@@ -1689,7 +1720,8 @@ def apply_decisions(conn: sqlite3.Connection, targets: list[dict[str, Any]],
             continue
         with _DB_LOCK:
             db.update_target(
-                conn, int(target["id"]),
+                conn,
+                int(target["id"]),
                 state=decision.state,
                 next_due=practice_queue.next_due(decision, now=now, kind=kind),
                 reviews_passed=decision.reviews_passed,
@@ -1698,8 +1730,9 @@ def apply_decisions(conn: sqlite3.Connection, targets: list[dict[str, Any]],
         logger.info("Target %s → %s", target["item"], decision.state)
 
 
-def render_today(conn: sqlite3.Connection, job: "AssessJob | None" = None,
-                 running: bool = False) -> None:
+def render_today(
+    conn: sqlite3.Connection, job: AssessJob | None = None, running: bool = False
+) -> None:
     """The Today tab: the one due thing, then the target set and its rules.
 
     Takes the assessment job because shadowing assesses from this surface — it is the same
@@ -1722,7 +1755,7 @@ def render_today(conn: sqlite3.Connection, job: "AssessJob | None" = None,
     found = queue_candidates(conn, fingerprint)
     still_flagged = {c.item for c in found if c.kind == practice_queue.STRESS}
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     apply_decisions(conn, targets, still_flagged, now=now)
 
     # Promoted targets only. A shadowing passage is a standing practice, not something the
@@ -1758,7 +1791,8 @@ def render_today(conn: sqlite3.Connection, job: "AssessJob | None" = None,
     # Split by kind rather than by "not stress": a shadowing passage is also not stress, and
     # handing one to `start_block` would look for a substitution it does not have.
     trainable = [
-        t for t in ready
+        t
+        for t in ready
         if practice_queue.promotable(str(t["kind"])) and str(t["kind"]) != practice_queue.STRESS
     ]
     drills = [t for t in ready if str(t["kind"]) == practice_queue.STRESS]
@@ -1766,8 +1800,7 @@ def render_today(conn: sqlite3.Connection, job: "AssessJob | None" = None,
     if trainable:
         target = trainable[0]
         review = str(target["state"]) == practice_queue.GRADUATED
-        trials = (utils.PERCEPTION_REVIEW_TRIALS if review
-                  else utils.PERCEPTION_BLOCK_TRIALS)
+        trials = utils.PERCEPTION_REVIEW_TRIALS if review else utils.PERCEPTION_BLOCK_TRIALS
         st.markdown(
             f"### {'Spaced review' if review else 'Listening block'}: {target['item']}\n"
             f"{trials} trials. You hear one word and choose which of the pair it was, in "
@@ -1778,8 +1811,9 @@ def render_today(conn: sqlite3.Connection, job: "AssessJob | None" = None,
             "makes it carry over to new words and new speakers, rather than teaching you "
             "one synthesiser."
         )
-        if st.button("▶ Start the block", type="primary",
-                     disabled=utils.offline_mode(), key="start-block"):
+        if st.button(
+            "▶ Start the block", type="primary", disabled=utils.offline_mode(), key="start-block"
+        ):
             start_block(conn, target, review=review)
         if utils.offline_mode():
             st.caption(
@@ -1827,8 +1861,9 @@ def render_today(conn: sqlite3.Connection, job: "AssessJob | None" = None,
             render_target_card(conn, target, still_flagged)
 
 
-def render_shadow_offer(conn: sqlite3.Connection, targets: list[dict[str, Any]], *,
-                        now: datetime) -> None:
+def render_shadow_offer(
+    conn: sqlite3.Connection, targets: list[dict[str, Any]], *, now: datetime
+) -> None:
     """The shadowing section of Today: what is due, or the offer if nothing is on the list yet.
 
     Its own section rather than a fourth entry in the due list. Shadowing is a different kind
@@ -1837,13 +1872,8 @@ def render_shadow_offer(conn: sqlite3.Connection, targets: list[dict[str, Any]],
     thing here that is available on day one.
     """
     passages = shadow_passages()
-    existing = {
-        str(t["item"]): t for t in targets
-        if str(t["kind"]) == practice_queue.SHADOW
-    }
-    ready = [
-        t for t in practice_queue.due(list(existing.values()), now=now)
-    ]
+    existing = {str(t["item"]): t for t in targets if str(t["kind"]) == practice_queue.SHADOW}
+    ready = list(practice_queue.due(list(existing.values()), now=now))
 
     st.markdown("#### Shadowing")
     if ready:
@@ -1869,7 +1899,8 @@ def render_shadow_offer(conn: sqlite3.Connection, targets: list[dict[str, Any]],
         )
 
     chosen = st.selectbox(
-        "Passage", list(passages),
+        "Passage",
+        list(passages),
         index=list(passages).index(title) if title in passages else 0,
         key="shadow-passage",
     )
@@ -1919,8 +1950,8 @@ def start_block(conn: sqlite3.Connection, target: dict[str, Any], *, review: boo
     produced = str(evidence.get("produced") or "")
     if not expected or not produced:
         st.error(
-            f"This target has no stored substitution to build a block from, so there is "
-            f"nothing to play. It was promoted before the evidence was recorded.",
+            "This target has no stored substitution to build a block from, so there is "
+            "nothing to play. It was promoted before the evidence was recorded.",
             icon="🧩",
         )
         return
@@ -1929,8 +1960,11 @@ def start_block(conn: sqlite3.Connection, target: dict[str, Any], *, review: boo
         heard = db.heard_stimuli(conn, str(target["item"]))
     try:
         block = perception_trainer.build_block(
-            item=str(target["item"]), expected=expected, produced=produced,
-            heard=heard, review=review,
+            item=str(target["item"]),
+            expected=expected,
+            produced=produced,
+            heard=heard,
+            review=review,
         )
     except perception_trainer.BlockError as exc:
         st.error(str(exc), icon="🚫")
@@ -1955,7 +1989,11 @@ def start_block(conn: sqlite3.Connection, target: dict[str, Any], *, review: boo
 
 
 def synthesise_clip(
-    conn: sqlite3.Connection, text: str, *, voice: str, slow: bool = False,
+    conn: sqlite3.Connection,
+    text: str,
+    *,
+    voice: str,
+    slow: bool = False,
 ) -> tuple[bytes | None, tuple[str, str] | None]:
     """Buy one clip from Azure, meter it, and put it on disk. Returns (audio, failure).
 
@@ -1979,23 +2017,26 @@ def synthesise_clip(
         result = tts.synthesise(text, voice=voice, slow=slow, on_attempt=note_attempt)
     except utils.ConfigError as exc:
         return None, ("🔑", str(exc))
-    except (utils.PermanentError, utils.TransientError, tts.SynthesisError,
-            speech_analyzer.AssessmentError) as exc:
+    except (
+        utils.PermanentError,
+        utils.TransientError,
+        tts.SynthesisError,
+        speech_analyzer.AssessmentError,
+    ) as exc:
         if speech_analyzer.is_quota_exhausted(exc):
             budget.mark_quota_exhausted()
         if attempts_made:
             # Reached Azure and failed: the text was still sent and may be charged.
-            db.record_tts_usage(
-                conn, characters=payload_characters * attempts_made, voice=voice
-            )
+            db.record_tts_usage(conn, characters=payload_characters * attempts_made, voice=voice)
         logger.error("Synthesis failed on %r in %s", text[:40], voice, exc_info=True)
         return None, ("🔇", utils.redact(str(exc)))
 
     db.record_tts_usage(
-        conn, characters=result.characters * max(result.attempts, 1), voice=result.voice,
+        conn,
+        characters=result.characters * max(result.attempts, 1),
+        voice=result.voice,
     )
-    tts.store_audio(voice, text, result.audio,
-                    rate=tts.SLOW_RATE if slow else tts.NORMAL_RATE)
+    tts.store_audio(voice, text, result.audio, rate=tts.SLOW_RATE if slow else tts.NORMAL_RATE)
     return result.audio, None
 
 
@@ -2043,8 +2084,12 @@ def buy_block_audio(
         progress.progress(done / len(missing), text=f"Preparing {len(missing)} clips…")
 
     progress.empty()
-    logger.info("Block audio: %d clips from cache, %d synthesised (%d characters)",
-                len(audio) - len(missing), len(missing), characters)
+    logger.info(
+        "Block audio: %d clips from cache, %d synthesised (%d characters)",
+        len(audio) - len(missing),
+        len(missing),
+        characters,
+    )
     return audio, None
 
 
@@ -2152,12 +2197,17 @@ def finish_block(conn: sqlite3.Connection) -> None:
     state = st.session_state[BLOCK_KEY]
     block = state["block"]
     result = perception_trainer.score(
-        state["answers"], alternatives=block.alternatives,
-        novel=block.novel_count, planned=len(block.trials),
+        state["answers"],
+        alternatives=block.alternatives,
+        novel=block.novel_count,
+        planned=len(block.trials),
     )
 
-    st.metric("This block", f"{result.accuracy:.0%}",
-              delta=f"{(result.accuracy - result.chance) * 100:+.0f} pts vs guessing")
+    st.metric(
+        "This block",
+        f"{result.accuracy:.0%}",
+        delta=f"{(result.accuracy - result.chance) * 100:+.0f} pts vs guessing",
+    )
     st.caption(
         f"{result.correct} of {result.total} right. "
         f"{perception_trainer.chance_caption(result.alternatives)}"
@@ -2175,26 +2225,25 @@ def finish_block(conn: sqlite3.Connection) -> None:
         f"hearing one."
     )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with _DB_LOCK:
         db.update_target(conn, int(state["target_id"]), last_seen=db.utc_now_iso())
         target = next(
-            (dict(row) for row in db.targets(conn)
-             if int(row["id"]) == int(state["target_id"])), None
+            (dict(row) for row in db.targets(conn) if int(row["id"]) == int(state["target_id"])),
+            None,
         )
         trials = [dict(row) for row in db.trials_for(conn, block.item)]
 
     if target is not None:
-        decision = practice_queue.grade(
-            target, practice_queue.summarise_blocks(trials)
-        )
+        decision = practice_queue.grade(target, practice_queue.summarise_blocks(trials))
         st.info(decision.reason, icon="🎯")
         if decision.state != str(target["state"]) or decision.regressed:
             with _DB_LOCK:
                 db.update_target(
-                    conn, int(target["id"]), state=decision.state,
-                    next_due=practice_queue.next_due(
-                        decision, now=now, kind=str(target["kind"])),
+                    conn,
+                    int(target["id"]),
+                    state=decision.state,
+                    next_due=practice_queue.next_due(decision, now=now, kind=str(target["kind"])),
                     reviews_passed=decision.reviews_passed,
                 )
 
@@ -2253,19 +2302,26 @@ def record_shadow_session(
     promotion, and `practice_queue` keeps `SHADOW` out of `KIND_ORDER` for the same reason.
     """
     session = shadowing.Session(
-        title=title, passage=passage, mode=shadowing.SIMULTANEOUS, slow=False,
+        title=title,
+        passage=passage,
+        mode=shadowing.SIMULTANEOUS,
+        slow=False,
     )
     with _DB_LOCK:
         target_id = db.upsert_target(
-            conn, item=title, kind=practice_queue.SHADOW,
+            conn,
+            item=title,
+            kind=practice_queue.SHADOW,
             evidence=shadowing.evidence_for(session),
         )
         db.update_target(
-            conn, target_id,
+            conn,
+            target_id,
             last_seen=db.utc_now_iso(),
             next_due=practice_queue.next_due(
                 practice_queue.Decision(practice_queue.ACTIVE, ""),
-                now=now, kind=practice_queue.SHADOW,
+                now=now,
+                kind=practice_queue.SHADOW,
             ),
         )
     logger.info("Shadowing session recorded for %r", title)
@@ -2295,9 +2351,7 @@ def buy_shadow_audio(
     missing = [text for text, clip in zip(texts, clips) if clip is None]
 
     if missing:
-        characters = sum(
-            len(tts.payload_for(text, slow=slow, voice=voice)) for text in missing
-        )
+        characters = sum(len(tts.payload_for(text, slow=slow, voice=voice)) for text in missing)
         try:
             budget.preflight_tts(conn, characters * utils.MAX_SYNTHESIS_ATTEMPTS)
         except budget.BudgetError as exc:
@@ -2314,11 +2368,13 @@ def buy_shadow_audio(
                 return None, failure
             clips[index] = clip
             done += 1
-            progress.progress(done / len(missing),
-                              text=f"Preparing {len(missing)} clip(s)…")
+            progress.progress(done / len(missing), text=f"Preparing {len(missing)} clip(s)…")
         progress.empty()
-        logger.info("Shadow audio: %d clip(s) synthesised, %d from the disk cache",
-                    len(missing), len(texts) - len(missing))
+        logger.info(
+            "Shadow audio: %d clip(s) synthesised, %d from the disk cache",
+            len(missing),
+            len(texts) - len(missing),
+        )
     else:
         logger.info("Shadow audio served entirely from the disk cache; nothing charged.")
 
@@ -2331,7 +2387,7 @@ def buy_shadow_audio(
         return None, ("🔇", str(exc))
 
 
-def render_shadow(conn: sqlite3.Connection, job: "AssessJob | None", running: bool) -> None:
+def render_shadow(conn: sqlite3.Connection, job: AssessJob | None, running: bool) -> None:
     """One shadowing session, rendered in place inside Today."""
     state = st.session_state[SHADOW_KEY]
     passage = str(state["passage"])
@@ -2341,9 +2397,12 @@ def render_shadow(conn: sqlite3.Connection, job: "AssessJob | None", running: bo
     st.warning(shadowing.HEADPHONES, icon="🎧")
 
     mode = st.radio(
-        "How", list(shadowing.MODE_LABELS),
+        "How",
+        list(shadowing.MODE_LABELS),
         format_func=lambda value: shadowing.MODE_LABELS[value],
-        horizontal=True, key="shadow-mode", disabled=running,
+        horizontal=True,
+        key="shadow-mode",
+        disabled=running,
     )
     slow = st.checkbox("Slow it down (35% slower)", key="shadow-slow", disabled=running)
     st.caption(shadowing.SLOW_NOTE)
@@ -2358,13 +2417,20 @@ def render_shadow(conn: sqlite3.Connection, job: "AssessJob | None", running: bo
     if cached is None:
         phrase_count = len(shadowing.phrases(passage))
         st.markdown(
-            f"The model is synthesised once and kept on disk, so this is the only time it "
-            f"costs anything."
-            + (f" Echo mode builds it from {phrase_count} phrases." if mode == shadowing.ECHO
-               else "")
+            "The model is synthesised once and kept on disk, so this is the only time it "
+            "costs anything."
+            + (
+                f" Echo mode builds it from {phrase_count} phrases."
+                if mode == shadowing.ECHO
+                else ""
+            )
         )
-        if st.button("🎧 Prepare the model", type="primary", disabled=offline or running,
-                     key="shadow-prepare"):
+        if st.button(
+            "🎧 Prepare the model",
+            type="primary",
+            disabled=offline or running,
+            key="shadow-prepare",
+        ):
             audio, failure = buy_shadow_audio(conn, passage, mode=mode, slow=slow)
             if failure is not None:
                 icon, message = failure
@@ -2375,7 +2441,7 @@ def render_shadow(conn: sqlite3.Connection, job: "AssessJob | None", running: bo
         if offline:
             st.caption(
                 "Disabled under OFFLINE_MODE: the model is a live synthesis by definition and "
-                "there is no fixture to replay for audio, the same rule \"Hear it\" follows."
+                'there is no fixture to replay for audio, the same rule "Hear it" follows.'
             )
     elif mode == shadowing.ECHO:
         st.markdown(shadowing.ECHO_STEPS)
@@ -2406,8 +2472,11 @@ def render_shadow(conn: sqlite3.Connection, job: "AssessJob | None", running: bo
 
 
 def render_shadow_assess(
-    conn: sqlite3.Connection, state: dict[str, Any], recording: Any,
-    job: "AssessJob | None", running: bool,
+    conn: sqlite3.Connection,
+    state: dict[str, Any],
+    recording: Any,
+    job: AssessJob | None,
+    running: bool,
 ) -> None:
     """Send a finished speak-along read down the ordinary Mode B path, tagged.
 
@@ -2418,16 +2487,24 @@ def render_shadow_assess(
     left, middle, _ = st.columns([1, 1, 3])
     with left:
         assess_clicked = st.button(
-            "Assess this read", type="primary", width="stretch",
-            disabled=running or recording is None, key="shadow-assess",
+            "Assess this read",
+            type="primary",
+            width="stretch",
+            disabled=running or recording is None,
+            key="shadow-assess",
         )
     with middle:
-        stop_clicked = st.button("🛑 Stop", width="stretch", key="shadow-stop") if running \
-            else False
+        stop_clicked = (
+            st.button("🛑 Stop", width="stretch", key="shadow-stop") if running else False
+        )
     if recording is not None and not running:
-        st.button("🗑️ Delete recording", key="shadow-delete",
-                  on_click=_bump, args=("shadow-recording",),
-                  help="Discard this take and shadow it again. The model stays prepared.")
+        st.button(
+            "🗑️ Delete recording",
+            key="shadow-delete",
+            on_click=_bump,
+            args=("shadow-recording",),
+            help="Discard this take and shadow it again. The model stays prepared.",
+        )
 
     if stop_clicked and job is not None:
         job.cancel_event.set()
@@ -2449,7 +2526,12 @@ def render_shadow_assess(
                 wav_bytes, seconds = prepare_audio(conn, audio_bytes, Mode.PARAGRAPH)
                 if wav_bytes is not None:
                     start_assessment(
-                        conn, wav_bytes, seconds, passage, Mode.PARAGRAPH, key,
+                        conn,
+                        wav_bytes,
+                        seconds,
+                        passage,
+                        Mode.PARAGRAPH,
+                        key,
                         tags=(shadowing.SHADOW_TAG,),
                     )
                     st.rerun()
@@ -2469,8 +2551,10 @@ def render_shadow_assess(
             # never due again.
             if finished.attempt_id and state.get("scheduled") != finished.attempt_id:
                 record_shadow_session(
-                    conn, str(state["title"]), str(state["passage"]),
-                    now=datetime.now(timezone.utc),
+                    conn,
+                    str(state["title"]),
+                    str(state["passage"]),
+                    now=datetime.now(UTC),
                 )
                 state["scheduled"] = finished.attempt_id
             st.divider()
@@ -2498,8 +2582,11 @@ def render_shadow_comparison(conn: sqlite3.Connection, rows: Any) -> None:
         st.caption(
             "Shadowed but never read cold, so there is nothing to compare: "
             + ", ".join(f"*{name}*" for name in orphans)
-            + (". Read it on the Practice tab without the model." if len(orphans) == 1
-               else ". Read one of them on the Practice tab without the model.")
+            + (
+                ". Read it on the Practice tab without the model."
+                if len(orphans) == 1
+                else ". Read one of them on the Practice tab without the model."
+            )
         )
 
     if frame.empty:
@@ -2516,7 +2603,7 @@ def render_shadow_comparison(conn: sqlite3.Connection, rows: Any) -> None:
     st.altair_chart(progress_view.shadow_gap_chart(frame), width="stretch")
 
 
-def render_practice(conn: sqlite3.Connection, job: "AssessJob | None", running: bool) -> None:
+def render_practice(conn: sqlite3.Connection, job: AssessJob | None, running: bool) -> None:
     """The Practice tab: record or upload, assess, and read the result.
 
     Unchanged in substance from when this was the whole page — it moved into a tab so the
@@ -2537,19 +2624,25 @@ def render_practice(conn: sqlite3.Connection, job: "AssessJob | None", running: 
 
     presets = PRESETS[mode]
     st.selectbox(
-        "Practice text", ["Write my own", *presets], key=PRESET_KEY,
-        on_change=_apply_preset, args=(mode,),
+        "Practice text",
+        ["Write my own", *presets],
+        key=PRESET_KEY,
+        on_change=_apply_preset,
+        args=(mode,),
     )
     reference_text = st.text_area("Reference text", key=TEXT_KEY, height=140)
 
     audio = st.audio_input("Record", key=f"recording-{_generation('recording')}")
     if audio is not None:
         st.button(
-            "🗑️ Delete recording", on_click=_delete_recording, disabled=running,
+            "🗑️ Delete recording",
+            on_click=_delete_recording,
+            disabled=running,
             help="Discard this take and record again. Your reference text is kept.",
         )
     uploaded = st.file_uploader(
-        "…or upload a file", type=list(audio_utils.SUPPORTED_UPLOAD_TYPES),
+        "…or upload a file",
+        type=list(audio_utils.SUPPORTED_UPLOAD_TYPES),
         key=f"upload-{_generation('upload')}",
     )
     source = audio or uploaded
@@ -2559,13 +2652,13 @@ def render_practice(conn: sqlite3.Connection, job: "AssessJob | None", running: 
     left, middle, right = st.columns([1, 1, 3])
     with left:
         assess_clicked = st.button(
-            "Assess", type="primary", disabled=running or source is None,
+            "Assess",
+            type="primary",
+            disabled=running or source is None,
             width="stretch",
         )
     with middle:
-        stop_clicked = (
-            st.button("🛑 Stop", width="stretch") if running else False
-        )
+        stop_clicked = st.button("🛑 Stop", width="stretch") if running else False
     with right:
         st.button("↺ Reset", on_click=_reset_form, disabled=running)
 
@@ -2575,7 +2668,9 @@ def render_practice(conn: sqlite3.Connection, job: "AssessJob | None", running: 
     # Guarded on state, not on the button's `disabled` flag: a click is handled in the same
     # rerun that drew the button, so the on-screen button is still enabled until the next
     # one. Without this a fast double-click starts two assessments.
-    if assess_clicked and not running and source is not None:
+    if assess_clicked and not running and source is not None:  # noqa: SIM102
+        # Kept nested deliberately: the guard above is about session state, this one is
+        # about the input, and `validate_reference` renders the error as a side effect.
         if validate_reference(reference_text):
             audio_bytes = source.getvalue()
             key = utils.attempt_hash(reference_text, audio_bytes, mode)
@@ -2589,9 +2684,7 @@ def render_practice(conn: sqlite3.Connection, job: "AssessJob | None", running: 
             else:
                 wav_bytes, seconds = prepare_audio(conn, audio_bytes, mode)
                 if wav_bytes is not None:
-                    start_assessment(
-                        conn, wav_bytes, seconds, reference_text, mode, key
-                    )
+                    start_assessment(conn, wav_bytes, seconds, reference_text, mode, key)
                     st.rerun()
 
     if running:
@@ -2627,13 +2720,17 @@ def render_history(conn: sqlite3.Connection) -> None:
             st.dataframe(
                 [
                     {
-                        "When": r["created_at"], "Mode": r["mode"],
-                        "Pron": r["pron_score"], "Accuracy": r["accuracy"],
-                        "Prosody": r["prosody"], "Offline": bool(r["offline"]),
+                        "When": r["created_at"],
+                        "Mode": r["mode"],
+                        "Pron": r["pron_score"],
+                        "Accuracy": r["accuracy"],
+                        "Prosody": r["prosody"],
+                        "Offline": bool(r["offline"]),
                     }
                     for r in recent
                 ],
-                hide_index=True, width="stretch",
+                hide_index=True,
+                width="stretch",
             )
 
 

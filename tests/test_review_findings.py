@@ -8,8 +8,6 @@ mislead or overspend — and keeping them together makes that legible.
 
 from __future__ import annotations
 
-import threading
-
 import pytest
 
 import ai_coach
@@ -23,7 +21,9 @@ REFERENCE = "Thursday brought thunder and thick clouds."
 
 def phoneme(symbol: str, score: float, *nbest: tuple[str, float]) -> dict:
     return {
-        "phoneme": symbol, "score": score, "is_mispronounced": score < 60,
+        "phoneme": symbol,
+        "score": score,
+        "is_mispronounced": score < 60,
         "nbest": [{"phoneme": p, "score": s} for p, s in nbest],
     }
 
@@ -34,12 +34,17 @@ def attempt() -> sa.Assessment:
         raw=[],
         overall_scores={"pron_score": 62.0, "accuracy": 70.0},
         recognised_text="sursday brought thunder and thick clouds",
-        words=[{
-            "word": "thursday", "accuracy": 34.0, "error_type": "Mispronunciation",
-            "error_source": "azure", "delivery_error_types": [],
-            "syllables": [{"syllable": "θɝz", "score": 26.0}],
-            "phonemes": [phoneme("θ", 41.0, ("s", 100.0))],
-        }],
+        words=[
+            {
+                "word": "thursday",
+                "accuracy": 34.0,
+                "error_type": "Mispronunciation",
+                "error_source": "azure",
+                "delivery_error_types": [],
+                "syllables": [{"syllable": "θɝz", "score": 26.0}],
+                "phonemes": [phoneme("θ", 41.0, ("s", 100.0))],
+            }
+        ],
     )
 
 
@@ -48,9 +53,11 @@ def attempt() -> sa.Assessment:
 
 def test_a_broken_compaction_still_produces_a_report(attempt, monkeypatch) -> None:
     """The guarantee has to hold on the free path too, not only Gemini's."""
-    monkeypatch.setattr(fc, "compact", lambda *a, **k: (_ for _ in ()).throw(
-        RuntimeError("a bug in the compaction pipeline")
-    ))
+    monkeypatch.setattr(
+        fc,
+        "compact",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("a bug in the compaction pipeline")),
+    )
 
     result = ai_coach.coach(attempt, REFERENCE, Mode.DRILL)
 
@@ -60,9 +67,11 @@ def test_a_broken_compaction_still_produces_a_report(attempt, monkeypatch) -> No
 
 
 def test_a_broken_offline_build_still_produces_a_report(attempt, monkeypatch) -> None:
-    monkeypatch.setattr(fc, "build_from_compacted", lambda *a, **k: (_ for _ in ()).throw(
-        KeyError("observed_pairs")
-    ))
+    monkeypatch.setattr(
+        fc,
+        "build_from_compacted",
+        lambda *a, **k: (_ for _ in ()).throw(KeyError("observed_pairs")),
+    )
 
     result = ai_coach.coach(attempt, REFERENCE, Mode.DRILL)
 
@@ -91,13 +100,19 @@ def test_a_merged_substitution_takes_the_final_clusters_position() -> None:
     swallowed-final-cluster note never fires for a word that ends in a consonant cluster.
     """
     word = {
-        "word": "asked", "accuracy": 30.0, "error_type": "Mispronunciation",
-        "error_source": "azure", "delivery_error_types": [], "syllables": [],
+        "word": "asked",
+        "accuracy": 30.0,
+        "error_type": "Mispronunciation",
+        "error_source": "azure",
+        "delivery_error_types": [],
+        "syllables": [],
         # /k/ and /t/ both come back as /d/; the /k/ scores worse and is kept, but the
         # cluster is only final at the /t/.
         "phonemes": [
-            phoneme("æ", 95.0), phoneme("s", 90.0),
-            phoneme("k", 20.0, ("d", 100.0)), phoneme("t", 40.0, ("d", 100.0)),
+            phoneme("æ", 95.0),
+            phoneme("s", 90.0),
+            phoneme("k", 20.0, ("d", 100.0)),
+            phoneme("t", 40.0, ("d", 100.0)),
         ],
     }
 
@@ -134,12 +149,16 @@ def test_builtin_transport_failures_are_still_transient() -> None:
 def _report(**overrides):
     body = {
         "overall_comment": "The /θ/ came out as /s/.",
-        "priority_fixes": [{
-            "expected_phoneme": "θ", "produced_phoneme": "s", "affected_words": ["thursday"],
-            "why_it_matters": "A listener hears a different word.",
-            "articulation": "Tongue tip between the teeth.",
-            "minimal_pairs": [{"a": "thin", "b": "sin"}],
-        }],
+        "priority_fixes": [
+            {
+                "expected_phoneme": "θ",
+                "produced_phoneme": "s",
+                "affected_words": ["thursday"],
+                "why_it_matters": "A listener hears a different word.",
+                "articulation": "Tongue tip between the teeth.",
+                "minimal_pairs": [{"a": "thin", "b": "sin"}],
+            }
+        ],
         "delivery_drills": [],
         "stress_and_rhythm": {"issues": [], "drill": "Read it twice."},
         "practice_plan": "Five minutes on thursday.",
@@ -159,9 +178,12 @@ def test_a_fabricated_phoneme_in_the_prose_rejects_the_report() -> None:
 
 
 def test_a_fabricated_phoneme_in_a_stress_issue_rejects_the_report() -> None:
-    report = _report(stress_and_rhythm={
-        "issues": ["Your /ŋ/ endings are dropped."], "drill": "Read it twice.",
-    })
+    report = _report(
+        stress_and_rhythm={
+            "issues": ["Your /ŋ/ endings are dropped."],
+            "drill": "Read it twice.",
+        }
+    )
 
     assert ai_coach.validated(report, COMPACTED) is None
 
@@ -211,9 +233,7 @@ def test_a_stored_flat_report_is_recoverable_under_the_gemini_source() -> None:
 
 def test_a_stored_response_envelope_is_still_recoverable() -> None:
     """The normal shape must keep working."""
-    envelope = {
-        "candidates": [{"content": {"parts": [{"text": _report().model_dump_json()}]}}]
-    }
+    envelope = {"candidates": [{"content": {"parts": [{"text": _report().model_dump_json()}]}}]}
 
     recovered = ai_coach.report_from_raw(envelope, fc.SOURCE_GEMINI)
 
@@ -230,8 +250,12 @@ def test_an_unreadable_row_returns_none_rather_than_raising() -> None:
 
 def _fix(symbol: str) -> fc.PriorityFix:
     return fc.PriorityFix(
-        expected_phoneme=symbol, produced_phoneme="s", affected_words=["thursday"],
-        why_it_matters="", articulation="", minimal_pairs=[],
+        expected_phoneme=symbol,
+        produced_phoneme="s",
+        affected_words=["thursday"],
+        why_it_matters="",
+        articulation="",
+        minimal_pairs=[],
     )
 
 

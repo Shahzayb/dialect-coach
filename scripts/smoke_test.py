@@ -47,8 +47,10 @@ def test_azure_stt(key: str, region: str, audio_path: str) -> bool:
         print(f"[azure] raw json:\n{result.json}")
         return True
     if result.reason == speechsdk.ResultReason.NoMatch:
-        print(f"[azure] connected fine, but no speech recognized in {audio_path} — "
-              f"key/region are valid, audio just didn't transcribe")
+        print(
+            f"[azure] connected fine, but no speech recognized in {audio_path} — "
+            f"key/region are valid, audio just didn't transcribe"
+        )
         return True
     if result.reason == speechsdk.ResultReason.Canceled:
         details = result.cancellation_details
@@ -87,7 +89,9 @@ def main() -> int:
     azure_ok = test_azure_stt(env["AZURE_SPEECH_KEY"], env["AZURE_SPEECH_REGION"], audio_path)
     gemini_ok = test_gemini(env["GEMINI_API_KEY"], model)
 
-    print(f"[smoke] azure={'PASS' if azure_ok else 'FAIL'} gemini={'PASS' if gemini_ok else 'FAIL'}")
+    print(
+        f"[smoke] azure={'PASS' if azure_ok else 'FAIL'} gemini={'PASS' if gemini_ok else 'FAIL'}"
+    )
     return 0 if (azure_ok and gemini_ok) else 1
 
 

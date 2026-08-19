@@ -22,7 +22,9 @@ REFERENCE = "Thursday brought thunder and thick clouds."
 
 def phoneme(symbol: str, score: float, *nbest: tuple[str, float]) -> dict:
     return {
-        "phoneme": symbol, "score": score, "is_mispronounced": score < 60,
+        "phoneme": symbol,
+        "score": score,
+        "is_mispronounced": score < 60,
         "nbest": [{"phoneme": p, "score": s} for p, s in nbest],
     }
 
@@ -34,12 +36,20 @@ def attempt() -> sa.Assessment:
         raw=[],
         overall_scores={"pron_score": 62.0, "accuracy": 70.0},
         recognised_text="sursday brought thunder and thick clouds",
-        words=[{
-            "word": "thursday", "accuracy": 34.0, "error_type": "Mispronunciation",
-            "error_source": "azure", "delivery_error_types": [],
-            "syllables": [{"syllable": "θɝz", "score": 26.0}, {"syllable": "deɪ", "score": 79.0}],
-            "phonemes": [phoneme("θ", 41.0, ("s", 100.0)), phoneme("eɪ", 90.0)],
-        }],
+        words=[
+            {
+                "word": "thursday",
+                "accuracy": 34.0,
+                "error_type": "Mispronunciation",
+                "error_source": "azure",
+                "delivery_error_types": [],
+                "syllables": [
+                    {"syllable": "θɝz", "score": 26.0},
+                    {"syllable": "deɪ", "score": 79.0},
+                ],
+                "phonemes": [phoneme("θ", 41.0, ("s", 100.0)), phoneme("eɪ", 90.0)],
+            }
+        ],
     )
 
 
@@ -47,15 +57,21 @@ def answer(**overrides) -> str:
     """A well-formed model answer, matching the schema."""
     body = {
         "overall_comment": "The /θ/ in thursday came out as /s/. Everything else held.",
-        "priority_fixes": [{
-            "expected_phoneme": "θ", "produced_phoneme": "s",
-            "affected_words": ["thursday"],
-            "why_it_matters": "Listeners hear an s-word instead.",
-            "articulation": "Tongue tip to the top teeth, blow air past it.",
-            "minimal_pairs": [{"a": "think", "b": "sink"}],
-        }],
+        "priority_fixes": [
+            {
+                "expected_phoneme": "θ",
+                "produced_phoneme": "s",
+                "affected_words": ["thursday"],
+                "why_it_matters": "Listeners hear an s-word instead.",
+                "articulation": "Tongue tip to the top teeth, blow air past it.",
+                "minimal_pairs": [{"a": "think", "b": "sink"}],
+            }
+        ],
         "delivery_drills": [],
-        "stress_and_rhythm": {"issues": ["The first syllable is weak."], "drill": "Clap the stress."},
+        "stress_and_rhythm": {
+            "issues": ["The first syllable is weak."],
+            "drill": "Clap the stress.",
+        },
         "practice_plan": "One minute on think/sink, then read the line again.",
     }
     body.update(overrides)
@@ -69,9 +85,13 @@ class FakeResponse:
         self.prompt_feedback = None
 
     def model_dump(self, **kwargs):
-        assert kwargs.get("exclude") == {"sdk_http_response"}, "transport headers must not be stored"
-        return {"candidates": [{"content": {"parts": [{"text": self.text}]}}],
-                "usage_metadata": {"total_token_count": 900}}
+        assert kwargs.get("exclude") == {"sdk_http_response"}, (
+            "transport headers must not be stored"
+        )
+        return {
+            "candidates": [{"content": {"parts": [{"text": self.text}]}}],
+            "usage_metadata": {"total_token_count": 900},
+        }
 
 
 class FakeClient:
@@ -114,7 +134,8 @@ def no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the retry policy, drop the waiting."""
     real = utils.retry_transient
     monkeypatch.setattr(
-        utils, "retry_transient",
+        utils,
+        "retry_transient",
         lambda fn, **kwargs: real(fn, sleep=lambda _delay: None, **kwargs),
     )
 
@@ -131,33 +152,46 @@ def flat_attempt() -> sa.Assessment:
         recognised_text="sursday brought thunder and thick clouds",
         words=[
             {
-                "word": "thursday", "accuracy": 34.0, "error_type": "Mispronunciation",
-                "error_source": "azure", "delivery_error_types": [],
+                "word": "thursday",
+                "accuracy": 34.0,
+                "error_type": "Mispronunciation",
+                "error_source": "azure",
+                "delivery_error_types": [],
                 "prosody_detail": {"break_length_ms": None, "monotone_confidence": 0.2},
-                "syllables": [], "phonemes": [phoneme("θ", 41.0, ("s", 100.0))],
+                "syllables": [],
+                "phonemes": [phoneme("θ", 41.0, ("s", 100.0))],
             },
             {
-                "word": "clouds", "accuracy": 96.0, "error_type": "None",
-                "error_source": "azure", "delivery_error_types": ["Monotone"],
+                "word": "clouds",
+                "accuracy": 96.0,
+                "error_type": "None",
+                "error_source": "azure",
+                "delivery_error_types": ["Monotone"],
                 "prosody_detail": {"break_length_ms": None, "monotone_confidence": 0.88},
-                "syllables": [], "phonemes": [],
+                "syllables": [],
+                "phonemes": [],
             },
         ],
     )
 
 
-DELIVERY_ANSWER = [{
-    "fault": "Monotone", "span": ["clouds"],
-    "what_happened": "The pitch did not move across clouds.",
-    "drill": "Say clouds three times, lifting the pitch on the vowel each time.",
-}]
+DELIVERY_ANSWER = [
+    {
+        "fault": "Monotone",
+        "span": ["clouds"],
+        "what_happened": "The pitch did not move across clouds.",
+        "drill": "Say clouds three times, lifting the pitch on the vowel each time.",
+    }
+]
 
 
 # --- The happy path -----------------------------------------------------------------------------
 
 
 def test_a_valid_answer_is_used_and_marked_as_the_models(attempt) -> None:
-    result = ai_coach.coach(attempt, REFERENCE, Mode.DRILL, client=FakeClient(FakeResponse(answer())))
+    result = ai_coach.coach(
+        attempt, REFERENCE, Mode.DRILL, client=FakeClient(FakeResponse(answer()))
+    )
     assert result.source == fc.SOURCE_GEMINI
     assert result.report.priority_fixes[0].expected_phoneme == "θ"
     assert result.report.priority_fixes[0].minimal_pairs[0].a == "think"
@@ -165,7 +199,9 @@ def test_a_valid_answer_is_used_and_marked_as_the_models(attempt) -> None:
 
 def test_the_stored_payload_is_the_whole_response_minus_the_transport(attempt) -> None:
     """Verbatim storage is what makes a later change of mind a re-parse, not a re-spend."""
-    result = ai_coach.coach(attempt, REFERENCE, Mode.DRILL, client=FakeClient(FakeResponse(answer())))
+    result = ai_coach.coach(
+        attempt, REFERENCE, Mode.DRILL, client=FakeClient(FakeResponse(answer()))
+    )
     assert "usage_metadata" in result.raw
     assert "sdk_http_response" not in result.raw
 
@@ -220,30 +256,47 @@ def test_the_payload_carries_the_evidence_and_our_own_notes(attempt) -> None:
     assert "Tongue tip lightly between the teeth" in prompt, "the reference articulation"
 
 
-# --- Not trusting the answer -----------------------------------------------------------------------
+# --- Not trusting the answer ----------------------------------------------------------------------
 
 
 def test_a_phoneme_azure_never_reported_is_dropped(attempt) -> None:
     """The one fact the learner cannot check for themselves is the one to police."""
-    invented = json.loads(answer())["priority_fixes"] + [{
-        "expected_phoneme": "ð", "produced_phoneme": "z", "affected_words": ["the"],
-        "why_it_matters": "made up", "articulation": "made up", "minimal_pairs": [],
-    }]
+    invented = json.loads(answer())["priority_fixes"] + [
+        {
+            "expected_phoneme": "ð",
+            "produced_phoneme": "z",
+            "affected_words": ["the"],
+            "why_it_matters": "made up",
+            "articulation": "made up",
+            "minimal_pairs": [],
+        }
+    ]
     result = ai_coach.coach(
-        attempt, REFERENCE, Mode.DRILL,
+        attempt,
+        REFERENCE,
+        Mode.DRILL,
         client=FakeClient(FakeResponse(answer(priority_fixes=invented))),
     )
-    assert [(f.expected_phoneme, f.produced_phoneme) for f in result.report.priority_fixes] \
-        == [("θ", "s")]
+    assert [(f.expected_phoneme, f.produced_phoneme) for f in result.report.priority_fixes] == [
+        ("θ", "s")
+    ]
 
 
 def test_an_answer_that_is_entirely_invented_falls_back(attempt) -> None:
-    invented = [{
-        "expected_phoneme": "ð", "produced_phoneme": "z", "affected_words": ["the"],
-        "why_it_matters": "made up", "articulation": "made up", "minimal_pairs": [],
-    }]
+    invented = [
+        {
+            "expected_phoneme": "ð",
+            "produced_phoneme": "z",
+            "affected_words": ["the"],
+            "why_it_matters": "made up",
+            "articulation": "made up",
+            "minimal_pairs": [],
+        }
+    ]
     result = ai_coach.coach(
-        attempt, REFERENCE, Mode.DRILL,
+        attempt,
+        REFERENCE,
+        Mode.DRILL,
         client=FakeClient(FakeResponse(answer(priority_fixes=invented))),
     )
     assert result.source == fc.SOURCE_FALLBACK
@@ -255,21 +308,29 @@ def test_slashes_and_textbook_spellings_are_normalised_not_rejected(attempt) -> 
     fixes[0]["expected_phoneme"] = "/θ/"
     fixes[0]["produced_phoneme"] = "[s]"
     result = ai_coach.coach(
-        attempt, REFERENCE, Mode.DRILL, client=FakeClient(FakeResponse(answer(priority_fixes=fixes)))
+        attempt,
+        REFERENCE,
+        Mode.DRILL,
+        client=FakeClient(FakeResponse(answer(priority_fixes=fixes))),
     )
-    assert (result.report.priority_fixes[0].expected_phoneme,
-            result.report.priority_fixes[0].produced_phoneme) == ("θ", "s")
+    assert (
+        result.report.priority_fixes[0].expected_phoneme,
+        result.report.priority_fixes[0].produced_phoneme,
+    ) == ("θ", "s")
 
 
 def test_more_than_three_fixes_are_truncated(attempt) -> None:
     fixes = json.loads(answer())["priority_fixes"] * 5
     result = ai_coach.coach(
-        attempt, REFERENCE, Mode.DRILL, client=FakeClient(FakeResponse(answer(priority_fixes=fixes)))
+        attempt,
+        REFERENCE,
+        Mode.DRILL,
+        client=FakeClient(FakeResponse(answer(priority_fixes=fixes))),
     )
     assert len(result.report.priority_fixes) == fc.MAX_PRIORITY_FIXES
 
 
-# --- Every way it can fail ---------------------------------------------------------------------------
+# --- Every way it can fail ------------------------------------------------------------------------
 
 
 def test_a_429_falls_back_without_retrying(attempt, no_backoff) -> None:
@@ -328,14 +389,16 @@ def test_the_fallback_report_is_the_one_the_offline_coach_would_have_written(att
     assert result.raw == result.report.model_dump()
 
 
-# --- Offline and unconfigured -----------------------------------------------------------------------
+# --- Offline and unconfigured ---------------------------------------------------------------------
 
 
 def test_offline_never_builds_a_client(attempt, monkeypatch: pytest.MonkeyPatch) -> None:
     """OFFLINE_MODE means no network call, ever — not "no network call from the UI"."""
     monkeypatch.setenv("OFFLINE_MODE", "true")
     monkeypatch.setattr(ai_coach, "_client", lambda: pytest.fail("built a client offline"))
-    result = ai_coach.coach(attempt, REFERENCE, Mode.DRILL, client=FakeClient(FakeResponse(answer())))
+    result = ai_coach.coach(
+        attempt, REFERENCE, Mode.DRILL, client=FakeClient(FakeResponse(answer()))
+    )
     assert result.source == fc.SOURCE_FALLBACK
 
 
@@ -358,11 +421,13 @@ def test_a_missing_key_falls_back_rather_than_raising(attempt, monkeypatch) -> N
     assert ai_coach.coach(attempt, REFERENCE, Mode.DRILL).source == fc.SOURCE_FALLBACK
 
 
-# --- Re-reading what was stored -----------------------------------------------------------------------
+# --- Re-reading what was stored -------------------------------------------------------------------
 
 
 def test_a_stored_model_response_can_be_re_read(attempt) -> None:
-    result = ai_coach.coach(attempt, REFERENCE, Mode.DRILL, client=FakeClient(FakeResponse(answer())))
+    result = ai_coach.coach(
+        attempt, REFERENCE, Mode.DRILL, client=FakeClient(FakeResponse(answer()))
+    )
     reparsed = ai_coach.report_from_raw(result.raw, result.source)
     assert reparsed is not None
     assert reparsed.priority_fixes[0].expected_phoneme == "θ"
@@ -395,11 +460,15 @@ def test_a_drill_the_azure_data_supports_is_kept(flat_attempt) -> None:
 
 def test_a_drill_for_a_fault_azure_never_reported_is_dropped(flat_attempt) -> None:
     """The delivery half of the rule that stops the model coaching another recording."""
-    invented = DELIVERY_ANSWER + [{
-        "fault": "UnexpectedBreak", "span": ["thursday"],
-        "what_happened": "You paused after thursday.",
-        "drill": "Read it straight through.",
-    }]
+    invented = [
+        *DELIVERY_ANSWER,
+        {
+            "fault": "UnexpectedBreak",
+            "span": ["thursday"],
+            "what_happened": "You paused after thursday.",
+            "drill": "Read it straight through.",
+        },
+    ]
     response = FakeResponse(answer(delivery_drills=invented))
     result = ai_coach.coach(flat_attempt, REFERENCE, Mode.DRILL, client=FakeClient(response))
 
@@ -419,8 +488,7 @@ def test_a_fault_the_model_ignored_is_backfilled_from_the_templates(flat_attempt
 
 
 def test_an_empty_drill_is_backfilled_rather_than_rendered_blank(flat_attempt) -> None:
-    hollow = [{"fault": "Monotone", "span": ["clouds"],
-               "what_happened": "Flat.", "drill": "   "}]
+    hollow = [{"fault": "Monotone", "span": ["clouds"], "what_happened": "Flat.", "drill": "   "}]
     response = FakeResponse(answer(delivery_drills=hollow))
     result = ai_coach.coach(flat_attempt, REFERENCE, Mode.DRILL, client=FakeClient(response))
 
@@ -430,9 +498,14 @@ def test_an_empty_drill_is_backfilled_rather_than_rendered_blank(flat_attempt) -
 
 def test_the_span_is_rewritten_from_the_payload_not_taken_from_the_answer(flat_attempt) -> None:
     """The coaching section and the delivery panel must never name different words."""
-    wrong = [{"fault": "Monotone", "span": ["thunder", "wednesday"],
-              "what_happened": "Flat across the line.",
-              "drill": "Say it three times with the pitch moving."}]
+    wrong = [
+        {
+            "fault": "Monotone",
+            "span": ["thunder", "wednesday"],
+            "what_happened": "Flat across the line.",
+            "drill": "Say it three times with the pitch moving.",
+        }
+    ]
     response = FakeResponse(answer(delivery_drills=wrong))
     result = ai_coach.coach(flat_attempt, REFERENCE, Mode.DRILL, client=FakeClient(response))
 
@@ -442,9 +515,14 @@ def test_the_span_is_rewritten_from_the_payload_not_taken_from_the_answer(flat_a
 def test_a_fabricated_phoneme_inside_a_drill_rejects_the_report(flat_attempt) -> None:
     """Prose is prose wherever it lands: a made-up sound in a drill reads exactly the same
     to the learner as one in the practice plan."""
-    fabricated = [{"fault": "Monotone", "span": ["clouds"],
-                   "what_happened": "Flat across clouds.",
-                   "drill": "Hold the /ŋ/ at the end of each one."}]
+    fabricated = [
+        {
+            "fault": "Monotone",
+            "span": ["clouds"],
+            "what_happened": "Flat across clouds.",
+            "drill": "Hold the /ŋ/ at the end of each one.",
+        }
+    ]
     response = FakeResponse(answer(delivery_drills=fabricated))
     result = ai_coach.coach(flat_attempt, REFERENCE, Mode.DRILL, client=FakeClient(response))
 

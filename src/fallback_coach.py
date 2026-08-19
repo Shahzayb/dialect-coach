@@ -142,9 +142,7 @@ class CoachingReport(BaseModel):
         description="Two or three sentences on this attempt. No praise padding."
     )
     priority_fixes: list[PriorityFix] = Field(
-        description=(
-            f"At most {MAX_PRIORITY_FIXES}, ranked by how much they cost intelligibility."
-        )
+        description=(f"At most {MAX_PRIORITY_FIXES}, ranked by how much they cost intelligibility.")
     )
     delivery_drills: list[DeliveryDrill] = Field(
         description=(
@@ -192,17 +190,11 @@ def _substitutions(word: dict[str, Any]) -> list[dict[str, Any]]:
             # Cluster simplification, not substitution: the last consonant of a word that
             # ends in two of them is the one that gets swallowed.
             "final_cluster": (
-                index == len(pairs) - 1
-                and _is_consonant(expected)
-                and _is_consonant(previous)
+                index == len(pairs) - 1 and _is_consonant(expected) and _is_consonant(previous)
             ),
             "_index": index,
         }
-        smeared = (
-            found
-            and found[-1]["produced"] == produced
-            and found[-1]["_index"] == index - 1
-        )
+        smeared = found and found[-1]["produced"] == produced and found[-1]["_index"] == index - 1
         if smeared:
             if entry["score"] < found[-1]["score"]:
                 found[-1] = entry
@@ -255,7 +247,9 @@ def compact(assessment: Any, mode: Mode) -> dict[str, Any]:
         words.append(
             {
                 "word": str(word.get("word") or ""),
-                "accuracy": round(float(accuracy), 1) if isinstance(accuracy, (int, float)) else None,
+                "accuracy": round(float(accuracy), 1)
+                if isinstance(accuracy, (int, float))
+                else None,
                 "error_type": word.get("error_type") or "None",
                 "error_source": word.get("error_source") or "azure",
                 "substitutions": substitutions,
@@ -331,8 +325,13 @@ def _groups(compacted: dict[str, Any]) -> list[dict[str, Any]]:
             key = (substitution["expected"], substitution["produced"])
             group = groups.setdefault(
                 key,
-                {"expected": key[0], "produced": key[1], "words": [], "scores": [],
-                 "final_cluster": True},
+                {
+                    "expected": key[0],
+                    "produced": key[1],
+                    "words": [],
+                    "scores": [],
+                    "final_cluster": True,
+                },
             )
             if word["word"] and word["word"] not in group["words"]:
                 group["words"].append(word["word"])
@@ -367,8 +366,11 @@ def _fix(group: dict[str, Any]) -> PriorityFix:
 
 
 _SCORE_LABELS = (
-    ("pronunciation", "pron_score"), ("accuracy", "accuracy"), ("fluency", "fluency"),
-    ("completeness", "completeness"), ("prosody", "prosody"),
+    ("pronunciation", "pron_score"),
+    ("accuracy", "accuracy"),
+    ("fluency", "fluency"),
+    ("completeness", "completeness"),
+    ("prosody", "prosody"),
 )
 
 
@@ -376,7 +378,8 @@ def _overall_comment(compacted: dict[str, Any], groups: list[dict[str, Any]]) ->
     """Two or three sentences of fact. No praise padding, and nothing not in the data."""
     scores = compacted["overall_scores"] or {}
     stated = [
-        f"{label} {scores[key]:.0f}" for label, key in _SCORE_LABELS
+        f"{label} {scores[key]:.0f}"
+        for label, key in _SCORE_LABELS
         if isinstance(scores.get(key), (int, float))
     ]
     sentences = []
@@ -484,8 +487,7 @@ def delivery_drills(compacted: dict[str, Any]) -> list[DeliveryDrill]:
                 fault=fault["fault"],
                 span=span,
                 what_happened=(
-                    f"{sentence}, across {phrase}.{_stretches(fault)}"
-                    f"{measurement_note(fault)}"
+                    f"{sentence}, across {phrase}.{_stretches(fault)}{measurement_note(fault)}"
                 ),
                 drill=template.format(phrase=phrase),
             )
@@ -511,7 +513,7 @@ def _stress_and_rhythm(compacted: dict[str, Any]) -> StressAndRhythm:
         weakest = min(syllables, key=lambda syllable: syllable["score"])
         if weakest["score"] < SYLLABLE_RED:
             issues.append(
-                f"In \"{word['word']}\" the syllable /{weakest['syllable']}/ scored "
+                f'In "{word["word"]}" the syllable /{weakest["syllable"]}/ scored '
                 f"{weakest['score']:.0f}, well below the rest of the word — the stress is "
                 f"landing somewhere else."
             )
@@ -623,7 +625,9 @@ def build_from_compacted(compacted: dict[str, Any]) -> CoachingReport:
     fixes = [_fix(group) for group in groups[:MAX_PRIORITY_FIXES]]
     logger.info(
         "Offline coach: %d flagged words, %d distinct substitutions, %d fixes reported",
-        len(compacted["flagged_words"]), len(groups), len(fixes),
+        len(compacted["flagged_words"]),
+        len(groups),
+        len(fixes),
     )
     return CoachingReport(
         overall_comment=_overall_comment(compacted, groups),

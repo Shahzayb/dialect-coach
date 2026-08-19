@@ -22,9 +22,10 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import utils
 from utils import Mode, PermanentError, TransientError
@@ -160,7 +161,9 @@ def _pron_config(reference_text: str, mode: Mode):
 DEFAULT_BAD_REQUEST_HINT = "Check the reference text and the audio format."
 
 
-def classify_cancellation(details, *, bad_request_hint: str = DEFAULT_BAD_REQUEST_HINT) -> Exception:
+def classify_cancellation(
+    details, *, bad_request_hint: str = DEFAULT_BAD_REQUEST_HINT
+) -> Exception:
     """Turn an Azure cancellation into a retryable or a terminal error, with a real message.
 
     Retrying a 401 only burns time; retrying a 403 quota response can consume more
@@ -282,7 +285,7 @@ def _assess_continuous(
         if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
             try:
                 payloads.append(_raw_json(evt.result))
-            except Exception as exc:  # a malformed utterance must not kill the session
+            except Exception as exc:  # noqa: BLE001 — a malformed utterance must not kill the session
                 logger.warning("Skipped an unparseable utterance: %s", utils.redact(str(exc)))
 
     def on_canceled(evt) -> None:
@@ -305,9 +308,7 @@ def _assess_continuous(
             if cancel_event is not None and cancel_event.is_set():
                 # Audio has already been streamed to Azure by this point, so the caller is
                 # told the attempt reached it — even though nothing is recorded or metered.
-                raise Cancelled(
-                    "Assessment stopped before Azure finished.", reached_azure=True
-                )
+                raise Cancelled("Assessment stopped before Azure finished.", reached_azure=True)
             if time.monotonic() >= deadline:
                 raise AssessmentError(
                     "Azure did not finish assessing that recording in time. Try a shorter one."
@@ -452,7 +453,7 @@ def _delivery_error_types(word: dict[str, Any]) -> list[str]:
     if top_level and top_level not in {"None", "Mispronunciation", "Omission", "Insertion"}:
         found.append(top_level)
 
-    prosody = ((scores.get("Feedback") or word.get("Feedback") or {}).get("Prosody") or {})
+    prosody = (scores.get("Feedback") or word.get("Feedback") or {}).get("Prosody") or {}
     for section in ("Break", "Intonation"):
         for error_type in (prosody.get(section) or {}).get("ErrorTypes", []) or []:
             if error_type and error_type != "None":
@@ -485,9 +486,9 @@ def _prosody_detail(word: dict[str, Any]) -> dict[str, float | None]:
     loud to a learner.
     """
     scores = _scores(word)
-    prosody = ((scores.get("Feedback") or word.get("Feedback") or {}).get("Prosody") or {})
+    prosody = (scores.get("Feedback") or word.get("Feedback") or {}).get("Prosody") or {}
     break_length = (prosody.get("Break") or {}).get("BreakLength")
-    monotone = ((prosody.get("Intonation") or {}).get("Monotone") or {})
+    monotone = (prosody.get("Intonation") or {}).get("Monotone") or {}
     confidence = monotone.get("SyllablePitchDeltaConfidence")
     return {
         "break_length_ms": (
@@ -549,7 +550,10 @@ def _timing(node: dict[str, Any]) -> dict[str, Any]:
 # absent, so a consumer reading `word["start_s"]` needs no guard for one construction path and
 # not the other — the same contract `prosody_detail` already holds in `_omission`.
 NO_TIMING: dict[str, Any] = {
-    "offset_ticks": None, "duration_ticks": None, "start_s": None, "end_s": None,
+    "offset_ticks": None,
+    "duration_ticks": None,
+    "start_s": None,
+    "end_s": None,
 }
 
 
@@ -751,9 +755,7 @@ def _snr(payloads: list[dict[str, Any]]) -> dict[str, float | None]:
     is a real and very bad measurement rather than a missing one.
     """
     values = [(p.get("SNR"), float(p.get("Duration") or 0.0)) for p in payloads]
-    usable = [
-        (float(snr), weight) for snr, weight in values if isinstance(snr, (int, float))
-    ]
+    usable = [(float(snr), weight) for snr, weight in values if isinstance(snr, (int, float))]
     if not usable:
         return {"snr_db": None, "snr_db_min": None}
     if len(usable) == 1:
@@ -856,9 +858,7 @@ def is_flagged(word: dict[str, Any]) -> bool:
     )
 
 
-def phoneme_pairs(
-    word: dict[str, Any]
-) -> list[tuple[str | None, str | None, float | None]]:
+def phoneme_pairs(word: dict[str, Any]) -> list[tuple[str | None, str | None, float | None]]:
     """(expected IPA, produced IPA, score) for each phoneme in a word.
 
     The produced phoneme is the highest-scoring nbest alternate that differs from the
@@ -1002,4 +1002,3 @@ def delivery_faults(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
         return (-len(entry["words"]), precedence, fault)
 
     return sorted(faults, key=rank)
-
