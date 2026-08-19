@@ -512,3 +512,112 @@ def test_the_rhythm_axis_is_not_pinned_to_zero() -> None:
     frame = pv.rhythm_frame([_benchmark_attempt(1, "2026-08-01T09:00:00Z", _fixture_words())])
     spec = pv.rhythm_chart(frame, baseline=None).to_dict()
     assert spec["encoding"]["y"]["scale"]["zero"] is False
+
+
+# --- Weak syllables, the stress evidence ------------------------------------------------------
+
+
+def _syllable_attempt(word: str, syllables, attempt_id: int = 1):
+    return pv.ParsedAttempt(
+        attempt_id=attempt_id, created_at="2026-08-10T00:00:00Z", mode=Mode.PARAGRAPH,
+        reference_text="anything", benchmark=False,
+        words=[{"word": word, "accuracy": 70.0, "error_type": "Mispronunciation",
+                "syllables": [{"syllable": s, "score": score} for s, score in syllables],
+                "phonemes": []}],
+    )
+
+
+def test_a_single_syllable_word_has_no_stress_to_misplace() -> None:
+    frame = pv.weak_syllables([_syllable_attempt("think", [("θɪŋk", 20.0)])])
+    assert not len(frame)
+
+
+def test_a_weak_syllable_in_a_multi_syllable_word_is_recorded() -> None:
+    frame = pv.weak_syllables([
+        _syllable_attempt("weather", [("wɛð", 100.0), ("ɚ", 30.0)], attempt_id=n)
+        for n in (1, 2)
+    ])
+    assert list(frame["word"]) == ["weather"]
+    assert list(frame["syllable"]) == ["ɚ"]
+    assert list(frame["attempts"]) == [2]
+
+
+def test_a_word_whose_syllables_all_score_well_is_left_alone() -> None:
+    frame = pv.weak_syllables([
+        _syllable_attempt("weather", [("wɛð", 100.0), ("ɚ", 90.0)])
+    ])
+    assert not len(frame)
+
+
+def test_the_weak_syllable_cut_is_the_one_the_coaching_report_uses() -> None:
+    """One definition, so the queue's evidence and the report on screen cannot disagree."""
+    import fallback_coach
+
+    just_under = fallback_coach.SYLLABLE_RED - 0.1
+    frame = pv.weak_syllables([
+        _syllable_attempt("weather", [("wɛð", 100.0), ("ɚ", just_under)])
+    ])
+    assert len(frame) == 1
+
+
+# --- Perception blocks --------------------------------------------------------------------------
+
+
+def _trial(block_id: str, correct: bool, *, alternatives: int = 2, novel: bool = True,
+           when: str = "2026-08-15T00:00:00Z", review: bool = False):
+    return {"block_id": block_id, "created_at": when, "item": "/θ/ → /s/",
+            "word": "think", "voice": "v", "novel": int(novel),
+            "alternatives": alternatives, "answered": "think", "correct": int(correct),
+            "review": int(review)}
+
+
+def test_an_empty_history_gives_an_empty_frame_with_its_columns() -> None:
+    frame = pv.perception_frame([])
+    assert not len(frame)
+    assert list(frame.columns) == list(pv.PERCEPTION_COLUMNS)
+
+
+def test_a_block_becomes_one_row_carrying_its_chance_floor() -> None:
+    trials = [_trial("b1", True)] * 13 + [_trial("b1", False)] * 7
+    frame = pv.perception_frame(trials)
+    assert len(frame) == 1
+    assert frame["accuracy"].iloc[0] == pytest.approx(65.0)
+    assert frame["chance"].iloc[0] == pytest.approx(50.0)
+    assert frame["total"].iloc[0] == 20
+
+
+def test_the_chance_floor_follows_the_stored_alternatives() -> None:
+    """A four-way task keeps reporting 25% rather than inheriting a hardcoded 50."""
+    frame = pv.perception_frame([_trial("b1", True, alternatives=4)])
+    assert frame["chance"].iloc[0] == pytest.approx(25.0)
+
+
+def test_blocks_are_separate_rows() -> None:
+    frame = pv.perception_frame([
+        _trial("b1", True, when="2026-08-10T00:00:00Z"),
+        _trial("b2", False, when="2026-08-11T00:00:00Z"),
+    ])
+    assert len(frame) == 2
+
+
+def test_an_incomplete_block_is_still_drawn() -> None:
+    """The exclusion belongs to the verdict, not to the picture."""
+    frame = pv.perception_frame([_trial("b1", True)] * 3)
+    assert frame["total"].iloc[0] == 3
+
+
+def test_the_chart_draws_the_chance_rule() -> None:
+    frame = pv.perception_frame([_trial("b1", True)] * 4)
+    spec = pv.perception_chart(frame).to_dict()
+    marks = [layer.get("mark") for layer in spec["layer"]]
+    rules = [m for m in marks if isinstance(m, dict) and m.get("type") == "rule"]
+    assert rules, "the chance floor must be drawn, not only tabulated"
+    assert rules[0].get("strokeDash")
+    encodings = [layer["encoding"]["y"]["field"] for layer in spec["layer"]]
+    assert "chance" in encodings
+
+
+def test_the_accuracy_axis_is_pinned_so_noise_cannot_look_like_a_trend() -> None:
+    frame = pv.perception_frame([_trial("b1", True)] * 4)
+    spec = pv.perception_chart(frame).to_dict()
+    assert spec["layer"][0]["encoding"]["y"]["scale"]["domain"] == [0, 100]

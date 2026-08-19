@@ -59,6 +59,54 @@ CREATE TABLE IF NOT EXISTS tts_usage (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tts_usage_created_at ON tts_usage(created_at);
+
+-- The practice queue. What is being worked on right now, why it earned a place, and when
+-- it is next due. Additive: created here with IF NOT EXISTS, so an existing version-1
+-- database gains it on the next connect() and `user_version` never moves — the same
+-- reasoning the v1 coaching columns were created NULL under.
+CREATE TABLE IF NOT EXISTS practice_targets (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  item            TEXT    NOT NULL,   -- '/θ/ → /s/' for a sound, the word for a stress item
+  kind            TEXT    NOT NULL,   -- contrast | vowel | stress
+  added           TEXT    NOT NULL,
+  last_seen       TEXT,               -- NULL until it has actually been practised once
+  next_due        TEXT,
+  state           TEXT    NOT NULL,   -- active | graduated
+  -- One column beyond what the brief lists. The alternative was a schedule pointer inside
+  -- `evidence`, which is for evidence.
+  reviews_passed  INTEGER NOT NULL DEFAULT 0,
+  -- JSON, and the verdict is not enough on its own: this holds the counts the item was
+  -- promoted on, so the UI can answer "why is this here" with numbers rather than a claim.
+  evidence        TEXT    NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_practice_targets_item
+  ON practice_targets(item, kind);
+CREATE INDEX IF NOT EXISTS idx_practice_targets_due ON practice_targets(next_due);
+
+-- One row per answered trial, not one per block. Storing the evidence rather than only the
+-- verdict is what lets a later question ("was it one voice I could never hear?") be a query
+-- instead of a re-run.
+CREATE TABLE IF NOT EXISTS perception_trials (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  block_id      TEXT    NOT NULL,   -- one id per block, so a block is recoverable as a unit
+  target_id     INTEGER REFERENCES practice_targets(id),
+  created_at    TEXT    NOT NULL,
+  item          TEXT    NOT NULL,   -- denormalised: a deleted target keeps its history
+  word          TEXT    NOT NULL,   -- the word actually played
+  voice         TEXT    NOT NULL,
+  novel         INTEGER NOT NULL,   -- 1 when this (word, voice) had never been presented
+  -- Stored per trial so the chance floor is a FACT ON THE ROW rather than an assumption
+  -- baked into whatever reads it later. A two-alternative forced choice scores 50% by
+  -- guessing; if a three-alternative task ever ships, these rows keep reporting their own.
+  alternatives  INTEGER NOT NULL,
+  answered      TEXT    NOT NULL,
+  correct       INTEGER NOT NULL,
+  review        INTEGER NOT NULL DEFAULT 0  -- 1 when this was a spaced-review block
+);
+
+CREATE INDEX IF NOT EXISTS idx_perception_trials_block ON perception_trials(block_id);
+CREATE INDEX IF NOT EXISTS idx_perception_trials_item ON perception_trials(item);
 """
 
 
@@ -278,3 +326,166 @@ def attempt_fingerprint(conn: sqlite3.Connection) -> tuple[int, int]:
         "SELECT COALESCE(MAX(id), 0) AS top, COUNT(*) AS total FROM attempts WHERE offline = 0"
     ).fetchone()
     return int(row["top"]), int(row["total"])
+
+
+# --- The practice queue ---------------------------------------------------------------------
+# SQL only. Every rule about *what* gets promoted, *when* it is due and *whether* it has
+# graduated lives in `practice_queue.py`, which is pure and testable without a database.
+# Keeping the two apart is the same split `progress_view.py` has against this module.
+
+ACTIVE = "active"
+GRADUATED = "graduated"
+
+
+def upsert_target(
+    conn: sqlite3.Connection,
+    *,
+    item: str,
+    kind: str,
+    evidence: Any,
+    added: str | None = None,
+    next_due: str | None = None,
+    state: str = ACTIVE,
+) -> int:
+    """Add a target, or refresh the evidence on one that is already there.
+
+    `(item, kind)` is unique, so re-running promotion after a new attempt updates the counts
+    behind an existing target rather than creating a duplicate — and it deliberately leaves
+    `added`, `state`, `next_due` and `reviews_passed` alone, because re-reading the same
+    evidence is not a reason to reset an item's schedule or un-graduate it.
+    """
+    when = added or utc_now_iso()
+    payload = json.dumps(evidence, ensure_ascii=False)
+    conn.execute(
+        """
+        INSERT INTO practice_targets (item, kind, added, next_due, state, evidence)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(item, kind) DO UPDATE SET evidence = excluded.evidence
+        """,
+        (item, kind, when, next_due or when, state, payload),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT id FROM practice_targets WHERE item = ? AND kind = ?", (item, kind)
+    ).fetchone()
+    return int(row["id"])
+
+
+def targets(conn: sqlite3.Connection, state: str | None = None) -> Sequence[sqlite3.Row]:
+    """Every target, oldest first, optionally filtered to one state."""
+    if state is None:
+        return conn.execute(
+            "SELECT * FROM practice_targets ORDER BY added, id"
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM practice_targets WHERE state = ? ORDER BY added, id", (state,)
+    ).fetchall()
+
+
+def update_target(
+    conn: sqlite3.Connection,
+    target_id: int,
+    *,
+    state: str | None = None,
+    next_due: str | None = None,
+    last_seen: str | None = None,
+    reviews_passed: int | None = None,
+) -> None:
+    """Apply a scheduling decision. Only the fields given are written."""
+    sets: list[str] = []
+    values: list[Any] = []
+    for column, value in (
+        ("state", state), ("next_due", next_due),
+        ("last_seen", last_seen), ("reviews_passed", reviews_passed),
+    ):
+        if value is not None:
+            sets.append(f"{column} = ?")
+            values.append(value)
+    if not sets:
+        return
+    values.append(target_id)
+    conn.execute(f"UPDATE practice_targets SET {', '.join(sets)} WHERE id = ?", values)
+    conn.commit()
+
+
+def remove_target(conn: sqlite3.Connection, target_id: int) -> None:
+    """Drop a target. Its trials keep their own `item` string, so the history survives it."""
+    conn.execute("UPDATE perception_trials SET target_id = NULL WHERE target_id = ?",
+                 (target_id,))
+    conn.execute("DELETE FROM practice_targets WHERE id = ?", (target_id,))
+    conn.commit()
+
+
+def record_trial(
+    conn: sqlite3.Connection,
+    *,
+    block_id: str,
+    target_id: int | None,
+    item: str,
+    word: str,
+    voice: str,
+    novel: bool,
+    alternatives: int,
+    answered: str,
+    correct: bool,
+    review: bool = False,
+    created_at: str | None = None,
+) -> None:
+    """Store one answered trial, as it is answered rather than at the end of the block.
+
+    Writing per answer means an abandoned block still leaves its evidence behind. Whether
+    that block *counts* toward graduation is a separate question, decided in
+    `practice_queue` from the trial count — the evidence is kept either way.
+    """
+    conn.execute(
+        """
+        INSERT INTO perception_trials (
+            block_id, target_id, created_at, item, word, voice, novel,
+            alternatives, answered, correct, review
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (block_id, target_id, created_at or utc_now_iso(), item, word, voice,
+         int(novel), int(alternatives), answered, int(correct), int(review)),
+    )
+    conn.commit()
+
+
+def trials_for(conn: sqlite3.Connection, item: str) -> Sequence[sqlite3.Row]:
+    """Every trial ever answered for one item, oldest first."""
+    return conn.execute(
+        "SELECT * FROM perception_trials WHERE item = ? ORDER BY created_at, id", (item,)
+    ).fetchall()
+
+
+def all_trials(conn: sqlite3.Connection) -> Sequence[sqlite3.Row]:
+    """Every trial, oldest first. The perception chart's input."""
+    return conn.execute(
+        "SELECT * FROM perception_trials ORDER BY created_at, id"
+    ).fetchall()
+
+
+def heard_stimuli(conn: sqlite3.Connection, item: str) -> dict[tuple[str, str], str]:
+    """`(word, voice) -> when it was last played`, for one item.
+
+    This is what makes "unseen" mean something: a block prefers combinations absent from
+    this map, and falls back to the least recently heard once they run out.
+    """
+    rows = conn.execute(
+        "SELECT word, voice, MAX(created_at) AS last FROM perception_trials "
+        "WHERE item = ? GROUP BY word, voice",
+        (item,),
+    ).fetchall()
+    return {(str(r["word"]), str(r["voice"])): str(r["last"]) for r in rows}
+
+
+def queue_fingerprint(conn: sqlite3.Connection) -> tuple[int, int, int]:
+    """(target count, highest target id, trial count) — a cache key for the Today tab.
+
+    Streamlit runs every tab body on every rerun, the 0.4 s assessment polls included, so
+    the queue's reads need the same treatment `attempt_fingerprint` gives the progress view.
+    """
+    targets_row = conn.execute(
+        "SELECT COUNT(*) AS total, COALESCE(MAX(id), 0) AS top FROM practice_targets"
+    ).fetchone()
+    trials_row = conn.execute("SELECT COUNT(*) AS total FROM perception_trials").fetchone()
+    return int(targets_row["total"]), int(targets_row["top"]), int(trials_row["total"])

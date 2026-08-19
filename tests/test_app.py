@@ -922,10 +922,13 @@ def seed_attempts(app: AppTest, count: int = 3, *, benchmark: bool = False) -> N
     conn.close()
 
 
-def test_the_page_has_a_practice_tab_and_a_progress_tab(run_app) -> None:
+def test_the_page_has_a_today_a_practice_and_a_progress_tab(run_app) -> None:
+    """Today is first: opening the app should answer "what am I doing today?" rather than
+    present a blank textarea. The textarea is one click away, which is where a thing you
+    reach for on purpose belongs."""
     app = run_app()
     assert not app.exception
-    assert len(app.tabs) == 2
+    assert len(app.tabs) == 3
 
 
 def test_the_progress_tab_says_so_when_there_is_no_history(run_app) -> None:
@@ -1039,3 +1042,336 @@ def test_too_little_speech_shows_no_rhythm_number(run_app, monkeypatch) -> None:
     app = seed_result(run_app(), assessment)
     assert not [m for m in app.metric if m.label == "nPVI"]
     assert any("Not enough connected speech" in c.value for c in app.caption)
+
+
+# --- The Today tab ----------------------------------------------------------
+# The one thing a browser cannot easily prove and a test can: with nothing recorded, the queue
+# offers nothing rather than seeding a plausible-looking target from somewhere.
+#
+# Seeded through the REAL path — two attempts carrying the committed Azure capture — rather
+# than by stubbing the aggregate. AppTest executes app.py as its own module object, so a
+# monkeypatch on the imported `app` here would not reach the running script anyway, and the
+# real path is what needs proving: promotion has to come out of stored attempts.
+
+
+def seed_flagged_history(times: int = 2) -> None:
+    """Record `times` attempts of the captured drill, whose headline fault is /θ/ → /s/."""
+    import json
+
+    payload = json.loads((ROOT / "tests" / "fixtures" /
+                          "sample_azure_response.json").read_text())
+    conn = db.connect()
+    for index in range(times):
+        db.record_attempt(
+            conn, mode=Mode.DRILL, reference_text=REFERENCE,
+            recognised_text=REFERENCE, audio_seconds=12.8,
+            audio_sha256=f"seed-{index}", overall_scores={"pron_score": 83.0},
+            azure_raw=payload, offline=False,
+            created_at=f"2026-08-{10 + index:02d}T00:00:00Z",
+        )
+    conn.close()
+
+
+def test_with_no_history_the_queue_offers_nothing_rather_than_guessing(run_app) -> None:
+    """The cold-start contract. No first language, no default list, no invented target."""
+    app = run_app()
+    assert not app.exception
+    text = " ".join(info.value for info in app.info)
+    assert "promoted from your own assessed attempts" in text
+
+
+def test_one_attempt_is_not_a_pattern(run_app) -> None:
+    """A sound has to recur before it becomes a target — one bad reading is not evidence."""
+    seed_flagged_history(times=1)
+    app = run_app()
+    assert not app.exception
+    conn = db.connect()
+    assert db.targets(conn) == []
+    assert any("recurred often enough" in info.value for info in app.info)
+
+
+def test_a_recurring_substitution_is_promoted_from_the_stored_attempts(run_app) -> None:
+    """Every target has to trace back to a sound the recordings actually flagged."""
+    import practice_queue
+    import progress_view
+
+    seed_flagged_history()
+    app = run_app()
+    assert not app.exception
+
+    conn = db.connect()
+    rows = db.targets(conn)
+    assert rows, "the capture's recurring faults should reach the queue"
+
+    parsed = progress_view.parse_attempts(db.attempt_payloads(conn))
+    offered = {
+        (c.item, c.kind) for c in practice_queue.candidates(
+            progress_view.flagged_phonemes(parsed).to_dict("records"),
+            progress_view.weak_syllables(parsed).to_dict("records"),
+        )
+    }
+    for row in rows:
+        assert (row["item"], row["kind"]) in offered, (
+            f"{row['item']} is on the list without evidence behind it"
+        )
+
+    markdown = " ".join(block.value for block in app.markdown)
+    assert rows[0]["item"] in markdown
+
+
+def test_the_three_slots_go_to_three_different_kinds(run_app) -> None:
+    """Three consonant contrasts would crowd out a vowel gap flagged just as often, and
+    sounds and rhythm are different problems."""
+    seed_flagged_history()
+    run_app()
+    conn = db.connect()
+    kinds = {row["kind"] for row in db.targets(conn)}
+    assert kinds == {"contrast", "vowel", "stress"}
+
+
+def test_a_promoted_target_survives_a_restart(run_app) -> None:
+    """The queue's whole promise: thirty days of use is not thirty first sessions."""
+    seed_flagged_history()
+    run_app()
+
+    import streamlit as st
+
+    st.cache_resource.clear()          # a fresh process would have no connection either
+    conn = db.connect()
+    rows = db.targets(conn)
+    assert rows and rows[0]["state"] == "active"
+    assert rows[0]["next_due"], "a target with no due date is not scheduled"
+
+
+def test_the_block_cannot_be_started_offline(run_app) -> None:
+    """A block is live synthesis by definition; OFFLINE_MODE keeps its absolute meaning."""
+    seed_flagged_history()
+    app = run_app()
+    starts = [button for button in app.button if "Start the block" in button.label]
+    assert starts, "the due block should be offered"
+    assert all(button.disabled for button in starts)
+
+
+def test_the_evidence_and_the_rule_are_both_on_screen(run_app) -> None:
+    """The brief requires promotion and graduation to be visible, not implicit."""
+    seed_flagged_history()
+    app = run_app()
+    rendered = " ".join(block.value for block in app.markdown)
+    assert "flagged in 2 separate attempts" in rendered   # the evidence, with numbers
+    assert "90%" in rendered                              # the rule
+    assert "50%" in rendered                              # and the chance floor beside it
+
+
+def test_the_target_set_is_capped_at_three(run_app) -> None:
+    """A target set you cannot hold in your head while speaking is not a target set."""
+    seed_flagged_history(times=3)
+    run_app()
+    conn = db.connect()
+    assert len(db.targets(conn)) <= utils.MAX_ACTIVE_TARGETS
+
+
+# --- Running a block end to end ------------------------------------------------------------
+# Headless, with the one seam that costs money replaced. A browser cannot easily click twenty
+# trials, and doing it live would buy the same clips for every run of the suite.
+
+
+WAV = b"RIFF" + b"\x00" * 40
+
+
+@pytest.fixture
+def no_synthesis(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """Replace the single call that reaches Azure, and point the cache somewhere throwaway.
+
+    `tts.synthesise` is stubbed rather than `_speak`, so the meter accounting around it is
+    the real code — the point of the exercise is what the block charges, not what Azure
+    returns.
+    """
+    import tts
+
+    monkeypatch.setenv("TTS_CACHE_DIR", str(tmp_path / "tts_cache"))
+    monkeypatch.setenv("OFFLINE_MODE", "false")
+    monkeypatch.setenv("AZURE_SPEECH_KEY", "test-key-not-a-real-one")
+    monkeypatch.setenv("AZURE_SPEECH_REGION", "westeurope")
+    monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
+
+    calls: list[tuple[str, str]] = []
+
+    def fake(text, *, voice=None, slow=False, on_attempt=None):
+        if on_attempt is not None:
+            on_attempt(1)
+        chosen = voice or tts.voice_name()
+        calls.append((text, chosen))
+        return tts.Synthesis(audio=WAV, characters=len(text), voice=chosen, attempts=1)
+
+    monkeypatch.setattr(tts, "synthesise", fake)
+    return calls
+
+
+def start_a_block(app: AppTest) -> AppTest:
+    for button in app.button:
+        if "Start the block" in button.label:
+            return button.click().run()
+    raise AssertionError("no block was offered")
+
+
+def answer_every_trial(app: AppTest) -> AppTest:
+    """Answer the first alternative on every trial, then step past each reveal."""
+    for _ in range(utils.PERCEPTION_BLOCK_TRIALS * 3):
+        state = app.session_state["perception_block"]
+        if state is None:
+            break
+        index = int(state["index"])
+        if index >= len(state["block"].trials):
+            break
+        if state["revealed"]:
+            app = [b for b in app.button if b.label.startswith("Next")][0].click().run()
+            continue
+        trial = state["block"].trials[index]
+        choice = [b for b in app.button if b.label == trial.alternatives[0]][0]
+        app = choice.click().run()
+    return app
+
+
+def test_a_block_runs_end_to_end_and_charges_only_what_it_synthesised(
+    run_app, no_synthesis
+) -> None:
+    seed_flagged_history()
+    conn = db.connect()
+    before = db.monthly_tts_characters(conn)
+
+    app = start_a_block(run_app())
+    assert not app.exception
+
+    block = app.session_state["perception_block"]["block"]
+    import perception_trainer
+
+    expected = perception_trainer.stimuli(block)
+    assert sorted(no_synthesis) == sorted(expected), (
+        "every clip the block needs, and nothing else"
+    )
+    charged = db.monthly_tts_characters(conn) - before
+    assert charged == sum(len(text) for text, _ in expected)
+
+
+def test_no_clip_is_ever_bought_twice(run_app, no_synthesis) -> None:
+    """The disk cache is checked before the pre-flight and before the meter.
+
+    A second block is not free — it plans different stimuli out of the same pool, and the
+    ones it has never played have to be synthesised. What must never happen is paying again
+    for a clip already on disk, and the charge has to match exactly the new ones.
+    """
+    seed_flagged_history()
+    app = start_a_block(run_app())
+    first = list(no_synthesis)
+    app.session_state["perception_block"] = None
+    app = app.run()
+
+    conn = db.connect()
+    before = db.monthly_tts_characters(conn)
+    no_synthesis.clear()
+
+    start_a_block(app)
+    second = list(no_synthesis)
+
+    assert not set(first) & set(second), "a clip already on disk was bought again"
+    assert len(second) == len(set(second)), "the same clip was bought twice in one block"
+    charged = db.monthly_tts_characters(conn) - before
+    assert charged == sum(len(text) for text, _ in second)
+
+
+def test_a_repeated_block_plan_costs_nothing_at_all(run_app, no_synthesis) -> None:
+    """The exact-repeat case: the same stimuli asked for twice charge once."""
+    import perception_trainer
+    import tts
+
+    seed_flagged_history()
+    app = start_a_block(run_app())
+    block = app.session_state["perception_block"]["block"]
+
+    conn = db.connect()
+    before = db.monthly_tts_characters(conn)
+    no_synthesis.clear()
+
+    for text, voice in perception_trainer.stimuli(block):
+        assert tts.cached_audio(voice, text) is not None
+
+    assert no_synthesis == []
+    assert db.monthly_tts_characters(conn) == before
+
+
+def test_every_trial_is_stored_as_it_is_answered(run_app, no_synthesis) -> None:
+    seed_flagged_history()
+    app = start_a_block(run_app())
+    item = app.session_state["perception_block"]["block"].item
+
+    conn = db.connect()
+    assert db.trials_for(conn, item) == []
+    app = answer_every_trial(app)
+
+    trials = db.trials_for(conn, item)
+    assert len(trials) == utils.PERCEPTION_BLOCK_TRIALS
+    assert {row["alternatives"] for row in trials} == {2}
+    assert all(row["novel"] == 1 for row in trials), "a first block is entirely new"
+    assert len({row["voice"] for row in trials}) >= perception_trainer_min_voices()
+
+
+def perception_trainer_min_voices() -> int:
+    import perception_trainer
+
+    return perception_trainer.MIN_VOICES
+
+
+def test_an_abandoned_block_keeps_its_answers_but_earns_no_verdict(
+    run_app, no_synthesis
+) -> None:
+    """Store the evidence, not only the verdict — the two are separate questions."""
+    import practice_queue
+
+    seed_flagged_history()
+    app = start_a_block(run_app())
+    state = app.session_state["perception_block"]
+    item = state["block"].item
+    trial = state["block"].trials[0]
+    app = [b for b in app.button if b.label == trial.alternatives[0]][0].click().run()
+    app = [b for b in app.button if b.label == "Stop the block"][0].click().run()
+
+    conn = db.connect()
+    trials = [dict(row) for row in db.trials_for(conn, item)]
+    assert len(trials) == 1, "the answer given is kept"
+
+    summaries = practice_queue.summarise_blocks(trials)
+    assert not summaries[0].complete, "a part-finished block is not a claim"
+    row = [t for t in db.targets(conn) if t["item"] == item][0]
+    assert row["state"] == "active"
+
+
+def test_finishing_a_perfect_block_reports_it_against_the_chance_floor(
+    run_app, no_synthesis
+) -> None:
+    seed_flagged_history()
+    app = start_a_block(run_app())
+    state = app.session_state["perception_block"]
+    # Answer every trial correctly by driving the state directly, then render the summary.
+    state["answers"] = [True] * len(state["block"].trials)
+    state["index"] = len(state["block"].trials)
+    app = app.run()
+
+    assert app.metric[0].value == "100%"
+    captions = " ".join(c.value for c in app.caption)
+    assert "50% is what guessing scores" in captions, (
+        "an accuracy without its floor reports near-noise as progress"
+    )
+    assert "never heard before" in captions
+
+
+def test_a_block_at_the_chance_floor_says_it_proves_nothing(run_app, no_synthesis) -> None:
+    seed_flagged_history()
+    app = start_a_block(run_app())
+    state = app.session_state["perception_block"]
+    total = len(state["block"].trials)
+    state["answers"] = [True] * (total // 2) + [False] * (total - total // 2)
+    state["index"] = total
+    app = app.run()
+
+    warnings = " ".join(w.value for w in app.warning)
+    assert "what guessing looks like" in warnings

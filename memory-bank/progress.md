@@ -10,6 +10,11 @@ and verified live, the prosody score now comes with a drill attached (#9, v0.4.0
 stored history is finally shown back over time on a fixed benchmark passage (v0.5.0). Azure's
 timing data now survives the parser and turns into a rhythm measurement, nPVI, against a
 same-pipeline TTS baseline (v0.6.0) — the de-risking step for every later accent measurement.
+**The app now trains rather than only diagnosing (v0.7.0)**: a perception trainer built on
+High Variability Phonetic Training, and a practice queue that persists a small target set so
+opening the app answers "what am I doing today?" instead of showing a blank textarea. That
+closes the gap the brief opened with — every earlier chunk explained the problem better, and
+this is the first one that does something about it.
 **Milestone v0.3.0 is closed** — #10, #11, #13 closed with comments
 pointing at what implemented them; #12 split, its content-score half (vocabulary/grammar/
 topic) retitled and moved to v0.12.0 since scripted assessment never returns it. What
@@ -17,11 +22,18 @@ remains is Mode C (unscripted), which is also what unblocks #12's remaining half
 
 ## Releases
 
-**v0.6.0 — built 2026-08-19, not yet tagged.** Azure's `Offset`/`Duration` (word, syllable and
-phoneme) and the top-level `SNR` carried through the parser, plus nPVI over vocalic intervals in
-a new `rhythm.py`, measured against a captured Azure TTS baseline of the benchmark passage. On
-the branch and verified; the PR, the tag, the GitHub release and closing milestone v0.6.0 are
-still to do.
+**v0.7.0 — 2026-08-19.** The perception trainer and the practice queue: forced-choice
+minimal-pair identification across six en-US voices, and a persisted target set of at most
+three items promoted from the user's own flagged history. A new **Today** tab is the app's
+entry point. Merged via [PR #26](https://github.com/Shahzayb/dialect-coach/pull/26), tagged,
+and released (`gh release create v0.7.0`). Milestone v0.7.0 closed; it carried no issues —
+this chunk came from the brief rather than from the tracker, so the release closes none.
+
+**v0.6.0 — 2026-08-19.** Azure's `Offset`/`Duration` (word, syllable and phoneme) and the
+top-level `SNR` carried through the parser, plus nPVI over vocalic intervals in a new
+`rhythm.py`, measured against a captured Azure TTS baseline of the benchmark passage. Merged
+via [PR #25](https://github.com/Shahzayb/dialect-coach/pull/25), tagged, and released
+(`gh release create v0.6.0`).
 
 **v0.5.0 — 2026-08-19.** The progress view: the first feature that reads the SQLite history
 back, on a fixed benchmark passage. Merged via
@@ -57,9 +69,19 @@ says; the TTS baseline took 61.8 s, and a human reads it slower). Until then the
 on screen is the free-practice cloud, which is exactly the thing that cannot be read as
 progress.
 
-Two charts now depend on it rather than one: the rhythm chart plots benchmark reads only,
-because nPVI moves with the text as much as with the speaker. The first read is also the
-first number that can be set against the TTS baseline's 58.45.
+Three things now depend on it rather than one. The rhythm chart plots benchmark reads only,
+because nPVI moves with the text as much as with the speaker, and the first read is the first
+number that can be set against the TTS baseline's 58.45. **The practice queue is the third,
+and it is the one that changes what a read is for**: targets are promoted from sounds flagged
+across separate attempts, so until there are real attempts the queue has nothing to schedule
+and the Today tab correctly offers nothing. Reading the passage is now what starts the whole
+loop, not only what fills a chart.
+
+**Then do some blocks.** The trainer has been run, not used. The graduation rule (90% across
+two completed blocks) has never fired on real listening, the spaced-review schedule has never
+come round, and whether a perception gain shows up in the Azure scores is the question the
+whole chunk is a bet on. Same shape as the benchmark's 30-day check: only weeks of real use
+answer it, and neither is a merge gate.
 
 **Then Mode C (unscripted speech)** — free speech scored on vocabulary, grammar and
 topic, not just a script. Blocked on a real question, not busywork:
@@ -69,6 +91,10 @@ verified before it can be planned. `UNSCRIPTED_TWO_PASS` is defined and priced b
 `budget.passes_for` but unread by any recognition code yet.
 
 ## Active plan
+
+`plans/2026-08-19_perception-trainer-practice-queue.md` — complete. The live block was run
+against real Azure and asserted against the meter, so the exit criteria are met rather than
+deferred.
 
 `plans/2026-08-19_timing-data-and-npvi.md` — complete. The TTS baseline was captured, so the
 nPVI figure ships with the comparison that makes it mean something rather than with a caveat.
@@ -264,6 +290,39 @@ and the chart. The benchmark series starts **empty** on the day this ships, and 
 five real reads spread over a month make it worth looking at. The first real read is also
 the only way to confirm that 196 words lands inside 60-90 seconds at an actual reading pace.
 
+**Training, not only diagnosis (milestone v0.7.0).** A **Today** tab is now the first thing
+the app opens on, and it answers "what am I doing today?" instead of presenting a blank
+textarea — the textarea is one tab click away. It carries at most three targets, each
+promoted out of the user's own flagged history, each showing the counts it was promoted on
+and the rule that takes it off. The due one is either a **listening block** (a contrast or a
+vowel gap) or a **stress drill**.
+
+A block is High Variability Phonetic Training: 20 forced-choice trials on minimal pairs from
+`phoneme_reference`, cycling **six en-US voices** — three male, three female, across two
+voice generations — scored immediately, with the answer revealed and both words replayable.
+Every accuracy figure on screen sits beside its chance floor, and the Progress tab plots
+per-contrast accuracy against a dashed 50% rule.
+
+Verified live against Azure on 2026-08-19, and the meter is the assertion:
+
+- A fresh 20-trial block on `/θ/ → /t/` needed **38 clips and charged 167 characters** —
+  one `tts_usage` row per clip, none double-charged.
+- A **second block charged 9 characters**, for the 2 clips it had never played; the other 36
+  came off the disk cache. Nothing already on disk is ever bought again.
+- `scripts/list_voices.py` listed the roster and **charged nothing** (meter 0 before, 0
+  after), which is what it exists to prove.
+- Total spend for the whole exercise: **176 TTS characters** of 500,000, and no STT at all.
+
+Verified in the browser on the seeded demo, both themes: Today promotes one consonant
+contrast, one vowel gap and one stress item; a trial autoplays, scores, reveals `tick` against
+`thick` with the contrast note, and offers both words back; the perception chart draws the
+chance line under a rising trajectory. `make test` is **556 tests**, all offline with no keys.
+
+**What this does not yet prove.** The trainer has been run, not *used*. Whether twenty trials
+a day is a habit anyone keeps, and whether the perception gain shows up in the Azure scores at
+all, are questions only weeks of real blocks answer — the same shape as the benchmark's 30-day
+check. The graduation rule (90% across two blocks) has never fired on real listening.
+
 ## Known issues
 
 **The 8 code-review findings from 2026-08-18 are all fixed** (2026-08-19, in the
@@ -282,6 +341,18 @@ Worth keeping from that pass:
   stress-and-rhythm lines) as well as the fixes, and rejects the whole report rather than
   editing a fabricated sound out of a sentence — there is no way to cut a clause and be
   left with English, and the offline report that replaces it is complete.
+
+**Preparing a fresh block takes about 40 seconds.** Synthesis is sequential at roughly one
+second per clip and a block needs ~38 of them, so the first block on a new contrast has a real
+wait before trial one. The progress bar names the count while it runs, and every later block on
+that contrast is instant because the clips are on disk. Parallelising the batch is the obvious
+fix and was deliberately not attempted in this chunk.
+
+**A stress item cannot be checked, only drilled.** Azure returns per-syllable accuracy but no
+stress marks, so there is no way to ask "which syllable was stressed?" and know the right
+answer without a pronouncing dictionary or another recording. Stress items therefore graduate
+on the evidence drying up rather than on a score. A CMUdict-backed stress-location task would
+close it and is the recorded upgrade path.
 
 Still open, lower severity, from the same pass: `app.py`'s word card shows the raw unsmeared
 duplicate phoneme that the coaching report collapses — the two views can disagree on how

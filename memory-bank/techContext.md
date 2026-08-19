@@ -461,6 +461,93 @@ Landed 2026-08-19 (milestone v0.5.0). The first feature that reads the stored hi
   `db.attempt_fingerprint` — `(max id, row count)` — with the connection passed as `_conn`
   so Streamlit does not try to hash it.
 
+### The perception trainer and the practice queue
+
+Landed 2026-08-19 (milestone v0.7.0). The first feature that **trains** rather than diagnoses,
+and the first that remembers anything between sessions.
+
+- **Why identification and not exposure.** Playing a target next to an attempt is exposure,
+  which is the weakest intervention available. The established one is High Variability
+  Phonetic Training: forced-choice identification of minimal pairs across several talkers,
+  scored immediately, in short daily blocks. Perception gains transfer to production without
+  production practice, and **multiple talkers are what make the gain generalise** to new words
+  and speakers. `perception_trainer.py` and `practice_queue.py` are pure — no Streamlit, no
+  database, no clock — on the same boundary as `progress_view.py` and `rhythm.py`.
+- **Six voices, verified by introspection, spanning two generations.**
+  `scripts/list_voices.py` calls `get_voices_async("en-US")` and prints the live roster; the
+  run on 2026-08-19 confirmed all names and that the listing charges nothing (meter 0 before,
+  0 after). The first four names picked — Andrew, Ava, Brian, Emma — all exist, but they are
+  all the *same* conversational generation and share a recording character, so the roster is
+  now Andrew and Ava plus Aria, Guy, Jenny and Tony from the older set: three male, three
+  female, two generations. **A block refuses to run under `MIN_VOICES` (4) rather than
+  degrading** — a one-voice block still looks like training on screen. Only plain `…Neural`
+  voices; the DragonHD and MAI families are an unverified pricing class on F0.
+- **`AZURE_TTS_VOICE` and `perception_trainer.VOICES` must never be collapsed.** The first is
+  one consistent model for imitation ("Hear it"); the second is variety for identification.
+  They pull in opposite directions on purpose, and `en-US-BrianNeural` is left out of the
+  roster precisely because it is the former's default.
+- **"Unseen item" means an unheard `(word, voice)` combination**, not an unheard word. That
+  is what makes the rule workable at all: `phoneme_reference` holds three to five pairs per
+  contrast, and six voices turn those into a 36-60 stimulus pool. It is also the honest
+  reading — a familiar word in a voice never heard for that contrast is new information about
+  the category.
+- **Round-robin selection, not selection-then-ordering.** Picking the best twenty stimuli and
+  then trying to order them cannot guarantee voice rotation: the selection can return eight
+  of one voice, and no ordering of eight-in-twenty avoids a consecutive repeat. The pool is
+  dealt one voice at a time instead, so rotation is a property of the *selection*. The
+  pair-avoidance preference searches only within one novelty tier, or it quietly returns a
+  stimulus already heard while an unheard one waits.
+- **The chance floor is arithmetic, not a threshold, and it is stored per trial.** A
+  two-alternative forced choice scores 50% by guessing, so `perception_trainer.chance_floor`
+  derives it from the trial's `alternatives` count and `chance_caption` builds the sentence
+  that has to sit beside every accuracy figure — one definition, so it cannot be dropped from
+  one of the several places accuracy appears. `perception_trials.alternatives` makes it a fact
+  on the row rather than an assumption in whatever reads it later.
+- **Three item kinds, two graduation rules, and the split is forced by the data.** A **vowel
+  gap needs no formant work** — it is a flagged substitution whose expected phoneme is a
+  vowel, diphthong or r-coloured in `phoneme_reference`, so it trains through the same block
+  as a consonant contrast and only the label and the reason differ. **Azure emits no stress
+  marks**: the fixtures return `unpredictable` as `ʌn/pɹə/dɪk/tə/bəl` with accuracy scores and
+  nothing else, so a stress target has no scored check that costs no STT. It gets *the due
+  drill* rather than *the due block* (the brief names both) and graduates on the evidence
+  drying up — the word stops appearing in the flagged aggregate. A CMUdict-backed
+  stress-*location* task is the upgrade path, deliberately not built.
+- **Evidence comes from the aggregates the Progress tab already draws**, so the queue and the
+  chart cannot disagree about what recurs. `progress_view.weak_syllables` was added beside
+  `flagged_phonemes`/`flagged_words`, sharing the same `_tally`, and it reads
+  `fallback_coach.SYLLABLE_RED` rather than restating the cut.
+- **The queue never invents a target.** `promote` can only choose from `candidates`, which can
+  only come from stored attempts. With no history it offers nothing and says so; **no L1 hint
+  was built**, which keeps `projectbrief.md`'s no-hardcoded-L1 non-goal intact. Three slots at
+  most, one of each kind before a second of any, so three consonant contrasts cannot crowd out
+  a vowel gap flagged just as often.
+- **A `Decision.reason` deliberately does not restate the graduation rule.** `render_target_card`
+  renders `graduation_rule` on the line directly above it, and the first browser check showed
+  the whole rule printed twice three inches apart — the same padding the delivery drills
+  already taught to avoid.
+- **Trials are written as they are answered, not at block end.** An abandoned block keeps its
+  evidence; whether it earns a *verdict* is a separate question `practice_queue` decides from
+  the trial count. Store the evidence, not only the verdict.
+- **Two new tables, `SCHEMA_VERSION` still 1.** `practice_targets` and `perception_trials` are
+  additive `CREATE TABLE IF NOT EXISTS`, so an existing v1 database gains them on the next
+  `connect()` and `user_version` never moves — the v1 coaching-column precedent.
+  `reviews_passed` is one column beyond the brief's list; the alternative was a schedule
+  pointer inside `evidence`, which is for evidence.
+- **The TTS disk cache holds synthesised audio only** (`data/tts_cache`, keyed by
+  `(voice, text, rate)`, `data/` now gitignored in full). This does not touch the
+  no-stored-audio rule: that rule covers the *user's* recordings and nothing writes one to
+  disk. Plain text at the normal rate, never SSML — the meter charges the payload sent and
+  SSML bills its markup. **The disk lookup happens before the pre-flight and before the
+  meter**, the same ordering `play()` depends on.
+- **Measured live against Azure on 2026-08-19.** A fresh 20-trial block on `/θ/ → /t/` needed
+  **38 clips and charged 167 characters** — one `tts_usage` row per clip, none double-charged.
+  A second block on the same contrast drew different stimuli from the same pool and charged
+  **9 characters for the 2 clips it had never played**, with the other 36 served from disk.
+  The whole corpus is ~4,600 characters at six voices against 500,000 a month.
+- **Synthesis is sequential, at roughly one second per clip**, so a fresh block takes about
+  40 seconds to prepare before the first trial. The progress bar names the count while it
+  runs. Repeat blocks on a warm cache are instant; this cost is paid once per contrast.
+
 ### Timing data and nPVI
 
 Landed 2026-08-19 (milestone v0.6.0). The de-risking chunk for all later accent work — rhythm,
