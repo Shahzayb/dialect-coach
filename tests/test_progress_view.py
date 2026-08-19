@@ -442,3 +442,73 @@ def test_spoken_attempts_keeps_everything_else() -> None:
     real = _capture_row(1) | {"reference_text": pv.BENCHMARK_PASSAGE}
     kept = pv.spoken_attempts([real, _capture_row(2)])
     assert [row["id"] for row in kept] == [1]
+
+
+# --- Rhythm over time ---------------------------------------------------------------------
+
+
+def _benchmark_attempt(attempt_id: int, when: str, words: list[dict]) -> pv.ParsedAttempt:
+    return pv.ParsedAttempt(
+        attempt_id=attempt_id, created_at=when, mode=Mode.PARAGRAPH,
+        reference_text=pv.BENCHMARK_PASSAGE, benchmark=True, words=words,
+    )
+
+
+def _fixture_words() -> list[dict]:
+    payload = json.loads((FIXTURES / "sample_azure_response.json").read_text())
+    _, _, words = sa.normalise([payload], "", Mode.DRILL)
+    return words
+
+
+def test_rhythm_frame_plots_benchmark_reads(fixtures_dir) -> None:
+    words = _fixture_words()
+    frame = pv.rhythm_frame([
+        _benchmark_attempt(1, "2026-08-01T09:00:00Z", words),
+        _benchmark_attempt(2, "2026-08-08T09:00:00Z", words),
+    ])
+    assert list(frame.columns) == list(pv.RHYTHM_COLUMNS)
+    assert len(frame) == 2
+    assert frame["npvi"].iloc[0] == pytest.approx(55.85, abs=0.01)
+
+
+def test_free_practice_is_left_out_of_the_rhythm_chart() -> None:
+    """nPVI moves with the text. A chart mixing passages would show which was harder."""
+    free = pv.ParsedAttempt(
+        attempt_id=3, created_at="2026-08-01T09:00:00Z", mode=Mode.PARAGRAPH,
+        reference_text="something else entirely", benchmark=False, words=_fixture_words(),
+    )
+    assert len(pv.rhythm_frame([free])) == 0
+
+
+def test_an_unmeasurable_attempt_produces_no_row_rather_than_a_zero() -> None:
+    """Same rule as score_frame: a gap is honest, a zero invents even syllables."""
+    sparse = _benchmark_attempt(4, "2026-08-01T09:00:00Z", [])
+    assert len(pv.rhythm_frame([sparse])) == 0
+
+
+def test_an_empty_rhythm_frame_still_has_its_columns() -> None:
+    frame = pv.rhythm_frame([])
+    assert list(frame.columns) == list(pv.RHYTHM_COLUMNS)
+
+
+def test_the_rhythm_chart_draws_the_baseline_as_a_rule_not_a_series() -> None:
+    """The baseline is one capture, not a history. A line over time would imply otherwise."""
+    frame = pv.rhythm_frame([_benchmark_attempt(1, "2026-08-01T09:00:00Z", _fixture_words())])
+    spec = pv.rhythm_chart(frame, baseline=58.4).to_dict()
+    marks = [layer.get("mark") for layer in spec["layer"]]
+    kinds = {m if isinstance(m, str) else m.get("type") for m in marks}
+    assert "rule" in kinds
+    assert "line" in kinds
+
+
+def test_the_rhythm_chart_omits_the_rule_when_there_is_no_baseline() -> None:
+    frame = pv.rhythm_frame([_benchmark_attempt(1, "2026-08-01T09:00:00Z", _fixture_words())])
+    spec = pv.rhythm_chart(frame, baseline=None).to_dict()
+    assert "layer" not in spec
+
+
+def test_the_rhythm_axis_is_not_pinned_to_zero() -> None:
+    """nPVI is not a 0-100 score. A zero-based axis flattens the only thing worth seeing."""
+    frame = pv.rhythm_frame([_benchmark_attempt(1, "2026-08-01T09:00:00Z", _fixture_words())])
+    spec = pv.rhythm_chart(frame, baseline=None).to_dict()
+    assert spec["encoding"]["y"]["scale"]["zero"] is False

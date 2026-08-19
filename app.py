@@ -34,6 +34,7 @@ import budget
 import db
 import fallback_coach
 import progress_view
+import rhythm
 import speech_analyzer
 import tts
 import utils
@@ -1226,6 +1227,65 @@ def render_delivery(assessment) -> None:
         )
 
 
+def render_rhythm(assessment, reference_text: str) -> None:
+    """The nPVI figure for this reading, against the TTS baseline.
+
+    A separate section from `render_delivery` rather than a line inside it, because it is a
+    different kind of claim: the delivery panel lists faults Azure flagged, this is a
+    continuous measurement of something Azure never scores at all.
+
+    Everything about how the number is arrived at — and why the baseline is the only
+    comparison it supports — is in `rhythm.py`'s module docstring. What matters here is that
+    the UI never shows the number without also saying what it can and cannot be compared to.
+    """
+    st.subheader("Rhythm")
+    measured = rhythm.npvi(assessment.words)
+
+    if not measured.measured:
+        st.caption(
+            f"Not enough connected speech to measure rhythm — {measured.pairs} vowel pairs, "
+            f"and this needs at least {rhythm.MIN_PAIRS}. nPVI is a statement about how "
+            f"vowel lengths vary across running speech, so a few words cannot produce "
+            f"one however carefully they are said. Read something longer."
+        )
+        return
+
+    baseline = rhythm.baseline()
+    if baseline is None or not baseline.rhythm.measured:
+        st.metric("nPVI", f"{measured.npvi:.1f}")
+        st.caption(
+            "**This number has nothing to compare against yet.** Published General American "
+            "nPVI bands are not that comparison: they come from hand-segmented corpora "
+            "reading other material, and the figure moves by more than five points on this "
+            "same recording just from changing how the segments are cut. Capture the "
+            "reference by running `scripts/capture_baseline.py` once — it renders the "
+            "benchmark passage through Azure TTS and this same pipeline, which holds "
+            "everything but the voice still."
+        )
+        return
+
+    difference = measured.npvi - baseline.rhythm.npvi
+    st.metric(
+        "nPVI", f"{measured.npvi:.1f}",
+        delta=f"{difference:+.1f} vs baseline", delta_color="off",
+    )
+    st.caption(
+        f"Baseline {baseline.rhythm.npvi:.1f} — the benchmark passage read by **"
+        f"{baseline.voice}** through this same pipeline. It is a fixed reference point, not "
+        f"a native speaker: a synthesiser's rhythm is its own. What makes it useful is that "
+        f"it does not move, so a change in this gap over weeks is a change in your reading. "
+        f"A **lower** nPVI than the reference means your vowels are closer to equal in "
+        f"length, which is what a syllable-timed rhythm carried into English sounds like. "
+        f"Measured over {measured.pairs} vowel pairs in {measured.runs} "
+        f"{'stretch' if measured.runs == 1 else 'stretches'} of unbroken speech."
+    )
+    if not progress_view.is_benchmark(reference_text):
+        st.caption(
+            "Read on a different text from the baseline, so some of this gap is the writing "
+            "rather than the reading. Read the benchmark passage to compare like with like."
+        )
+
+
 def render_result(conn: sqlite3.Connection, entry: CachedAttempt, source) -> None:
     assessment, reference_text = entry.assessment, entry.reference_text
     render_scores(assessment)
@@ -1282,6 +1342,7 @@ def render_result(conn: sqlite3.Connection, entry: CachedAttempt, source) -> Non
                     index += 1
 
     render_delivery(assessment)
+    render_rhythm(assessment, reference_text)
 
 
 # --- The progress view ----------------------------------------------------------------------
@@ -1363,6 +1424,53 @@ def render_progress(conn: sqlite3.Connection) -> None:
         "Counted by how many attempts a sound or word was flagged in, not by raw "
         "occurrences, so one long paragraph cannot dominate the list."
     )
+
+    render_rhythm_history(parsed)
+
+
+def render_rhythm_history(parsed) -> None:
+    """Benchmark nPVI over time, against the TTS baseline.
+
+    Benchmark reads only. nPVI is text-sensitive, so plotting free practice beside it would
+    chart the difficulty of whatever was chosen that day.
+    """
+    st.subheader("Rhythm over time")
+    frame = progress_view.rhythm_frame(parsed)
+    baseline = rhythm.baseline()
+
+    if not len(frame):
+        st.caption(
+            "Nothing to plot yet. Rhythm is measured on benchmark reads only — nPVI moves "
+            "with the text as much as with the speaker, so a chart mixing passages would "
+            "show which one was harder to read."
+        )
+        return
+
+    st.altair_chart(
+        progress_view.rhythm_chart(
+            frame, baseline.rhythm.npvi if baseline and baseline.rhythm.measured else None
+        ),
+        width="stretch",
+    )
+
+    if baseline is None or not baseline.rhythm.measured:
+        st.warning(
+            "No reference line: the TTS baseline has not been captured on this machine. "
+            "Run `scripts/capture_baseline.py` once. Until then the trend is still real — "
+            "the passage is fixed, so a move is a move — but there is nothing to say how "
+            "far from a steady reference it sits.",
+            icon="📏",
+        )
+    else:
+        st.caption(
+            f"The dashed line is **{baseline.voice}** reading the same passage through this "
+            f"same pipeline ({baseline.rhythm.npvi:.1f}). A fixed point, not a native "
+            f"speaker. Published General American bands are deliberately not drawn here: "
+            f"they come from hand-segmented corpora reading other material, and on one "
+            f"unchanged recording this figure moves more than five points just from how the "
+            f"segments are cut — so the distance to a published band would mean less than "
+            f"the distance to this line."
+        )
 
 
 def render_practice(conn: sqlite3.Connection, job: "AssessJob | None", running: bool) -> None:

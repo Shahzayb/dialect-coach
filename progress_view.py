@@ -317,6 +317,81 @@ def score_chart(frame: pd.DataFrame) -> alt.Chart:
     ).properties(title="Scores over time").resolve_scale(y="shared")
 
 
+# --- Rhythm over time -------------------------------------------------------------------------
+# nPVI is text-sensitive, so only benchmark reads are plotted. A free-practice point would be
+# measuring the passage as much as the speaker, which is the same reason the benchmark passage
+# exists at all. See `rhythm.py` for why the TTS baseline is the only comparison this supports,
+# and why published General American bands get no ink here.
+
+RHYTHM_COLUMNS: tuple[str, ...] = ("when", "attempt_id", "npvi", "pairs", "runs")
+
+
+def rhythm_frame(parsed: Sequence[ParsedAttempt]) -> pd.DataFrame:
+    """nPVI per benchmark attempt, oldest first.
+
+    Reads the re-parsed word lists rather than a stored column: nPVI is derived from phoneme
+    durations inside `azure_raw_json`, which is exactly what storing the response verbatim was
+    for. Every attempt already in the database therefore gains a rhythm figure with no
+    migration and no backfill.
+
+    An attempt with too little connected speech to measure produces no row — never a zero.
+    Same rule as `score_frame` and for the same reason: a gap is honest, a zero invents a
+    collapse into perfectly even syllables that nobody has ever produced.
+    """
+    records: list[dict[str, Any]] = []
+    for attempt in parsed:
+        if not attempt.benchmark:
+            continue
+        when = _parse_when(attempt.created_at)
+        if when is None:
+            continue
+        measured = rhythm.npvi(attempt.words)
+        if not measured.measured:
+            continue
+        records.append({
+            "when": when,
+            "attempt_id": attempt.attempt_id,
+            "npvi": float(measured.npvi),
+            "pairs": measured.pairs,
+            "runs": measured.runs,
+        })
+
+    if not records:
+        return pd.DataFrame({name: pd.Series(dtype="object") for name in RHYTHM_COLUMNS})
+    return pd.DataFrame.from_records(records)[list(RHYTHM_COLUMNS)]
+
+
+def rhythm_chart(frame: pd.DataFrame, baseline: float | None = None) -> alt.Chart:
+    """Benchmark nPVI over time, with the TTS baseline as a rule.
+
+    Unlike `score_chart` the y axis is **not** pinned to a fixed domain. nPVI is not a 0-100
+    score and has no meaningful ceiling; readings cluster in a narrow band, and forcing a wide
+    axis would flatten the only thing worth seeing into a straight line. `zero=False` for the
+    same reason.
+
+    The baseline is drawn as a rule rather than a second series because it does not move — it
+    is one capture, not a history, and drawing it as a line over time would imply otherwise.
+    """
+    points = alt.Chart(frame).mark_line(point=True, strokeWidth=2, color="#2f6fd0").encode(
+        x=alt.X("when:T", title=None),
+        y=alt.Y("npvi:Q", title="nPVI", scale=alt.Scale(zero=False)),
+        tooltip=[alt.Tooltip("when:T", title="When"),
+                 alt.Tooltip("npvi:Q", title="nPVI", format=".1f"),
+                 alt.Tooltip("pairs:Q", title="Vowel pairs"),
+                 alt.Tooltip("runs:Q", title="Unbroken stretches")],
+    )
+    if baseline is None:
+        return points.properties(height=170, title="Rhythm (nPVI) over time")
+
+    rule = alt.Chart(pd.DataFrame({"baseline": [baseline]})).mark_rule(
+        color="#8a8a8a", strokeDash=[6, 4], strokeWidth=2,
+    ).encode(y=alt.Y("baseline:Q", scale=alt.Scale(zero=False)))
+
+    return alt.layer(points, rule).properties(
+        height=170, title="Rhythm (nPVI) over time"
+    ).resolve_scale(y="shared")
+
+
 def days_since_benchmark(rows: Iterable[Mapping[str, Any]], *, now: datetime | None = None
                          ) -> int | None:
     """Whole days since the benchmark passage was last read, or None if it never has been.
