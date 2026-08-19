@@ -23,9 +23,10 @@ a new `rhythm.py`, measured against a captured Azure TTS baseline of the benchma
 the branch and verified; the PR, the tag, the GitHub release and closing milestone v0.6.0 are
 still to do.
 
-**v0.5.0 — built 2026-08-19, not yet tagged.** The progress view: the first feature that
-reads the SQLite history back, on a fixed benchmark passage. On the branch and verified;
-the PR, the tag, the GitHub release and closing milestone v0.5.0 are still to do.
+**v0.5.0 — 2026-08-19.** The progress view: the first feature that reads the SQLite history
+back, on a fixed benchmark passage. Merged via
+[PR #24](https://github.com/Shahzayb/dialect-coach/pull/24), tagged, and released
+(`gh release create v0.5.0`).
 
 **v0.3.0 — 2026-08-19.** Score breakdown, headline mispronunciation/delivery-fault counts,
 and the per-word phoneme hover tooltip, merged via
