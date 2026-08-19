@@ -181,7 +181,7 @@ def test_nothing_graduates_on_an_incomplete_block() -> None:
     """Evidence is kept; a verdict is not earned."""
     decision = pq.grade(target("/θ/ → /s/"), [block(5, 5, planned=20)])
     assert decision.state == pq.ACTIVE
-    assert "No completed block yet" in decision.reason
+    assert "stopped at 5 of 20" in decision.reason
 
 
 def test_two_blocks_at_the_criterion_graduate() -> None:
@@ -300,3 +300,12 @@ def test_unreadable_evidence_does_not_break_the_page() -> None:
 
 def test_evidence_round_trips() -> None:
     assert pq.evidence_of(target("x", evidence='{"expected": "θ"}')) == {"expected": "θ"}
+
+
+def test_a_reason_never_restates_the_rule_rendered_beside_it() -> None:
+    """The rule is on the line above in the UI; repeating it three inches later is padding."""
+    rule = pq.graduation_rule(pq.CONTRAST)
+    for blocks in ([], [block(20)], [block(20), block(20)]):
+        assert rule not in pq.grade(target("/θ/ → /s/"), blocks).reason
+    stress = pq.grade(target("weather", kind=pq.STRESS), still_flagged=True)
+    assert pq.graduation_rule(pq.STRESS) not in stress.reason

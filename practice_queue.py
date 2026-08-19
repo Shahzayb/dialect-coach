@@ -354,8 +354,8 @@ def grade(
         if still_flagged:
             return Decision(
                 ACTIVE,
-                f"Still on the list: the word is still being flagged in your recent "
-                f"attempts. {graduation_rule(STRESS)}",
+                "Still on the list: the word is still being flagged in your recent "
+                "attempts.",
             )
         return Decision(
             GRADUATED,
@@ -366,11 +366,16 @@ def grade(
 
     completed = [b for b in blocks if b.complete]
     if not completed:
-        return Decision(
-            state,
-            f"No completed block yet. {graduation_rule(kind)}",
-            reviews_passed=passed,
-        )
+        started = [b for b in blocks if b.total]
+        if started:
+            return Decision(
+                state,
+                f"No completed block yet — the last one stopped at {started[-1].total} of "
+                f"{started[-1].planned} trials. Its answers are kept, but a part-finished "
+                f"block is not a claim about whether you can hear the contrast.",
+                reviews_passed=passed,
+            )
+        return Decision(state, "No block answered yet.", reviews_passed=passed)
 
     latest = completed[-1]
     if state == GRADUATED or latest.review:

@@ -1168,3 +1168,210 @@ def test_the_target_set_is_capped_at_three(run_app) -> None:
     run_app()
     conn = db.connect()
     assert len(db.targets(conn)) <= utils.MAX_ACTIVE_TARGETS
+
+
+# --- Running a block end to end ------------------------------------------------------------
+# Headless, with the one seam that costs money replaced. A browser cannot easily click twenty
+# trials, and doing it live would buy the same clips for every run of the suite.
+
+
+WAV = b"RIFF" + b"\x00" * 40
+
+
+@pytest.fixture
+def no_synthesis(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """Replace the single call that reaches Azure, and point the cache somewhere throwaway.
+
+    `tts.synthesise` is stubbed rather than `_speak`, so the meter accounting around it is
+    the real code — the point of the exercise is what the block charges, not what Azure
+    returns.
+    """
+    import tts
+
+    monkeypatch.setenv("TTS_CACHE_DIR", str(tmp_path / "tts_cache"))
+    monkeypatch.setenv("OFFLINE_MODE", "false")
+    monkeypatch.setenv("AZURE_SPEECH_KEY", "test-key-not-a-real-one")
+    monkeypatch.setenv("AZURE_SPEECH_REGION", "westeurope")
+    monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
+
+    calls: list[tuple[str, str]] = []
+
+    def fake(text, *, voice=None, slow=False, on_attempt=None):
+        if on_attempt is not None:
+            on_attempt(1)
+        chosen = voice or tts.voice_name()
+        calls.append((text, chosen))
+        return tts.Synthesis(audio=WAV, characters=len(text), voice=chosen, attempts=1)
+
+    monkeypatch.setattr(tts, "synthesise", fake)
+    return calls
+
+
+def start_a_block(app: AppTest) -> AppTest:
+    for button in app.button:
+        if "Start the block" in button.label:
+            return button.click().run()
+    raise AssertionError("no block was offered")
+
+
+def answer_every_trial(app: AppTest) -> AppTest:
+    """Answer the first alternative on every trial, then step past each reveal."""
+    for _ in range(utils.PERCEPTION_BLOCK_TRIALS * 3):
+        state = app.session_state["perception_block"]
+        if state is None:
+            break
+        index = int(state["index"])
+        if index >= len(state["block"].trials):
+            break
+        if state["revealed"]:
+            app = [b for b in app.button if b.label.startswith("Next")][0].click().run()
+            continue
+        trial = state["block"].trials[index]
+        choice = [b for b in app.button if b.label == trial.alternatives[0]][0]
+        app = choice.click().run()
+    return app
+
+
+def test_a_block_runs_end_to_end_and_charges_only_what_it_synthesised(
+    run_app, no_synthesis
+) -> None:
+    seed_flagged_history()
+    conn = db.connect()
+    before = db.monthly_tts_characters(conn)
+
+    app = start_a_block(run_app())
+    assert not app.exception
+
+    block = app.session_state["perception_block"]["block"]
+    import perception_trainer
+
+    expected = perception_trainer.stimuli(block)
+    assert sorted(no_synthesis) == sorted(expected), (
+        "every clip the block needs, and nothing else"
+    )
+    charged = db.monthly_tts_characters(conn) - before
+    assert charged == sum(len(text) for text, _ in expected)
+
+
+def test_no_clip_is_ever_bought_twice(run_app, no_synthesis) -> None:
+    """The disk cache is checked before the pre-flight and before the meter.
+
+    A second block is not free — it plans different stimuli out of the same pool, and the
+    ones it has never played have to be synthesised. What must never happen is paying again
+    for a clip already on disk, and the charge has to match exactly the new ones.
+    """
+    seed_flagged_history()
+    app = start_a_block(run_app())
+    first = list(no_synthesis)
+    app.session_state["perception_block"] = None
+    app = app.run()
+
+    conn = db.connect()
+    before = db.monthly_tts_characters(conn)
+    no_synthesis.clear()
+
+    start_a_block(app)
+    second = list(no_synthesis)
+
+    assert not set(first) & set(second), "a clip already on disk was bought again"
+    assert len(second) == len(set(second)), "the same clip was bought twice in one block"
+    charged = db.monthly_tts_characters(conn) - before
+    assert charged == sum(len(text) for text, _ in second)
+
+
+def test_a_repeated_block_plan_costs_nothing_at_all(run_app, no_synthesis) -> None:
+    """The exact-repeat case: the same stimuli asked for twice charge once."""
+    import perception_trainer
+    import tts
+
+    seed_flagged_history()
+    app = start_a_block(run_app())
+    block = app.session_state["perception_block"]["block"]
+
+    conn = db.connect()
+    before = db.monthly_tts_characters(conn)
+    no_synthesis.clear()
+
+    for text, voice in perception_trainer.stimuli(block):
+        assert tts.cached_audio(voice, text) is not None
+
+    assert no_synthesis == []
+    assert db.monthly_tts_characters(conn) == before
+
+
+def test_every_trial_is_stored_as_it_is_answered(run_app, no_synthesis) -> None:
+    seed_flagged_history()
+    app = start_a_block(run_app())
+    item = app.session_state["perception_block"]["block"].item
+
+    conn = db.connect()
+    assert db.trials_for(conn, item) == []
+    app = answer_every_trial(app)
+
+    trials = db.trials_for(conn, item)
+    assert len(trials) == utils.PERCEPTION_BLOCK_TRIALS
+    assert {row["alternatives"] for row in trials} == {2}
+    assert all(row["novel"] == 1 for row in trials), "a first block is entirely new"
+    assert len({row["voice"] for row in trials}) >= perception_trainer_min_voices()
+
+
+def perception_trainer_min_voices() -> int:
+    import perception_trainer
+
+    return perception_trainer.MIN_VOICES
+
+
+def test_an_abandoned_block_keeps_its_answers_but_earns_no_verdict(
+    run_app, no_synthesis
+) -> None:
+    """Store the evidence, not only the verdict — the two are separate questions."""
+    import practice_queue
+
+    seed_flagged_history()
+    app = start_a_block(run_app())
+    state = app.session_state["perception_block"]
+    item = state["block"].item
+    trial = state["block"].trials[0]
+    app = [b for b in app.button if b.label == trial.alternatives[0]][0].click().run()
+    app = [b for b in app.button if b.label == "Stop the block"][0].click().run()
+
+    conn = db.connect()
+    trials = [dict(row) for row in db.trials_for(conn, item)]
+    assert len(trials) == 1, "the answer given is kept"
+
+    summaries = practice_queue.summarise_blocks(trials)
+    assert not summaries[0].complete, "a part-finished block is not a claim"
+    row = [t for t in db.targets(conn) if t["item"] == item][0]
+    assert row["state"] == "active"
+
+
+def test_finishing_a_perfect_block_reports_it_against_the_chance_floor(
+    run_app, no_synthesis
+) -> None:
+    seed_flagged_history()
+    app = start_a_block(run_app())
+    state = app.session_state["perception_block"]
+    # Answer every trial correctly by driving the state directly, then render the summary.
+    state["answers"] = [True] * len(state["block"].trials)
+    state["index"] = len(state["block"].trials)
+    app = app.run()
+
+    assert app.metric[0].value == "100%"
+    captions = " ".join(c.value for c in app.caption)
+    assert "50% is what guessing scores" in captions, (
+        "an accuracy without its floor reports near-noise as progress"
+    )
+    assert "never heard before" in captions
+
+
+def test_a_block_at_the_chance_floor_says_it_proves_nothing(run_app, no_synthesis) -> None:
+    seed_flagged_history()
+    app = start_a_block(run_app())
+    state = app.session_state["perception_block"]
+    total = len(state["block"].trials)
+    state["answers"] = [True] * (total // 2) + [False] * (total - total // 2)
+    state["index"] = total
+    app = app.run()
+
+    warnings = " ".join(w.value for w in app.warning)
+    assert "what guessing looks like" in warnings

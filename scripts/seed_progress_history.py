@@ -37,6 +37,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import db  # noqa: E402
+import perception_trainer  # noqa: E402
+import practice_queue  # noqa: E402
 import progress_view  # noqa: E402
 import utils  # noqa: E402
 from utils import Mode  # noqa: E402
@@ -302,8 +304,67 @@ def seed(path: str, *, days: int, seed_value: int) -> int:
             )
             written += 1
 
+    seed_blocks(conn, rng, start)
+
     conn.close()
     return written
+
+
+# How the seeded listening history is shaped. A demo that starts at 95% would hide the one
+# thing the chart exists to show — the chance floor — because every point would sit far
+# above it. This starts a shade over a coin toss and climbs, which is what learning to hear
+# a contrast actually looks like.
+BLOCK_DAYS = (26, 22, 18, 14, 10, 6, 2)
+BLOCK_ACCURACY = (0.55, 0.60, 0.55, 0.70, 0.75, 0.85, 0.90)
+
+
+def seed_blocks(conn, rng: random.Random, start: datetime) -> None:
+    """Seed a promoted target and a run of listening blocks against it.
+
+    Without this the Today tab and the perception chart both render their empty states on a
+    database that is meant to show the app in use. The target is promoted the same way the
+    running app promotes one — out of `progress_view`'s aggregate over the attempts just
+    written — so the demo cannot show a target the seeded recordings do not support.
+    """
+    parsed = progress_view.parse_attempts(db.attempt_payloads(conn))
+    found = practice_queue.candidates(
+        progress_view.flagged_phonemes(parsed).to_dict("records"),
+        progress_view.weak_syllables(parsed).to_dict("records"),
+    )
+    trainable = [c for c in found if c.kind != practice_queue.STRESS]
+    if not trainable:
+        return
+
+    candidate = trainable[0]
+    target_id = db.upsert_target(
+        conn, item=candidate.item, kind=candidate.kind,
+        evidence={**candidate.evidence, "why": candidate.why},
+    )
+    expected = str(candidate.evidence["expected"])
+    produced = str(candidate.evidence["produced"])
+
+    for day, accuracy in zip(BLOCK_DAYS, BLOCK_ACCURACY):
+        when = (start - timedelta(days=day)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        heard = db.heard_stimuli(conn, candidate.item)
+        try:
+            block = perception_trainer.build_block(
+                item=candidate.item, expected=expected, produced=produced,
+                heard=heard, rng=rng,
+            )
+        except perception_trainer.BlockError:
+            return
+        right = round(accuracy * len(block.trials))
+        outcomes = [True] * right + [False] * (len(block.trials) - right)
+        rng.shuffle(outcomes)
+        block_id = f"seed-{day}"
+        for trial, correct in zip(block.trials, outcomes):
+            db.record_trial(
+                conn, block_id=block_id, target_id=target_id, item=candidate.item,
+                word=trial.word, voice=trial.voice, novel=trial.novel,
+                alternatives=len(trial.alternatives),
+                answered=trial.word if correct else trial.other,
+                correct=correct, created_at=when,
+            )
 
 
 def main() -> None:
