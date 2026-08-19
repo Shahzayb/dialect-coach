@@ -70,6 +70,7 @@ container start if present.
 | `MONTHLY_BUDGET_USD`, `AZURE_TIER_CONFIRMED_F0` | no | Budget guard |
 | `DB_PATH` | no | Local history file (default `./data/coach.db`) |
 | `OFFLINE_MODE` | no | Replay a committed fixture; no network calls at all |
+| `OFFLINE_FIXTURE` | dev | Which fixture `OFFLINE_MODE` replays. `synthetic_delivery_faults.json` is a hand-built payload carrying pausing and intonation faults, which neither captured recording does |
 
 See `.env.example` for the full annotated list.
 

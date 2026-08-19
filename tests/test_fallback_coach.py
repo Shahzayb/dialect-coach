@@ -46,7 +46,7 @@ def word(text: str, accuracy=None, error_type="None", phonemes=None, syllables=N
         "error_source": "azure",
         "delivery_error_types": delivery or [],
         "prosody_detail": {
-            "break_length": break_length, "monotone_confidence": monotone_confidence,
+            "break_length_ms": break_length, "monotone_confidence": monotone_confidence,
         },
         "syllables": syllables or [],
         "phonemes": phonemes or [],
@@ -79,7 +79,7 @@ def test_the_delivery_faults_travel_as_their_own_section() -> None:
     section = fc.compact(assessment(words), Mode.PARAGRAPH)["delivery_faults"]
     assert section == [{
         "fault": "Monotone", "words": ["thursday"],
-        "break_length_max": None, "break_length_mean": None,
+        "break_length_ms_max": None, "break_length_ms_mean": None,
         "monotone_confidence_mean": 0.82,
     }]
 
@@ -240,7 +240,7 @@ def test_every_delivery_fault_gets_its_own_drill_naming_the_span() -> None:
     paused, flat = drills
     assert paused.span == ["thursday"]
     assert "paused" in paused.what_happened.lower() and "thursday" in paused.what_happened
-    assert "BreakLength 900" in paused.what_happened
+    assert "900 ms" in paused.what_happened
     assert "thursday" in paused.drill
     assert flat.span == ["clouds"]
     assert "flat" in flat.what_happened.lower() and "clouds" in flat.what_happened

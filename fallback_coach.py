@@ -408,20 +408,20 @@ def _overall_comment(compacted: dict[str, Any], groups: list[dict[str, Any]]) ->
 
 
 def measurement_note(fault: dict[str, Any]) -> str:
-    """What Azure measured on this span, in Azure's own vocabulary.
+    """What Azure measured on this span, said in a way a learner can act on.
 
     Used by the coaching section and by the delivery panel further down the page, so the
     two can never quote different numbers for the same fault.
 
-    Deliberately unglossed. `BreakLength` has no unit anywhere in SDK 1.51.1 and every
-    value in the committed capture is 0, so "you paused for 480 ms" would be a fabricated
-    fact of exactly the kind `ai_coach.validated` exists to stop — and one written by us,
-    where there is no model to blame for it. A number under the name Azure gave it is
-    less satisfying and true.
+    A break is given in milliseconds — see `speech_analyzer._prosody_detail` for how that
+    unit was pinned down, since the SDK never states it. The pitch-delta confidence is
+    left as Azure's own 0-1 number under Azure's own name: it is a confidence, not a
+    quantity of anything, and glossing it as "how flat you were" would be inventing a
+    scale nobody published.
     """
-    longest = fault.get("break_length_max")
+    longest = fault.get("break_length_ms_max")
     if isinstance(longest, (int, float)) and longest:
-        return f" Azure measured BreakLength {longest:g} at the longest of them."
+        return f" The longest of them was about {longest:.0f} ms."
     pitch = fault.get("monotone_confidence_mean")
     if isinstance(pitch, (int, float)):
         return f" Azure's SyllablePitchDeltaConfidence across that span was {pitch:.2f}."

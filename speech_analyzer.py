@@ -37,6 +37,11 @@ LOCALE = "en-US"
 # produced /t/ where /θ/ was expected" rather than "your /θ/ scored 41".
 NBEST_PHONEME_COUNT = 5
 
+# Azure times everything in this payload in 100-ns ticks — Offset, Duration, and
+# Break.BreakLength with them. See `_prosody_detail` for how the last of those was pinned
+# down, since the SDK never names its unit.
+TICKS_PER_MS = 10_000
+
 FIXTURE_DIR = Path(__file__).resolve().parent / "tests" / "fixtures"
 FIXTURES: dict[Mode, str] = {
     Mode.DRILL: "sample_azure_response.json",
@@ -311,14 +316,32 @@ def _assess_continuous(
 
 
 def _load_fixture(mode: Mode) -> list[dict[str, Any]]:
-    """Replay a committed payload. The true zero-cost path — no network call at all."""
-    name = FIXTURES.get(mode) or FIXTURES[Mode.DRILL]
-    path = FIXTURE_DIR / name
+    """Replay a committed payload. The true zero-cost path — no network call at all.
+
+    `OFFLINE_FIXTURE` names a different file in `tests/fixtures/` to replay instead of the
+    per-mode default. A development setting, and the reason it exists is narrow: the
+    captured recordings came back clean on Break and Intonation, so without it there is no
+    way to see the delivery coaching in the running app at all — only in the test suite.
+
+    The name is resolved inside `FIXTURE_DIR` and refused if it escapes: this selects one
+    of the committed payloads, and it is not a way to point the app at an arbitrary file
+    on the machine.
+    """
+    override = (utils.get("OFFLINE_FIXTURE") or "").strip()
+    name = override or FIXTURES.get(mode) or FIXTURES[Mode.DRILL]
+    path = (FIXTURE_DIR / name).resolve()
+    if not path.is_relative_to(FIXTURE_DIR.resolve()):
+        raise AssessmentError(
+            f"OFFLINE_FIXTURE={name!r} points outside {FIXTURE_DIR.name}/. Name one of the "
+            f"committed fixtures, not a path."
+        )
     if not path.exists():
         raise AssessmentError(
             f"OFFLINE_MODE is on but the fixture {path.name} is missing, so there is "
             f"nothing to replay."
         )
+    if override:
+        logger.info("OFFLINE_FIXTURE: replaying %s instead of the %s default", name, mode.value)
     data = json.loads(path.read_text(encoding="utf-8"))
     return data if isinstance(data, list) else [data]
 
@@ -435,16 +458,21 @@ def _prosody_detail(word: dict[str, Any]) -> dict[str, float | None]:
     `_delivery_error_types` above says *which* fault; this says what was measured where it
     happened: `Break.BreakLength`, and `Intonation.Monotone.SyllablePitchDeltaConfidence`.
 
-    Kept even when the word carries no fault, because Azure sends them regardless — the
-    committed fixture reports a pitch-delta confidence of 0.178 on words whose
-    `Intonation.ErrorTypes` is empty. Filtering that down to the words that were actually
-    flagged is `delivery_faults`' job, not the parser's.
+    Kept even when the word carries no fault, because Azure sends them regardless. The
+    committed capture reports a break length of 200 ms on "thursday" with
+    `Break.ErrorTypes: ["None"]` — an ordinary pause at a sentence boundary — and the same
+    pitch-delta confidence on every word in the recording. Filtering those down to the
+    words actually flagged is `delivery_faults`' job, not the parser's.
 
-    **No unit is asserted for `break_length`.** Every value in the committed fixture is 0,
-    and the installed SDK 1.51.1 does not mention the field at all — not in its Python
-    layer and not in the strings of its native libraries (checked, not assumed). So the
-    number is carried and shown under Azure's own field name and nothing here claims it is
-    milliseconds or ticks.
+    **`BreakLength` is in 100-ns ticks**, and is converted here. SDK 1.51.1 never mentions
+    the field — not in its Python layer, not in the strings of its native libraries
+    (checked, not assumed) — so the unit is derived from the committed payload instead:
+    the values are 0, 200000 and 2000000, in a response whose `Offset` and `Duration` are
+    ticks and whose utterance is 9.79 s long. Read as milliseconds the largest would be a
+    2000-second pause inside a ten-second recording; read as ticks it is 200 ms, and the
+    same divisor gives the word durations their sane 0.27-0.41 s. Ticks is the only
+    self-consistent reading, so the value is exposed as milliseconds and can be said out
+    loud to a learner.
     """
     scores = _scores(word)
     prosody = ((scores.get("Feedback") or word.get("Feedback") or {}).get("Prosody") or {})
@@ -452,7 +480,9 @@ def _prosody_detail(word: dict[str, Any]) -> dict[str, float | None]:
     monotone = ((prosody.get("Intonation") or {}).get("Monotone") or {})
     confidence = monotone.get("SyllablePitchDeltaConfidence")
     return {
-        "break_length": float(break_length) if isinstance(break_length, (int, float)) else None,
+        "break_length_ms": (
+            float(break_length) / TICKS_PER_MS if isinstance(break_length, (int, float)) else None
+        ),
         "monotone_confidence": float(confidence) if isinstance(confidence, (int, float)) else None,
     }
 
@@ -561,7 +591,7 @@ def _omission(word: str) -> dict[str, Any]:
         "delivery_error_types": [],
         # Present and empty rather than absent: every normalised word has the key, so no
         # consumer needs a guard for one construction path and not the other.
-        "prosody_detail": {"break_length": None, "monotone_confidence": None},
+        "prosody_detail": {"break_length_ms": None, "monotone_confidence": None},
         "syllables": [],
         "phonemes": [],
     }
@@ -797,20 +827,20 @@ def delivery_faults(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
     faults: list[dict[str, Any]] = []
     for fault, span in summary.items():
         detail = [(w.get("prosody_detail") or {}) for w in carriers.get(fault, [])]
-        breaks = [d["break_length"] for d in detail if d.get("break_length") is not None]
+        breaks = [d["break_length_ms"] for d in detail if d.get("break_length_ms") is not None]
         pitches = [
             d["monotone_confidence"] for d in detail if d.get("monotone_confidence") is not None
         ]
         entry: dict[str, Any] = {
             "fault": fault,
             "words": span,
-            "break_length_max": None,
-            "break_length_mean": None,
+            "break_length_ms_max": None,
+            "break_length_ms_mean": None,
             "monotone_confidence_mean": None,
         }
         if fault in _BREAK_FAULTS and breaks:
-            entry["break_length_max"] = round(max(breaks), 1)
-            entry["break_length_mean"] = round(_mean(breaks), 1)
+            entry["break_length_ms_max"] = round(max(breaks), 1)
+            entry["break_length_ms_mean"] = round(_mean(breaks), 1)
         if fault == "Monotone" and pitches:
             entry["monotone_confidence_mean"] = round(_mean(pitches), 3)
         faults.append(entry)

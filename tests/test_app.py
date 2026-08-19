@@ -463,7 +463,7 @@ def test_a_monotone_span_produces_a_drill_that_names_it_offline(run_app) -> None
     assessment.words.append({
         "word": "clouds", "accuracy": 96.0, "error_type": "None",
         "error_source": "azure", "delivery_error_types": ["Monotone"],
-        "prosody_detail": {"break_length": None, "monotone_confidence": 0.88},
+        "prosody_detail": {"break_length_ms": None, "monotone_confidence": 0.88},
         "syllables": [], "phonemes": [],
     })
 
@@ -485,7 +485,7 @@ def test_the_delivery_panel_shows_what_azure_measured(run_app) -> None:
     assessment.words.append({
         "word": "clouds", "accuracy": 96.0, "error_type": "None",
         "error_source": "azure", "delivery_error_types": ["Monotone"],
-        "prosody_detail": {"break_length": None, "monotone_confidence": 0.88},
+        "prosody_detail": {"break_length_ms": None, "monotone_confidence": 0.88},
         "syllables": [], "phonemes": [],
     })
 

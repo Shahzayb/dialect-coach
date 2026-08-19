@@ -133,13 +133,13 @@ def flat_attempt() -> sa.Assessment:
             {
                 "word": "thursday", "accuracy": 34.0, "error_type": "Mispronunciation",
                 "error_source": "azure", "delivery_error_types": [],
-                "prosody_detail": {"break_length": None, "monotone_confidence": 0.2},
+                "prosody_detail": {"break_length_ms": None, "monotone_confidence": 0.2},
                 "syllables": [], "phonemes": [phoneme("θ", 41.0, ("s", 100.0))],
             },
             {
                 "word": "clouds", "accuracy": 96.0, "error_type": "None",
                 "error_source": "azure", "delivery_error_types": ["Monotone"],
-                "prosody_detail": {"break_length": None, "monotone_confidence": 0.88},
+                "prosody_detail": {"break_length_ms": None, "monotone_confidence": 0.88},
                 "syllables": [], "phonemes": [],
             },
         ],

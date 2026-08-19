@@ -242,7 +242,7 @@ def word(text: str, accuracy=None, error_type="None", error_source="azure",
         "error_source": error_source,
         "delivery_error_types": delivery or [],
         "prosody_detail": {
-            "break_length": break_length, "monotone_confidence": monotone_confidence,
+            "break_length_ms": break_length, "monotone_confidence": monotone_confidence,
         },
         "syllables": syllables or [],
         "phonemes": phonemes or [],
@@ -314,17 +314,27 @@ def test_a_clean_attempt_has_no_delivery_entries() -> None:
 def test_the_prosody_measurements_are_read_off_the_captured_payload(
     drill_payload: dict, reference: str
 ) -> None:
-    """Proven, not constructed: these two numbers are in the committed capture.
+    """Proven, not constructed: every number here is in the committed capture.
 
-    Every `BreakLength` in it is 0 and every `SyllablePitchDeltaConfidence` is 0.17783079,
-    on words Azure flagged with nothing. That is the whole reason the parser keeps the
-    values regardless of whether a fault was reported, and the reason no unit is claimed
-    for the break length anywhere.
+    "thursday" carries a 200 ms break with `Break.ErrorTypes: ["None"]` — Azure reports
+    the measurement whether or not it thinks the pause was a fault, which is why the
+    parser keeps it unconditionally and the aggregate filters. The pitch-delta confidence
+    is the same 0.17783079 on every word of the recording.
+
+    The 200 ms also pins the unit: the raw value is 2000000 in a 9.79-second utterance, so
+    milliseconds would make it a 2000-second pause. See `_prosody_detail`.
     """
     _, _, words = sa.normalise([drill_payload], reference, Mode.DRILL)
-    detail = words[1]["prosody_detail"]
-    assert detail["break_length"] == 0.0
-    assert detail["monotone_confidence"] == pytest.approx(0.17783079)
+
+    clean = words[1]                                            # "weather"
+    assert clean["prosody_detail"]["break_length_ms"] == 0.0
+    assert clean["prosody_detail"]["monotone_confidence"] == pytest.approx(0.17783079)
+
+    paused = next(w for w in words if w["word"] == "thursday")
+    assert paused["prosody_detail"]["break_length_ms"] == pytest.approx(200.0)
+    assert paused["delivery_error_types"] == [], (
+        "a measured pause Azure did not flag is not a delivery fault"
+    )
     assert all(w["delivery_error_types"] == [] for w in words), (
         "the capture is clean on Break and Intonation — if this fails the fixture changed"
     )
@@ -345,13 +355,13 @@ def test_a_word_with_no_feedback_block_measures_nothing(reference: str) -> None:
         }],
     }
     _, _, words = sa.normalise([payload], reference, Mode.DRILL)
-    assert words[0]["prosody_detail"] == {"break_length": None, "monotone_confidence": None}
+    assert words[0]["prosody_detail"] == {"break_length_ms": None, "monotone_confidence": None}
 
 
 def test_an_omitted_word_carries_the_key_with_nothing_in_it(reference: str) -> None:
     """It was never spoken, so there is nothing to measure — but the key is still there."""
     omitted = sa._omission("thursday")
-    assert omitted["prosody_detail"] == {"break_length": None, "monotone_confidence": None}
+    assert omitted["prosody_detail"] == {"break_length_ms": None, "monotone_confidence": None}
 
 
 def test_delivery_faults_carry_the_span_and_its_measurements() -> None:
@@ -366,14 +376,14 @@ def test_delivery_faults_carry_the_span_and_its_measurements() -> None:
     assert [f["fault"] for f in faults] == ["UnexpectedBreak", "Monotone"]
     unexpected, monotone = faults
     assert unexpected["words"] == ["the", "weather"]
-    assert unexpected["break_length_max"] == 1200.0
-    assert unexpected["break_length_mean"] == 1000.0
+    assert unexpected["break_length_ms_max"] == 1200.0
+    assert unexpected["break_length_ms_mean"] == 1000.0
     assert unexpected["monotone_confidence_mean"] is None, (
         "BreakLength is reported on the Break block; a pitch number there would be noise"
     )
     assert monotone["words"] == ["today"]
     assert monotone["monotone_confidence_mean"] == 0.9
-    assert monotone["break_length_max"] is None
+    assert monotone["break_length_ms_max"] is None
 
 
 def test_the_monotone_average_ignores_words_that_were_not_flagged() -> None:
@@ -406,6 +416,46 @@ def test_delivery_faults_are_ordered_by_span_then_by_precedence() -> None:
 
 def test_a_clean_attempt_reports_no_delivery_faults() -> None:
     assert sa.delivery_faults([word("the", 99.0, monotone_confidence=0.2)]) == []
+
+
+# --- Choosing which payload is replayed ------------------------------------------------------
+
+
+def test_offline_fixture_selects_the_named_payload(monkeypatch, reference: str) -> None:
+    """The committed captures carry no delivery fault, so without this the running app
+    has no way to show the delivery coaching at all — only the test suite does."""
+    monkeypatch.setenv("OFFLINE_FIXTURE", "synthetic_delivery_faults.json")
+    payloads = sa._load_fixture(Mode.DRILL)
+
+    _, _, words = sa.normalise(payloads, reference, Mode.DRILL)
+    faults = {f["fault"] for f in sa.delivery_faults(words)}
+    assert faults == {"UnexpectedBreak", "MissingBreak", "Monotone"}
+
+
+def test_the_synthetic_payload_says_in_itself_that_it_is_not_a_capture(fixtures_dir) -> None:
+    """Everything else in that directory is verbatim Azure. This one must never be read as
+    evidence of what Azure returns."""
+    payload = json.loads((fixtures_dir / "synthetic_delivery_faults.json").read_text())
+    assert "HAND-BUILT" in payload["_synthetic"]
+
+
+def test_an_empty_offline_fixture_falls_back_to_the_default(monkeypatch) -> None:
+    monkeypatch.setenv("OFFLINE_FIXTURE", "   ")
+    assert sa._load_fixture(Mode.DRILL) == sa._load_fixture(Mode.DRILL)
+
+
+@pytest.mark.parametrize("name", ["../../app.py", "/etc/passwd", "nested/../../secrets.json"])
+def test_a_fixture_name_pointing_outside_the_directory_is_refused(monkeypatch, name) -> None:
+    """This setting picks one of the committed payloads. It is not a file-read primitive."""
+    monkeypatch.setenv("OFFLINE_FIXTURE", name)
+    with pytest.raises(sa.AssessmentError, match="outside"):
+        sa._load_fixture(Mode.DRILL)
+
+
+def test_a_named_fixture_that_is_not_there_says_so(monkeypatch) -> None:
+    monkeypatch.setenv("OFFLINE_FIXTURE", "no_such_capture.json")
+    with pytest.raises(sa.AssessmentError, match="missing"):
+        sa._load_fixture(Mode.DRILL)
 
 
 def test_mispronounced_words_reads_the_errortype_not_the_accuracy() -> None:
