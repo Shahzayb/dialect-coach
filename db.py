@@ -230,3 +230,51 @@ def recent_attempts(conn: sqlite3.Connection, limit: int = 10) -> Sequence[sqlit
 def get_attempt(conn: sqlite3.Connection, attempt_id: int) -> sqlite3.Row | None:
     """One full attempt row, raw JSON columns included."""
     return conn.execute("SELECT * FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
+
+
+# --- Readers for the progress view ----------------------------------------------------------
+# Both exclude `offline = 1` deliberately. An OFFLINE_MODE run replays the same committed
+# fixture every time, so its scores are a constant; thirty identical points is not a
+# trajectory, and the words it flags are the fixture's, not the speaker's.
+#
+# Both also order by `created_at`, not by `id` as `recent_attempts` does. A time series has
+# to be ordered by its timestamp — `record_attempt` accepts an explicit `created_at`, so id
+# order and chronological order are not the same thing. `idx_attempts_created_at` backs it.
+
+
+def attempt_series(conn: sqlite3.Connection) -> Sequence[sqlite3.Row]:
+    """Every real attempt, oldest first, without the raw JSON. The progress chart's input."""
+    return conn.execute(
+        """
+        SELECT id, created_at, mode, reference_text, recognised_text, audio_seconds,
+               pron_score, accuracy, fluency, completeness, prosody, coach_source, offline
+        FROM attempts WHERE offline = 0 ORDER BY created_at, id
+        """
+    ).fetchall()
+
+
+def attempt_payloads(conn: sqlite3.Connection) -> Sequence[sqlite3.Row]:
+    """Every real attempt with its verbatim Azure payload, oldest first.
+
+    Separate from `attempt_series` because these blobs are 45-170 kB each: the score chart
+    never needs them, and only the phoneme/word aggregation pays for reading them.
+    """
+    return conn.execute(
+        """
+        SELECT id, created_at, mode, reference_text, azure_raw_json
+        FROM attempts WHERE offline = 0 ORDER BY created_at, id
+        """
+    ).fetchall()
+
+
+def attempt_fingerprint(conn: sqlite3.Connection) -> tuple[int, int]:
+    """(highest attempt id, row count) — a cheap cache key for the re-parsed aggregates.
+
+    Re-parsing every stored payload on every Streamlit rerun is not affordable, and both tab
+    bodies render on each of the 0.4 s poll reruns during an assessment. This is what
+    `app.py` keys its `@st.cache_data` on: it changes exactly when a new attempt lands.
+    """
+    row = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) AS top, COUNT(*) AS total FROM attempts WHERE offline = 0"
+    ).fetchone()
+    return int(row["top"]), int(row["total"])

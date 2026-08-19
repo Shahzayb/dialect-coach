@@ -19,6 +19,14 @@ pydub==0.25.1
 # Local .env loading; on Hugging Face secrets arrive as environment variables instead.
 python-dotenv==1.2.3
 
+# The progress view's frames and chart specs. Both arrive transitively with streamlit, but
+# `progress_view.py` imports them directly, and a direct import deserves its own pin rather
+# than relying on whatever streamlit happens to resolve next month. Versions read out of the
+# built image on 2026-08-19, not recalled. `numpy` is deliberately NOT pinned: nothing
+# imports it directly, so it stays streamlit's and pandas' business.
+pandas==3.0.5
+altair==6.2.2
+
 # Structured-output schemas for the coaching model.
 pydantic==2.13.4
 
