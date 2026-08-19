@@ -40,6 +40,7 @@ import phoneme_reference
 import practice_queue
 import progress_view
 import rhythm
+import shadowing
 import speech_analyzer
 import tts
 import utils
@@ -256,6 +257,11 @@ class AssessJob:
     key: str
     reference_text: str
     mode: Mode
+    # How this recording was produced, when it was produced in some way other than reading
+    # the text cold. Carried on the job rather than looked up afterwards: once the row is
+    # written, a shadowed read is indistinguishable from a cold one, and an untagged one
+    # lands on the trajectory the tag exists to keep it off.
+    tags: tuple[str, ...] = ()
     thread: threading.Thread | None = None
     outcome: AssessOutcome | None = None
 
@@ -692,6 +698,7 @@ def run_assessment_job(
     reference_text: str,
     mode: Mode,
     cancel_event: threading.Event,
+    tags: tuple[str, ...] = (),
 ) -> AssessOutcome:
     """Assess and store, off the script thread. Renders nothing, raises nothing.
 
@@ -725,6 +732,8 @@ def run_assessment_job(
             return AssessOutcome(cancelled=True, reached_azure=reached_azure)
 
         with _DB_LOCK:
+            # The tag is written under the same lock as the row it describes, so no reader can
+            # ever see a stored attempt whose provenance has not landed yet.
             attempt_id = db.record_attempt(
                 conn,
                 mode=mode,
@@ -738,6 +747,8 @@ def run_assessment_job(
                 azure_raw=assessment.raw if len(assessment.raw) > 1 else assessment.raw[0],
                 offline=assessment.offline,
             )
+            for tag in tags:
+                db.tag_attempt(conn, attempt_id, tag)
         return AssessOutcome(assessment=assessment, attempt_id=attempt_id)
 
     except speech_analyzer.Cancelled as exc:
@@ -762,18 +773,19 @@ def run_assessment_job(
 
 def start_assessment(
     conn: sqlite3.Connection, wav_bytes: bytes, seconds: float,
-    reference_text: str, mode: Mode, key: str,
+    reference_text: str, mode: Mode, key: str, tags: tuple[str, ...] = (),
 ) -> None:
     """Spawn the worker for one assessment and remember it for the poll loop."""
     cancel_event = threading.Event()
     job = AssessJob(
         cancel_event=cancel_event, key=key, reference_text=reference_text, mode=mode,
+        tags=tags,
     )
 
     def work() -> None:
         # Written once, before the thread ends, so the poll loop never reads a half-set job.
         job.outcome = run_assessment_job(
-            conn, wav_bytes, seconds, reference_text, mode, cancel_event
+            conn, wav_bytes, seconds, reference_text, mode, cancel_event, tags
         )
 
     job.thread = threading.Thread(target=work, name="assessment", daemon=True)
@@ -1433,6 +1445,7 @@ def render_progress(conn: sqlite3.Connection) -> None:
     )
 
     render_rhythm_history(parsed)
+    render_shadow_comparison(conn, rows)
     render_perception_history(conn)
 
 
@@ -1595,9 +1608,15 @@ def render_target_card(conn: sqlite3.Connection, target: dict[str, Any],
     evidence = practice_queue.evidence_of(target)
     label = practice_queue.KIND_LABELS.get(kind, kind)
 
-    with _DB_LOCK:
-        trials = [dict(row) for row in db.trials_for(conn, str(target["item"]))]
-    summaries = practice_queue.summarise_blocks(trials)
+    # A shadowing passage has no perception trials and never will, so it does not go looking
+    # for any — an empty summary would render "No block answered yet" under an item that has
+    # no blocks to answer.
+    if kind == practice_queue.SHADOW:
+        summaries: list[Any] = []
+    else:
+        with _DB_LOCK:
+            trials = [dict(row) for row in db.trials_for(conn, str(target["item"]))]
+        summaries = practice_queue.summarise_blocks(trials)
 
     if kind == practice_queue.STRESS:
         decision = practice_queue.grade(
@@ -1611,7 +1630,7 @@ def render_target_card(conn: sqlite3.Connection, target: dict[str, Any],
         header += " · ✅ graduated"
     st.markdown(header)
 
-    if kind != practice_queue.STRESS:
+    if kind not in (practice_queue.STRESS, practice_queue.SHADOW):
         st.caption(_accuracy_line(summaries))
 
     with st.expander("Why is this here, and what takes it off?"):
@@ -1659,12 +1678,22 @@ def apply_decisions(conn: sqlite3.Connection, targets: list[dict[str, Any]],
         logger.info("Target %s → %s", target["item"], decision.state)
 
 
-def render_today(conn: sqlite3.Connection) -> None:
-    """The Today tab: the one due thing, then the target set and its rules."""
+def render_today(conn: sqlite3.Connection, job: "AssessJob | None" = None,
+                 running: bool = False) -> None:
+    """The Today tab: the one due thing, then the target set and its rules.
+
+    Takes the assessment job because shadowing assesses from this surface — it is the same
+    single job the Practice tab drives, not a second one, so only one assessment can ever be
+    in flight whichever tab started it.
+    """
     st.subheader("Today")
 
     if st.session_state.get(BLOCK_KEY):
         render_block(conn)
+        return
+
+    if st.session_state.get(SHADOW_KEY):
+        render_shadow(conn, job, running)
         return
 
     targets = sync_queue(conn)
@@ -1693,10 +1722,20 @@ def render_today(conn: sqlite3.Connection) -> None:
                 f"**Practice** tab.",
                 icon="🌱",
             )
+        # Shadowing is offered even here. It is the one practice on this page that needs no
+        # history at all: it trains rhythm and intonation against a model rather than a sound
+        # your own recordings flagged, so there is nothing for it to wait for.
+        st.divider()
+        render_shadow_offer(conn, targets, now=now)
         return
 
     ready = practice_queue.due(targets, now=now)
-    trainable = [t for t in ready if str(t["kind"]) != practice_queue.STRESS]
+    # Split by kind rather than by "not stress": a shadowing passage is also not stress, and
+    # handing one to `start_block` would look for a substitution it does not have.
+    trainable = [
+        t for t in ready
+        if practice_queue.promotable(str(t["kind"])) and str(t["kind"]) != practice_queue.STRESS
+    ]
     drills = [t for t in ready if str(t["kind"]) == practice_queue.STRESS]
 
     if trainable:
@@ -1732,8 +1771,15 @@ def render_today(conn: sqlite3.Connection) -> None:
         )
 
     st.divider()
-    active = [t for t in targets if str(t["state"]) == practice_queue.ACTIVE]
-    graduated = [t for t in targets if str(t["state"]) == practice_queue.GRADUATED]
+    render_shadow_offer(conn, targets, now=now)
+
+    st.divider()
+    # Shadowing is excluded from both lists on purpose. It is not one of the three slots — it
+    # is never promoted into one and never graduates out of one — so counting it against
+    # MAX_ACTIVE_TARGETS would retire a sound the recordings are still flagging.
+    promoted = [t for t in targets if practice_queue.promotable(str(t["kind"]))]
+    active = [t for t in promoted if str(t["state"]) == practice_queue.ACTIVE]
+    graduated = [t for t in promoted if str(t["state"]) == practice_queue.GRADUATED]
 
     st.markdown(f"#### Working on ({len(active)} of {utils.MAX_ACTIVE_TARGETS})")
     st.caption(
@@ -1755,6 +1801,57 @@ def render_today(conn: sqlite3.Connection) -> None:
         )
         for target in graduated:
             render_target_card(conn, target, still_flagged)
+
+
+def render_shadow_offer(conn: sqlite3.Connection, targets: list[dict[str, Any]], *,
+                        now: datetime) -> None:
+    """The shadowing section of Today: what is due, or the offer if nothing is on the list yet.
+
+    Its own section rather than a fourth entry in the due list. Shadowing is a different kind
+    of practice from a listening block — it needs no flagged history to exist, and it never
+    graduates — so burying it behind whichever contrast happens to be due would hide the one
+    thing here that is available on day one.
+    """
+    passages = shadow_passages()
+    existing = {
+        str(t["item"]): t for t in targets
+        if str(t["kind"]) == practice_queue.SHADOW
+    }
+    ready = [
+        t for t in practice_queue.due(list(existing.values()), now=now)
+    ]
+
+    st.markdown("#### Shadowing")
+    if ready:
+        target = ready[0]
+        title = str(target["item"])
+        st.markdown(f"**Due: {title}**")
+    elif existing:
+        target = min(existing.values(), key=lambda row: str(row.get("next_due") or ""))
+        title = str(target["item"])
+        when = str(target.get("next_due") or "")[:10]
+        st.markdown(f"**{title}** — next due {when or 'unscheduled'}.")
+        st.caption(
+            f"Nothing stops you doing it sooner. The {utils.SHADOW_INTERVAL_DAYS}-day gap is "
+            f"there to leave room for cold reads in between, since a shadowed read with "
+            f"nothing to compare it against says nothing."
+        )
+    else:
+        title = next(iter(passages))
+        st.caption(
+            "Speak along with a native rendering of a passage instead of reading it and "
+            "being marked afterwards. Rhythm, linking and intonation are not learned from a "
+            "score. Nothing is scored while you shadow."
+        )
+
+    chosen = st.selectbox(
+        "Passage", list(passages),
+        index=list(passages).index(title) if title in passages else 0,
+        key="shadow-passage",
+    )
+    if st.button("🎧 Shadow this passage", type="primary", key="shadow-start"):
+        start_shadow(chosen, passages[chosen])
+        st.rerun()
 
 
 def render_stress_drill(conn: sqlite3.Connection, target: dict[str, Any]) -> None:
@@ -1833,6 +1930,51 @@ def start_block(conn: sqlite3.Connection, target: dict[str, Any], *, review: boo
     st.rerun()
 
 
+def synthesise_clip(
+    conn: sqlite3.Connection, text: str, *, voice: str, slow: bool = False,
+) -> tuple[bytes | None, tuple[str, str] | None]:
+    """Buy one clip from Azure, meter it, and put it on disk. Returns (audio, failure).
+
+    Extracted so the perception block and the shadowing model read the meter identically —
+    two callers charging by two slightly different rules is how a spend guard stops being
+    one. It renders nothing, for the reason `play()` returns its failures rather than showing
+    them: every call site is inside a narrow column or a progress loop.
+
+    The **pre-flight belongs to the caller**, not here: both callers buy a batch and have to
+    price the whole batch before the first call, or the guard would approve a run whose real
+    charge lands past the budget partway through.
+    """
+    attempts_made = 0
+
+    def note_attempt(attempt: int) -> None:
+        nonlocal attempts_made
+        attempts_made = attempt
+
+    payload_characters = len(tts.payload_for(text, slow=slow, voice=voice))
+    try:
+        result = tts.synthesise(text, voice=voice, slow=slow, on_attempt=note_attempt)
+    except utils.ConfigError as exc:
+        return None, ("🔑", str(exc))
+    except (utils.PermanentError, utils.TransientError, tts.SynthesisError,
+            speech_analyzer.AssessmentError) as exc:
+        if speech_analyzer.is_quota_exhausted(exc):
+            budget.mark_quota_exhausted()
+        if attempts_made:
+            # Reached Azure and failed: the text was still sent and may be charged.
+            db.record_tts_usage(
+                conn, characters=payload_characters * attempts_made, voice=voice
+            )
+        logger.error("Synthesis failed on %r in %s", text[:40], voice, exc_info=True)
+        return None, ("🔇", utils.redact(str(exc)))
+
+    db.record_tts_usage(
+        conn, characters=result.characters * max(result.attempts, 1), voice=result.voice,
+    )
+    tts.store_audio(voice, text, result.audio,
+                    rate=tts.SLOW_RATE if slow else tts.NORMAL_RATE)
+    return result.audio, None
+
+
 def buy_block_audio(
     conn: sqlite3.Connection, block: Any
 ) -> tuple[dict[tuple[str, str], bytes], tuple[str, str] | None]:
@@ -1869,33 +2011,11 @@ def buy_block_audio(
 
     progress = st.progress(0.0, text=f"Preparing {len(missing)} clips…")
     for done, (text, voice) in enumerate(missing, start=1):
-        attempts_made = 0
-
-        def note_attempt(attempt: int) -> None:
-            nonlocal attempts_made
-            attempts_made = attempt
-
-        try:
-            result = tts.synthesise(text, voice=voice, on_attempt=note_attempt)
-        except utils.ConfigError as exc:
+        clip, failure = synthesise_clip(conn, text, voice=voice)
+        if clip is None:
             progress.empty()
-            return audio, ("🔑", str(exc))
-        except (utils.PermanentError, utils.TransientError, tts.SynthesisError,
-                speech_analyzer.AssessmentError) as exc:
-            if speech_analyzer.is_quota_exhausted(exc):
-                budget.mark_quota_exhausted()
-            if attempts_made:
-                # Reached Azure and failed: the text was still sent and may be charged.
-                db.record_tts_usage(conn, characters=len(text) * attempts_made, voice=voice)
-            progress.empty()
-            logger.error("Block synthesis failed on %r in %s", text, voice, exc_info=True)
-            return audio, ("🔇", utils.redact(str(exc)))
-
-        db.record_tts_usage(
-            conn, characters=result.characters * max(result.attempts, 1), voice=result.voice,
-        )
-        tts.store_audio(voice, text, result.audio)
-        audio[(text, voice)] = result.audio
+            return audio, failure
+        audio[(text, voice)] = clip
         progress.progress(done / len(missing), text=f"Preparing {len(missing)} clips…")
 
     progress.empty()
@@ -2059,6 +2179,312 @@ def finish_block(conn: sqlite3.Connection) -> None:
         st.rerun()
 
 
+# --- Shadowing --------------------------------------------------------------------------------
+# The one surface in this app where practice happens WHILE speaking rather than afterwards.
+# Nothing here scores anything: no meter, no per-phrase feedback, no accuracy read-out. When
+# a speak-along read is finished it goes through the ordinary Mode B path and is rendered by
+# the ordinary `render_result`; the shadowed-versus-cold comparison lives on the Progress tab,
+# where every other measurement lives. See `shadowing.py` for why only one of the two modes is
+# ever assessed.
+
+SHADOW_KEY = "shadow_session"
+
+
+def shadow_passages() -> dict[str, str]:
+    """What can be shadowed: the paragraph presets, benchmark first.
+
+    Not a second list. `PRESETS[Mode.PARAGRAPH]` already holds exactly these, and a passage
+    that differed from the one the Practice tab offers by a single word would silently pair
+    against nothing — the comparison matches a shadowed read to a cold one by normalised text.
+    """
+    return PRESETS[Mode.PARAGRAPH]
+
+
+def start_shadow(title: str, passage: str) -> None:
+    """Open a shadowing session in place, the way a listening block opens in place.
+
+    Streamlit exposes no way to select a tab programmatically, so a "go to the Shadow tab"
+    button cannot exist. Rendering the session inside Today instead is the pattern the
+    perception block already established.
+    """
+    st.session_state[SHADOW_KEY] = {
+        "title": title,
+        "passage": passage,
+        "mode": shadowing.SIMULTANEOUS,
+        "slow": False,
+        "audio": {},
+        "key": None,
+    }
+
+
+def record_shadow_session(
+    conn: sqlite3.Connection, title: str, passage: str, *, now: datetime
+) -> None:
+    """Put this passage on the queue and push its next due date out. Once per finished read.
+
+    The target is created **on first use, never by `promote()`**, and "use" means a read that
+    was actually assessed rather than a session that was opened and abandoned. The brief's
+    rule that the queue never invents a target is about claims made from the user's own
+    flagged history — a standing practice makes no such claim, so it does not belong in
+    promotion, and `practice_queue` keeps `SHADOW` out of `KIND_ORDER` for the same reason.
+    """
+    session = shadowing.Session(
+        title=title, passage=passage, mode=shadowing.SIMULTANEOUS, slow=False,
+    )
+    with _DB_LOCK:
+        target_id = db.upsert_target(
+            conn, item=title, kind=practice_queue.SHADOW,
+            evidence=shadowing.evidence_for(session),
+        )
+        db.update_target(
+            conn, target_id,
+            last_seen=db.utc_now_iso(),
+            next_due=practice_queue.next_due(
+                practice_queue.Decision(practice_queue.ACTIVE, ""),
+                now=now, kind=practice_queue.SHADOW,
+            ),
+        )
+    logger.info("Shadowing session recorded for %r", title)
+
+
+def buy_shadow_audio(
+    conn: sqlite3.Connection, passage: str, *, mode: str, slow: bool
+) -> tuple[bytes | None, tuple[str, str] | None]:
+    """Fetch the model audio for one shadowing session. Returns (audio, failure).
+
+    Same ordering rule the block buyer and `play()` both depend on: **the disk cache is
+    checked before the pre-flight and before the meter**, because Streamlit re-runs this
+    script on every interaction and pricing ahead of the cache lookup would climb the meter
+    while nothing was synthesised.
+
+    Simultaneous mode buys one clip of the whole passage. Echo mode buys one clip per phrase
+    and stitches them with `audio_utils.echo_track`; the phrase clips are cached individually,
+    the stitched track is not, because it is derived and cheap to rebuild from them.
+    """
+    voice = tts.voice_name()
+    rate = tts.SLOW_RATE if slow else tts.NORMAL_RATE
+    texts = [passage] if mode == shadowing.SIMULTANEOUS else shadowing.phrases(passage)
+    if not texts:
+        return None, ("🧩", "There is nothing in this passage to synthesise.")
+
+    clips: list[bytes | None] = [tts.cached_audio(voice, text, rate) for text in texts]
+    missing = [text for text, clip in zip(texts, clips) if clip is None]
+
+    if missing:
+        characters = sum(
+            len(tts.payload_for(text, slow=slow, voice=voice)) for text in missing
+        )
+        try:
+            budget.preflight_tts(conn, characters * utils.MAX_SYNTHESIS_ATTEMPTS)
+        except budget.BudgetError as exc:
+            return None, ("💸", str(exc))
+
+        progress = st.progress(0.0, text=f"Preparing {len(missing)} clip(s)…")
+        done = 0
+        for index, text in enumerate(texts):
+            if clips[index] is not None:
+                continue
+            clip, failure = synthesise_clip(conn, text, voice=voice, slow=slow)
+            if clip is None:
+                progress.empty()
+                return None, failure
+            clips[index] = clip
+            done += 1
+            progress.progress(done / len(missing),
+                              text=f"Preparing {len(missing)} clip(s)…")
+        progress.empty()
+        logger.info("Shadow audio: %d clip(s) synthesised, %d from the disk cache",
+                    len(missing), len(texts) - len(missing))
+    else:
+        logger.info("Shadow audio served entirely from the disk cache; nothing charged.")
+
+    ready = [clip for clip in clips if clip is not None]
+    if mode == shadowing.SIMULTANEOUS:
+        return ready[0], None
+    try:
+        return audio_utils.echo_track(ready, tail_ms=shadowing.ECHO_TAIL_MS), None
+    except audio_utils.AudioError as exc:
+        return None, ("🔇", str(exc))
+
+
+def render_shadow(conn: sqlite3.Connection, job: "AssessJob | None", running: bool) -> None:
+    """One shadowing session, rendered in place inside Today."""
+    state = st.session_state[SHADOW_KEY]
+    passage = str(state["passage"])
+
+    st.markdown(f"### Shadowing: {state['title']}")
+    st.caption(shadowing.NOT_A_MEASUREMENT)
+    st.warning(shadowing.HEADPHONES, icon="🎧")
+
+    mode = st.radio(
+        "How", list(shadowing.MODE_LABELS),
+        format_func=lambda value: shadowing.MODE_LABELS[value],
+        horizontal=True, key="shadow-mode", disabled=running,
+    )
+    slow = st.checkbox("Slow it down (35% slower)", key="shadow-slow", disabled=running)
+    st.caption(shadowing.SLOW_NOTE)
+    state["mode"], state["slow"] = mode, slow
+
+    with st.expander("The passage"):
+        st.write(passage)
+
+    offline = utils.offline_mode()
+    cached = state["audio"].get((mode, slow))
+
+    if cached is None:
+        phrase_count = len(shadowing.phrases(passage))
+        st.markdown(
+            f"The model is synthesised once and kept on disk, so this is the only time it "
+            f"costs anything."
+            + (f" Echo mode builds it from {phrase_count} phrases." if mode == shadowing.ECHO
+               else "")
+        )
+        if st.button("🎧 Prepare the model", type="primary", disabled=offline or running,
+                     key="shadow-prepare"):
+            audio, failure = buy_shadow_audio(conn, passage, mode=mode, slow=slow)
+            if failure is not None:
+                icon, message = failure
+                st.error(message, icon=icon)
+            else:
+                state["audio"][(mode, slow)] = audio
+                st.rerun()
+        if offline:
+            st.caption(
+                "Disabled under OFFLINE_MODE: the model is a live synthesis by definition and "
+                "there is no fixture to replay for audio, the same rule \"Hear it\" follows."
+            )
+    elif mode == shadowing.ECHO:
+        st.markdown(shadowing.ECHO_STEPS)
+        st.audio(cached, format="audio/wav")
+    else:
+        st.markdown(shadowing.SIMULTANEOUS_STEPS)
+        # The player and the recorder are both on screen BEFORE recording starts, with no
+        # button between them and no autoplay. `st.audio_input` holds a live MediaRecorder in
+        # the browser and a Streamlit rerun re-renders that component, so anything that reruns
+        # between pressing record and pressing play would cut the take in half.
+        st.audio(cached, format="audio/wav")
+        recording = st.audio_input(
+            "Record yourself speaking along",
+            key=f"shadow-recording-{_generation('shadow-recording')}",
+        )
+        render_shadow_assess(conn, state, recording, job, running)
+
+    st.divider()
+    if st.button("← Back to Today", key="shadow-back", disabled=running):
+        st.session_state[SHADOW_KEY] = None
+        st.session_state["now_playing"] = None
+        st.rerun()
+
+
+def render_shadow_assess(
+    conn: sqlite3.Connection, state: dict[str, Any], recording: Any,
+    job: "AssessJob | None", running: bool,
+) -> None:
+    """Send a finished speak-along read down the ordinary Mode B path, tagged.
+
+    Nothing about the analysis changes here — this is the same `prepare_audio` and the same
+    `start_assessment` the Practice tab calls, with one tag added. The result is rendered by
+    the same `render_result` too: no scoring surface is written for shadowing.
+    """
+    left, middle, _ = st.columns([1, 1, 3])
+    with left:
+        assess_clicked = st.button(
+            "Assess this read", type="primary", width="stretch",
+            disabled=running or recording is None, key="shadow-assess",
+        )
+    with middle:
+        stop_clicked = st.button("🛑 Stop", width="stretch", key="shadow-stop") if running \
+            else False
+    if recording is not None and not running:
+        st.button("🗑️ Delete recording", key="shadow-delete",
+                  on_click=_bump, args=("shadow-recording",),
+                  help="Discard this take and shadow it again. The model stays prepared.")
+
+    if stop_clicked and job is not None:
+        job.cancel_event.set()
+
+    # Guarded on state rather than on the button's `disabled` flag, for the reason the
+    # Practice tab already documents: a click is handled in the rerun that drew the button.
+    if assess_clicked and not running and recording is not None:
+        passage = str(state["passage"])
+        if validate_reference(passage):
+            audio_bytes = recording.getvalue()
+            key = utils.attempt_hash(passage, audio_bytes, Mode.PARAGRAPH)
+            state["key"] = key
+            cached = _cache_get(key)
+            if cached is not None:
+                st.session_state["last_key"] = key
+                st.session_state["now_playing"] = None
+            else:
+                wav_bytes, seconds = prepare_audio(conn, audio_bytes, Mode.PARAGRAPH)
+                if wav_bytes is not None:
+                    start_assessment(
+                        conn, wav_bytes, seconds, passage, Mode.PARAGRAPH, key,
+                        tags=(shadowing.SHADOW_TAG,),
+                    )
+                    st.rerun()
+
+    if running:
+        st.info("Assessing your shadowed read… click Stop to cancel.", icon="⏳")
+        # This tab body runs before the Practice tab's identical poll, and `st.rerun()` ends
+        # the script, so exactly one of the two ever fires.
+        time.sleep(JOB_POLL_SECONDS)
+        st.rerun()
+
+    if state.get("key"):
+        finished = _cache_get(str(state["key"]))
+        if finished is not None:
+            # Once per finished read, not once per rerun: this tab body re-executes on every
+            # interaction, and pushing the due date out each time would mean the passage was
+            # never due again.
+            if finished.attempt_id and state.get("scheduled") != finished.attempt_id:
+                record_shadow_session(
+                    conn, str(state["title"]), str(state["passage"]),
+                    now=datetime.now(timezone.utc),
+                )
+                state["scheduled"] = finished.attempt_id
+            st.divider()
+            st.caption(
+                "Stored as an ordinary paragraph attempt, tagged as shadowed. It is kept off "
+                "the cold trajectory on the Progress tab and compared against it there."
+            )
+            render_result(conn, finished, recording)
+
+
+def render_shadow_comparison(conn: sqlite3.Connection, rows: Any) -> None:
+    """Shadowed against cold: the acceptance test this feature carries, on screen.
+
+    Both reads are already stored attempts, so this costs nothing to draw. What it is
+    expected to show — and what it means if it does not — is written out in
+    `progress_view`'s section header rather than only in a plan file, because an outcome
+    nobody wrote down in advance gets explained away when it arrives.
+    """
+    st.subheader("Shadowed against cold")
+    frame = progress_view.shadow_pairs(rows)
+    st.markdown(progress_view.shadow_summary(frame))
+
+    orphans = progress_view.unpaired_passages(rows)
+    if orphans:
+        st.caption(
+            "Shadowed but never read cold, so there is nothing to compare: "
+            + ", ".join(f"*{name}*" for name in orphans)
+            + ". Read one of them on the Practice tab without the model."
+        )
+
+    if frame.empty:
+        return
+
+    st.caption(
+        "Shadowing should score higher on fluency and prosody than a cold read — the model "
+        "carries the timing. **The gap is meant to narrow**, as the shadowed pattern becomes "
+        "the cold-read pattern; that narrowing is the only evidence the practice transfers. "
+        "A gap that stays flat over weeks means the model is a crutch, not a teacher, and "
+        "this chart is where that would show. Accuracy is deliberately not compared — "
+        "shadowing trains delivery, not articulation."
+    )
+    st.altair_chart(progress_view.shadow_gap_chart(frame), width="stretch")
+
+
 def render_practice(conn: sqlite3.Connection, job: "AssessJob | None", running: bool) -> None:
     """The Practice tab: record or upload, assess, and read the result.
 
@@ -2198,7 +2624,7 @@ def render() -> None:
     # thing you reach for on purpose belongs.
     today_tab, practice_tab, progress_tab = st.tabs(["Today", "Practice", "Progress"])
     with today_tab:
-        render_today(conn)
+        render_today(conn, job, running)
     with practice_tab:
         render_practice(conn, job, running)
     with progress_tab:

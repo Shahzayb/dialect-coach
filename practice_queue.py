@@ -45,16 +45,36 @@ CONTRAST = perception_trainer.CONTRAST
 VOWEL = perception_trainer.VOWEL
 STRESS = perception_trainer.STRESS
 
+# A shadowing passage. Unlike the three above it is **not promoted from evidence** — nothing
+# the recordings say puts it on the list, and nothing they say takes it off. It is a standing
+# practice that lives in this table only because the table is where "what am I doing today?"
+# is answered, and a cadence has to persist somewhere.
+SHADOW = "shadow"
+
 # The order the queue fills its three slots in. One of each kind before a second of any, so
 # three consonant contrasts cannot crowd out a vowel gap that the recordings flagged just as
 # often. Sounds and rhythm are different problems and drilling only one leaves the other.
+#
+# SHADOW is deliberately absent: this tuple drives promotion, and a shadow item is never
+# promoted. `promotable` is what everything else keys on, so the two cannot drift.
 KIND_ORDER = (CONTRAST, VOWEL, STRESS)
 
 KIND_LABELS = {
     CONTRAST: "Consonant contrast",
     VOWEL: "Vowel gap",
     STRESS: "Stress pattern",
+    SHADOW: "Shadowing passage",
 }
+
+
+def promotable(kind: str) -> bool:
+    """Whether this kind is one the queue promotes from the user's own flagged history.
+
+    The distinction matters in exactly one place that is easy to miss: a shadow row sitting in
+    `practice_targets` must not consume one of the three `MAX_ACTIVE_TARGETS` slots, or adding
+    a standing practice would silently retire a sound the recordings are still flagging.
+    """
+    return kind in KIND_ORDER
 
 
 def _parse(when: str | None) -> datetime | None:
@@ -193,7 +213,10 @@ def promote(
     """
     cap = utils.MAX_ACTIVE_TARGETS if limit is None else limit
     known = {(str(row["item"]), str(row["kind"])) for row in existing}
-    active_kinds = [str(row["kind"]) for row in existing if str(row["state"]) == ACTIVE]
+    active_kinds = [
+        str(row["kind"]) for row in existing
+        if str(row["state"]) == ACTIVE and promotable(str(row["kind"]))
+    ]
     slots = cap - len(active_kinds)
     if slots <= 0:
         return []
@@ -308,6 +331,14 @@ def graduation_rule(kind: str) -> str:
     graduation to be visible rather than implicit, and a rule the user cannot read is
     implicit however carefully it is implemented.
     """
+    if kind == SHADOW:
+        return (
+            f"Nothing takes this off the list. Shadowing is a standing practice, not a target "
+            f"to clear — it comes back every {utils.SHADOW_INTERVAL_DAYS} days for as long as "
+            f"you keep it. Remove it yourself when you are done with the passage. Whether it "
+            f"is doing anything is a question the shadowed-versus-cold comparison on the "
+            f"Progress tab answers, not a threshold this list can check."
+        )
     if kind == STRESS:
         return (
             f"Comes off the list when the word stops being flagged — it has to be absent "
@@ -347,6 +378,16 @@ def grade(
     kind = str(target.get("kind") or CONTRAST)
     state = str(target.get("state") or ACTIVE)
     passed = int(target.get("reviews_passed") or 0)
+
+    if kind == SHADOW:
+        # State unchanged and `regressed` False, so `app.apply_decisions` writes nothing for
+        # it. A shadow item's schedule is advanced by finishing a session, not by grading one.
+        return Decision(
+            state,
+            f"On the standing schedule — back every {utils.SHADOW_INTERVAL_DAYS} days. "
+            f"Shadowing has no pass mark, so there is nothing here to pass.",
+            reviews_passed=passed,
+        )
 
     if kind == STRESS:
         if still_flagged is None:
@@ -434,6 +475,11 @@ def next_due(decision: Decision, *, now: datetime, kind: str = CONTRAST) -> str:
     `utils.REVIEW_INTERVAL_DAYS`; past the last one it stops being re-checked, which is
     recorded honestly rather than hidden as an infinite schedule.
     """
+    if kind == SHADOW:
+        # Not "active means due now": a shadow item is always active, so that rule would make
+        # it due every time the page rendered. It comes back on a fixed gap that never widens
+        # — there is no graduation for a widening schedule to grow confident about.
+        return _iso(now + timedelta(days=utils.SHADOW_INTERVAL_DAYS))
     if decision.state == ACTIVE:
         return _iso(now)
     intervals = utils.REVIEW_INTERVAL_DAYS

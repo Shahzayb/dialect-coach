@@ -12,7 +12,7 @@ import logging
 import os
 import tempfile
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Iterator, Sequence
 
 from pydub import AudioSegment
 
@@ -120,3 +120,40 @@ def prepare(data: bytes, mode: Mode) -> tuple[bytes, float]:
     seconds = duration_seconds(wav_bytes)
     validate_duration(seconds, mode)
     return wav_bytes, seconds
+
+
+def echo_track(clips: Sequence[bytes], *, tail_ms: int = 0) -> bytes:
+    """Concatenate synthesised clips, each followed by a silence as long as itself.
+
+    The shadowing warm-up: the model says a phrase, then leaves exactly enough room to say it
+    back. The gap is derived from the clip rather than fixed, because a fixed pause is either
+    too short for the long sentences or dead air after the short ones — and a gap that runs
+    out mid-phrase teaches the reader to rush, which is the opposite of the point.
+
+    Every clip is resampled to the assessment format on the way in. Azure's synthesiser
+    returns 24 kHz mono PCM while `to_pcm_wav` targets 16 kHz, and `AudioSegment` concatenation
+    silently keeps the *first* segment's frame rate — so a mismatch would not raise, it would
+    play the rest of the track at the wrong pitch.
+    """
+    if not clips:
+        raise AudioError("There is nothing to build an echo track from.")
+
+    track = AudioSegment.empty()
+    for index, clip in enumerate(clips):
+        try:
+            segment = AudioSegment.from_file(io.BytesIO(clip))
+        except Exception as exc:
+            logger.debug("pydub failed to decode echo clip %d", index, exc_info=True)
+            raise AudioError("One of the model clips could not be decoded.") from exc
+        segment = (
+            segment.set_frame_rate(TARGET_SAMPLE_RATE)
+            .set_sample_width(TARGET_SAMPLE_WIDTH)
+            .set_channels(TARGET_CHANNELS)
+        )
+        track += segment + AudioSegment.silent(
+            duration=len(segment) + tail_ms, frame_rate=TARGET_SAMPLE_RATE
+        )
+
+    buffer = io.BytesIO()
+    track.export(buffer, format="wav")
+    return buffer.getvalue()

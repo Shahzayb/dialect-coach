@@ -206,10 +206,23 @@ def spec_layers(frame) -> list[dict]:
     return pv.score_chart(frame).to_dict()["spec"]["layer"]
 
 
-def test_only_the_benchmark_is_drawn_as_a_line() -> None:
+def test_free_practice_is_never_drawn_as_a_line() -> None:
+    """Two line layers now: the cold benchmark and the shadowed one, and nothing else.
+
+    Both are single-mode by construction (a 196-word passage is only ever read in paragraph
+    mode), which is what the rule actually requires — see the structural half below. Free
+    practice, the one series that spans two modes, still gets points and only points.
+    """
     marks = [layer["mark"]["type"] for layer in spec_layers(pv.score_frame(rows({})))]
-    assert marks.count("line") == 1
+    assert marks.count("line") == 2
     assert "point" in marks
+
+
+def test_the_shadowed_series_is_its_own_line() -> None:
+    """A shadowed read must never join the cold trajectory — it is what that is measured against."""
+    spec = json.dumps(spec_layers(pv.score_frame(rows({}))))
+    assert pv.SHADOWED_SERIES in spec
+    assert pv.BENCHMARK_SERIES in spec
 
 
 def test_no_line_layer_encodes_the_mode() -> None:

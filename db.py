@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 import utils
+from shadowing import SHADOW_TAG
 from utils import Mode
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,25 @@ CREATE TABLE IF NOT EXISTS perception_trials (
 
 CREATE INDEX IF NOT EXISTS idx_perception_trials_block ON perception_trials(block_id);
 CREATE INDEX IF NOT EXISTS idx_perception_trials_item ON perception_trials(item);
+
+-- How an attempt was produced, when it was produced in some way other than reading the text
+-- cold. A separate table rather than a column on `attempts`: that table is created with
+-- CREATE TABLE IF NOT EXISTS, so a new column would need a real ALTER TABLE and `_migrate`
+-- has no upgrade path. Additive, exactly like the two tables above, so an existing
+-- version-1 database gains it on the next connect() and `user_version` never moves.
+--
+-- The other candidate was a marker prefixed onto `reference_text`, the way the TTS rhythm
+-- baseline capture is marked. It is not reusable here: the shadowed-versus-cold comparison
+-- pairs two attempts BY MATCHING that text, so a marker in it would break the very match
+-- the feature depends on.
+CREATE TABLE IF NOT EXISTS attempt_tags (
+  attempt_id  INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+  tag         TEXT    NOT NULL,   -- 'shadowed' is the only value written today
+  created_at  TEXT    NOT NULL,
+  PRIMARY KEY (attempt_id, tag)
+);
+
+CREATE INDEX IF NOT EXISTS idx_attempt_tags_tag ON attempt_tags(tag);
 """
 
 
@@ -205,6 +225,30 @@ def record_attempt(
     return attempt_id
 
 
+def tag_attempt(
+    conn: sqlite3.Connection, attempt_id: int, tag: str, *, created_at: str | None = None
+) -> None:
+    """Mark how an attempt was produced. Idempotent — re-tagging the same row is a no-op.
+
+    Written in the same transaction as `record_attempt` by the caller that knows how the
+    audio was made, because an untagged shadowed read is indistinguishable from a cold one
+    afterwards and would land on the trajectory the tag exists to keep it off.
+    """
+    conn.execute(
+        "INSERT OR IGNORE INTO attempt_tags (attempt_id, tag, created_at) VALUES (?, ?, ?)",
+        (int(attempt_id), tag, created_at or utc_now_iso()),
+    )
+    conn.commit()
+
+
+def tags_for(conn: sqlite3.Connection, attempt_id: int) -> set[str]:
+    """Every tag on one attempt."""
+    rows = conn.execute(
+        "SELECT tag FROM attempt_tags WHERE attempt_id = ?", (int(attempt_id),)
+    ).fetchall()
+    return {str(row["tag"]) for row in rows}
+
+
 def attach_coaching(
     conn: sqlite3.Connection,
     attempt_id: int,
@@ -294,10 +338,14 @@ def attempt_series(conn: sqlite3.Connection) -> Sequence[sqlite3.Row]:
     """Every real attempt, oldest first, without the raw JSON. The progress chart's input."""
     return conn.execute(
         """
-        SELECT id, created_at, mode, reference_text, recognised_text, audio_seconds,
-               pron_score, accuracy, fluency, completeness, prosody, coach_source, offline
-        FROM attempts WHERE offline = 0 ORDER BY created_at, id
-        """
+        SELECT a.id, a.created_at, a.mode, a.reference_text, a.recognised_text,
+               a.audio_seconds, a.pron_score, a.accuracy, a.fluency, a.completeness,
+               a.prosody, a.coach_source, a.offline,
+               EXISTS (SELECT 1 FROM attempt_tags t
+                       WHERE t.attempt_id = a.id AND t.tag = ?) AS shadowed
+        FROM attempts a WHERE a.offline = 0 ORDER BY a.created_at, a.id
+        """,
+        (SHADOW_TAG,),
     ).fetchall()
 
 
@@ -309,9 +357,12 @@ def attempt_payloads(conn: sqlite3.Connection) -> Sequence[sqlite3.Row]:
     """
     return conn.execute(
         """
-        SELECT id, created_at, mode, reference_text, azure_raw_json
-        FROM attempts WHERE offline = 0 ORDER BY created_at, id
-        """
+        SELECT a.id, a.created_at, a.mode, a.reference_text, a.azure_raw_json,
+               EXISTS (SELECT 1 FROM attempt_tags t
+                       WHERE t.attempt_id = a.id AND t.tag = ?) AS shadowed
+        FROM attempts a WHERE a.offline = 0 ORDER BY a.created_at, a.id
+        """,
+        (SHADOW_TAG,),
     ).fetchall()
 
 

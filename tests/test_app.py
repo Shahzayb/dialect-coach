@@ -94,15 +94,15 @@ def test_the_usage_line_is_always_shown(run_app) -> None:
 
 def test_presets_change_with_the_mode(run_app) -> None:
     app = run_app()
-    drill_options = list(app.selectbox[0].options)
+    drill_options = list(app.selectbox(key="preset_choice").options)
     app.radio[0].set_value("Paragraph — connected speech").run()
-    assert list(app.selectbox[0].options) != drill_options
+    assert list(app.selectbox(key="preset_choice").options) != drill_options
 
 
 def test_choosing_a_preset_fills_the_reference_text(run_app) -> None:
     app = run_app()
-    preset = app.selectbox[0].options[1]
-    app.selectbox[0].set_value(preset).run()
+    preset = app.selectbox(key="preset_choice").options[1]
+    app.selectbox(key="preset_choice").set_value(preset).run()
     assert app.text_area[0].value
 
 
@@ -704,7 +704,7 @@ def test_reset_clears_the_recording_the_text_and_the_result(run_app) -> None:
 
     assert not app.exception
     assert app.text_area[0].value == ""
-    assert app.selectbox[0].value == "Write my own"
+    assert app.selectbox(key="preset_choice").value == "Write my own"
     assert not app.session_state["last_key"], "the previous result must not stay on screen"
 
 
