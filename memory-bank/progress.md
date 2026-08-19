@@ -15,6 +15,12 @@ High Variability Phonetic Training, and a practice queue that persists a small t
 opening the app answers "what am I doing today?" instead of showing a blank textarea. That
 closes the gap the brief opened with — every earlier chunk explained the problem better, and
 this is the first one that does something about it.
+**The app now practises against a model in real time (v0.8.0)** — shadowing, with a
+**pre-registered acceptance test**: a shadowed read should beat a cold read of the same
+passage on fluency and prosody, and that gap should **narrow** over weeks as the shadowed
+pattern becomes the cold-read pattern. If it never narrows, the practice is not transferring
+and the design is wrong. Written down before the data existed, and stated on the comparison
+surface itself, so that outcome is a finding rather than something explained away.
 **Milestone v0.3.0 is closed** — #10, #11, #13 closed with comments
 pointing at what implemented them; #12 split, its content-score half (vocabulary/grammar/
 topic) retitled and moved to v0.12.0 since scripted assessment never returns it. What
@@ -61,21 +67,28 @@ below still open, on the user's explicit instruction (fix-after rather than fix-
 
 ## Next concrete step
 
-**Read the benchmark passage.** The progress view ships with its headline series empty —
-that is not a defect, it is the first day. Four or five reads spread over a month are what
-make the chart worth looking at, and the first one also settles whether 196 words really
-lands inside 60-90 seconds at an actual reading pace (the attempt's own `audio_seconds`
-says; the TTS baseline took 61.8 s, and a human reads it slower). Until then the only thing
-on screen is the free-practice cloud, which is exactly the thing that cannot be read as
-progress.
+**Read the benchmark passage — cold, and then shadowed.** The progress view ships with its
+headline series empty — that is not a defect, it is the first day. Four or five reads spread
+over a month are what make the chart worth looking at, and the first one also settles whether
+196 words really lands inside 60-90 seconds at an actual reading pace (the attempt's own
+`audio_seconds` says; the TTS baseline took 61.8 s, and a human reads it slower). Until then
+the only thing on screen is the free-practice cloud, which is exactly the thing that cannot be
+read as progress.
 
-Three things now depend on it rather than one. The rhythm chart plots benchmark reads only,
+Four things now depend on it rather than one. The rhythm chart plots benchmark reads only,
 because nPVI moves with the text as much as with the speaker, and the first read is the first
 number that can be set against the TTS baseline's 58.45. **The practice queue is the third,
 and it is the one that changes what a read is for**: targets are promoted from sounds flagged
 across separate attempts, so until there are real attempts the queue has nothing to schedule
 and the Today tab correctly offers nothing. Reading the passage is now what starts the whole
 loop, not only what fills a chart.
+
+**Shadowing is the fourth, and it needs the cold read specifically.** A shadowed read with
+nothing to sit against says nothing at all — the comparison surface correctly reports "no cold
+read of this passage yet" rather than inventing a partner. So the order matters: read it cold
+first, then shadow it on headphones, and the first honest pair exists. That pair is also the
+first real test of the pre-registered finding above, and of whether the recording survives the
+press-record-then-press-play sequence in a real browser, which no test can answer.
 
 **Then do some blocks.** The trainer has been run, not used. The graduation rule (90% across
 two completed blocks) has never fired on real listening, the spaced-review schedule has never
@@ -91,6 +104,12 @@ verified before it can be planned. `UNSCRIPTED_TWO_PASS` is defined and priced b
 `budget.passes_for` but unread by any recognition code yet.
 
 ## Active plan
+
+`plans/2026-08-19_shadowing-practice-flow.md` — **built and complete offline; the live half is
+outstanding and cannot be closed without a human at a microphone.** 632 tests and the whole
+surface driven in the browser, but no real shadowed read exists yet, so the acceptance test it
+carries has no data. Unlike every earlier chunk's deferred check, this one is not just a
+calendar item — nothing in the repository can answer it.
 
 `plans/2026-08-19_perception-trainer-practice-queue.md` — complete. The live block was run
 against real Azure and asserted against the meter, so the exit criteria are met rather than
