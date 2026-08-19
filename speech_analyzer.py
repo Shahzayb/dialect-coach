@@ -21,9 +21,10 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import utils
 from utils import Mode, PermanentError, TransientError
@@ -46,6 +47,10 @@ FIXTURES: dict[Mode, str] = {
 # backstop against a hung SDK callback, not a processing budget.
 CONTINUOUS_TIMEOUT_SECONDS = 300.0
 
+# How often the continuous wait wakes up to notice a cancellation. Short enough that Stop
+# feels immediate, long enough that the wait is not a busy loop.
+CANCEL_POLL_SECONDS = 0.2
+
 
 class AssessmentError(RuntimeError):
     """Assessment failed in a way worth showing the user. Never carries a key."""
@@ -57,6 +62,19 @@ class QuotaExhausted(AssessmentError):
 
 class NoSpeechDetected(AssessmentError):
     """Azure connected fine and heard nothing. Distinct from a failure — see §10."""
+
+
+class Cancelled(AssessmentError):
+    """The caller asked for this run to stop before it produced a result.
+
+    `reached_azure` is the difference between "nothing was ever sent" and "audio was
+    already on its way when the stop landed". It drives what the user is told, not what
+    they are charged: a cancelled run is never recorded and never metered either way.
+    """
+
+    def __init__(self, message: str, *, reached_azure: bool) -> None:
+        super().__init__(message)
+        self.reached_azure = reached_azure
 
 
 @dataclass
@@ -221,10 +239,17 @@ def _assess_single_shot(wav_path: str, reference_text: str) -> list[dict[str, An
     raise AssessmentError(f"Unexpected recognition result: {result.reason}")
 
 
-def _assess_continuous(wav_path: str, reference_text: str) -> list[dict[str, Any]]:
+def _assess_continuous(
+    wav_path: str, reference_text: str, cancel_event: threading.Event | None = None
+) -> list[dict[str, Any]]:
     """Mode B. Accumulate `recognized` events, stop on session_stopped or canceled.
 
     Returns one payload per utterance; merging them is `_merge_overall` further down.
+
+    This is the only recognition path that can be stopped part-way. `cancel_event` is
+    polled while waiting rather than waited on directly, because the SDK signals
+    completion through `done` and the caller signals cancellation through `cancel_event`:
+    with two independent events there is nothing to block on but both in turn.
     """
     import azure.cognitiveservices.speech as speechsdk
 
@@ -260,10 +285,18 @@ def _assess_continuous(wav_path: str, reference_text: str) -> list[dict[str, Any
 
     recognizer.start_continuous_recognition_async().get()
     try:
-        if not done.wait(timeout=CONTINUOUS_TIMEOUT_SECONDS):
-            raise AssessmentError(
-                "Azure did not finish assessing that recording in time. Try a shorter one."
-            )
+        deadline = time.monotonic() + CONTINUOUS_TIMEOUT_SECONDS
+        while not done.wait(timeout=CANCEL_POLL_SECONDS):
+            if cancel_event is not None and cancel_event.is_set():
+                # Audio has already been streamed to Azure by this point, so the caller is
+                # told the attempt reached it — even though nothing is recorded or metered.
+                raise Cancelled(
+                    "Assessment stopped before Azure finished.", reached_azure=True
+                )
+            if time.monotonic() >= deadline:
+                raise AssessmentError(
+                    "Azure did not finish assessing that recording in time. Try a shorter one."
+                )
     finally:
         recognizer.stop_continuous_recognition_async().get()
 
@@ -291,12 +324,25 @@ def _load_fixture(mode: Mode) -> list[dict[str, Any]]:
 
 
 def recognise(
-    wav_path: str, reference_text: str, mode: Mode
+    wav_path: str,
+    reference_text: str,
+    mode: Mode,
+    *,
+    cancel_event: threading.Event | None = None,
+    on_attempt: Callable[[int], None] | None = None,
 ) -> tuple[list[dict[str, Any]], bool, int]:
     """Run the assessment for `mode`.
 
     Returns (verbatim payloads, came_from_fixture, attempts_that_reached_azure).
+
+    `cancel_event` is checked before anything is dispatched and, in continuous mode, while
+    waiting for Azure to finish. `on_attempt` fires before each attempt reaches Azure, so a
+    caller can tell "nothing was sent" from "something was sent and then abandoned" —
+    `retry_transient` already needs the same hook to meter retries.
     """
+    if cancel_event is not None and cancel_event.is_set():
+        raise Cancelled("Assessment cancelled before it started.", reached_azure=False)
+
     if utils.offline_mode():
         logger.info("OFFLINE_MODE: replaying the %s fixture instead of calling Azure", mode.value)
         return _load_fixture(mode), True, 0
@@ -307,16 +353,22 @@ def recognise(
             "which is a separate chunk of work."
         )
 
-    call = _assess_single_shot if mode is Mode.DRILL else _assess_continuous
     made = 0
+
+    def call() -> list[dict[str, Any]]:
+        if mode is Mode.DRILL:
+            # Single-shot has no cancellation point of its own: it is one blocking round
+            # trip. A stop clicked during it takes effect when the call returns.
+            return _assess_single_shot(wav_path, reference_text)
+        return _assess_continuous(wav_path, reference_text, cancel_event)
 
     def count(attempt: int) -> None:
         nonlocal made
         made = attempt
+        if on_attempt is not None:
+            on_attempt(attempt)
 
-    payloads = utils.retry_transient(
-        lambda: call(wav_path, reference_text), on_attempt=count
-    )
+    payloads = utils.retry_transient(call, on_attempt=count)
     if made > 1:
         logger.warning("Assessment took %d attempts; all of them may have cost quota.", made)
     return payloads, False, made
@@ -578,9 +630,18 @@ def normalise(
     return overall, recognised_text, words
 
 
-def analyse(wav_path: str, reference_text: str, mode: Mode) -> Assessment:
+def analyse(
+    wav_path: str,
+    reference_text: str,
+    mode: Mode,
+    *,
+    cancel_event: threading.Event | None = None,
+    on_attempt: Callable[[int], None] | None = None,
+) -> Assessment:
     """Assess one recording end to end: recognise, then normalise. No storage, no UI."""
-    payloads, offline, attempts = recognise(wav_path, reference_text, mode)
+    payloads, offline, attempts = recognise(
+        wav_path, reference_text, mode, cancel_event=cancel_event, on_attempt=on_attempt
+    )
     overall, recognised_text, words = normalise(payloads, reference_text, mode)
     return Assessment(
         raw=payloads,

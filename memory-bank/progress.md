@@ -2,9 +2,9 @@
 
 ## Current focus
 
-Building the app one chunk at a time. The diagnosis is legible and audible, and the
-coaching layer now turns it into something to practise. What remains is Mode C
-(unscripted) and the fixes tracked under Known issues below.
+Building the app one chunk at a time. The diagnosis is legible and audible, the coaching
+layer turns it into something to practise, and the record-and-assess surface now behaves
+under repeated and impatient clicking. What remains is Mode C (unscripted).
 
 ## Releases
 
@@ -17,14 +17,7 @@ below still open, on the user's explicit instruction (fix-after rather than fix-
 
 ## Next concrete step
 
-**Fix the 8 confirmed code-review findings** (see Known issues) before the next feature
-chunk — the two most severe touch the coaching layer's core safety promise, not just
-polish: `ai_coach.coach()`'s compaction/build pipeline has no exception handling at all
-(breaks "always returns a report" on the free path too, not just Gemini's), and the
-"Improve with Gemini" button can be repeat-clicked to re-spend a real call whenever the
-previous click consumed one but still fell back.
-
-**After that, Mode C (unscripted speech)** — free speech scored on vocabulary, grammar and
+**Mode C (unscripted speech)** — free speech scored on vocabulary, grammar and
 topic, not just a script. Blocked on a real question, not busywork:
 `enable_content_assessment_with_topic` does not exist in SDK 1.51.1 despite the master plan
 citing it (see Dead ends below), so Mode C's content scoring needs another route found and
@@ -33,6 +26,7 @@ verified before it can be planned. `UNSCRIPTED_TWO_PASS` is defined and priced b
 
 ## Active plan
 
+`plans/2026-08-19_record-assess-defects.md` — complete.
 `plans/2026-08-18_coaching-layer.md` — complete.
 `plans/2026-08-18_legible-audible-diagnosis.md` — complete.
 `plans/2026-08-18_azure-analysis-core.md` — complete.
@@ -103,52 +97,63 @@ so the on-screen button still shows as enabled until the *next* rerun — a seco
 before then would have bought a second call. Fixed by moving the spend guard into
 `coaching_for` itself (`already_asked`), not left on the button's `disabled` flag alone.
 
-`make test` is 247 tests, all offline with no keys and no network.
+**The record-and-assess surface** survives being used impatiently. `Assess` is disabled
+while a request is in flight and a `Stop` button appears beside it for the duration; a
+`↺ Reset` clears the recording, the upload, the text, the preset and the on-screen result;
+a `🗑️ Delete recording` discards just the take, keeping the text, so a bad take costs
+nothing typed. Words that scored 100 but were flagged anyway — a delivery fault on an
+otherwise perfect word — are collapsed behind an expander instead of burying the words that
+need work. Omitted words are never collapsed there: they carry no score at all, which is the
+opposite of a perfect one.
+
+Verified live in the browser, entirely offline: **ten rapid clicks on `Assess` produced
+exactly one attempt row**, a re-assess of an identical attempt stayed instant on the session
+cache without ever spawning a job, and Reset cleared the uploaded file along with everything
+else. The in-flight controls and the cancellation paths are covered headlessly instead —
+offline replay returns too fast for a human to click Stop during it, so those are driven by
+`AppTest` against a job whose thread is held open, and by a fake recognizer whose events fire
+under the test's control. No sleeps, no races, no cost.
+
+`make test` is 293 tests, all offline with no keys and no network.
 
 Not built: Mode C (unscripted).
 
 ## Known issues
 
-**Code review findings against the coaching layer, 2026-08-18, all confirmed, none fixed
-yet — released anyway in v0.1.0 on the user's instruction (fix-after, not fix-before):**
+**The 8 code-review findings from 2026-08-18 are all fixed** (2026-08-19, in the
+record-and-assess chunk). Each has a regression test in `tests/test_review_findings.py`.
+Worth keeping from that pass:
 
-- `ai_coach.coach()` (line 309-310) runs `fallback_coach.compact()`/`build_from_compacted()`
-  before any try/except, and `app.py`'s `coaching_for` never wraps the call either — a bug
-  anywhere in the compaction/grouping pipeline crashes the whole render, on the free/offline
-  path too, not just Gemini's. Breaks the module's own "always returns a report" guarantee.
-- `fallback_coach._substitutions` (line 150): when a "smeared" duplicate phoneme entry
-  merges and the kept entry is the earlier, non-final one (because it scored worse), its
-  `final_cluster` flag is never recomputed for the new merged position — the swallowed-
-  final-cluster note silently doesn't fire when it should. Reproduced with a concrete input.
-- `ai_coach._classify` (line 203): `isinstance(exc, (TimeoutError, ConnectionError))` does
-  not match httpx's actual transport exceptions (verified against the installed SDK —
-  `httpx.TimeoutException`/`ConnectError` are not subclasses of the builtins), so real
-  network failures are classified as permanent and skip the retry the docstring promises.
-- `app.py` `coaching_for`/the Gemini button (line 552): the disabled flag and the spend
-  guard both key off `source == SOURCE_GEMINI`, so any outcome that consumed a real call
-  but still fell back (malformed JSON, `validated()` rejecting every fix) leaves the button
-  clickable again — repeat clicks can re-spend real Gemini calls indefinitely.
-- `ai_coach.validated()` (line 249) only checks `priority_fixes` against `observed_pairs`;
-  `overall_comment`, `stress_and_rhythm.issues` and `practice_plan` are never checked, even
-  though the UI caption claims every unsupported sound was removed.
-- `ai_coach.validated()` (line 276): `if not kept and compacted["observed_pairs"]:` doesn't
-  fall back when `observed_pairs` is empty but the model still fabricated fixes — returns
-  `priority_fixes=[]` under `source=SOURCE_GEMINI` with the model's original prose intact.
-- `ai_coach.coach()` (line 354): when `response.model_dump()` raises, `raw` falls back to
-  the flat report shape but `source` stays `SOURCE_GEMINI` — `report_from_raw` can't
-  re-parse that stored row later, silently losing an already-shown report.
-- `fallback_coach._practice_plan` (line 410): `{1: (4,), 2: (2, 2), 3: (2, 1, 1)}[len(fixes)]`
-  is a latent `KeyError` if `MAX_PRIORITY_FIXES` is ever raised without updating this table.
+- The httpx one was the most misleading: `isinstance(exc, (TimeoutError, ConnectionError))`
+  looked correct and matched nothing. **No httpx transport exception subclasses either
+  builtin** — verified by introspecting all six in the container, not from docs — so every
+  real network failure was classified permanent and skipped its retry. Now keyed on
+  `httpx.TransportError`, which is the common base for timeouts and connect errors alike.
+- The Gemini re-spend guard now keys off *whether a call was bought*
+  (`gemini_attempted`), never off which source came back. An outcome that spent a real call
+  and still fell back is exactly the one not worth buying twice.
+- `validated()` now checks the prose (`overall_comment`, `practice_plan`, the
+  stress-and-rhythm lines) as well as the fixes, and rejects the whole report rather than
+  editing a fabricated sound out of a sentence — there is no way to cut a clause and be
+  left with English, and the offline report that replaces it is complete.
 
-Also found, lower severity: `app.py`'s word card shows the raw unsmeared duplicate phoneme
-that the coaching report collapses — the two views can disagree on how many things went
-wrong in one word (directly observed live). `ai_coach.py`'s `_client`/`_config`/`_call` lack
-type hints (violates CLAUDE.md's "enforce type hints" rule). `ai_coach.report_from_raw` is
-unreachable from the running app — nothing in `app.py` calls it, so a Gemini report evicted
-from the session cache or lost to a restart can't be recovered from the database despite
-being stored specifically for that. `app.py`'s `if entry.attempt_id:` treats an id of `0` as
-absent rather than checking `is not None` (PLAUSIBLE, low-probability trigger).
+Still open, lower severity, from the same pass: `app.py`'s word card shows the raw unsmeared
+duplicate phoneme that the coaching report collapses — the two views can disagree on how
+many things went wrong in one word (directly observed live). `ai_coach.py`'s
+`_client`/`_config`/`_call` lack type hints (violates CLAUDE.md's "enforce type hints"
+rule). `ai_coach.report_from_raw` is still unreachable from the running app — nothing in
+`app.py` calls it, so a Gemini report evicted from the session cache or lost to a restart
+cannot be recovered from the database despite being stored for exactly that (the function
+itself now re-reads both stored shapes, so wiring it up is all that is left). `app.py`'s
+`if entry.attempt_id:` treats an id of `0` as absent rather than checking `is not None`
+(PLAUSIBLE, low-probability trigger).
 
+- **SQLite WAL is not readable across processes over the macOS bind mount.** A second
+  process (`docker exec … sqlite3`) reading `DB_PATH` while the app holds its connection
+  sees only checkpointed rows — during live verification the app's own History panel showed
+  3 attempts while an outside reader saw 1, and no `-wal` file was visible at all. The app
+  is single-connection so this never affects it; it means **verify row counts through the
+  app's own History panel or its logs, not by opening the file from another process.**
 - `pydub` 0.25.1 emits `SyntaxWarning: invalid escape sequence` on import under 3.12.
   Cosmetic, upstream, no action. The `audioop` DeprecationWarning is filtered in
   `pytest.ini` for the same reason.

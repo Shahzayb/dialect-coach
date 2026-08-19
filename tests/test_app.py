@@ -530,3 +530,247 @@ def test_a_second_click_cannot_spend_another_call(run_app, monkeypatch, tmp_path
     assert next(b for b in app.button if "Gemini" in b.label).disabled
     app.run()
     assert len(calls) == 1, "and neither must an unrelated rerun"
+
+
+def test_a_spent_call_that_fell_back_cannot_be_re_clicked(run_app, monkeypatch) -> None:
+    """The re-spend hole: a real call that fell back used to leave the button live.
+
+    A malformed answer, or one whose every fix failed validation, still consumed the
+    free-tier call. Keying the guard off the returned source meant the outcome decided
+    whether it could be bought again — so exactly the failures worth not repeating were
+    the repeatable ones.
+    """
+    import ai_coach
+
+    assessment = offline_assessment()
+    report = fallback_coach.build(assessment, Mode.DRILL)
+    calls: list[int] = []
+
+    def spent_but_fell_back(*args, **kwargs):
+        calls.append(1)
+        return ai_coach.CoachingResult(
+            report=report, source=fallback_coach.SOURCE_FALLBACK, raw=report.model_dump()
+        )
+
+    monkeypatch.setattr(ai_coach, "coach", spent_but_fell_back)
+    monkeypatch.setenv("OFFLINE_MODE", "false")
+    monkeypatch.setenv("GEMINI_API_KEY", "placeholder-not-a-real-key")
+    monkeypatch.setenv("AZURE_SPEECH_KEY", "placeholder")
+    monkeypatch.setenv("AZURE_SPEECH_REGION", "eastus")
+    monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
+
+    app = seed_result(run_app(), assessment)
+    app = next(b for b in app.button if "Gemini" in b.label).click().run()
+    assert len(calls) == 1
+    assert any("could not be reached" in i.value for i in app.info)
+
+    # The click is handled in the pass that drew the button, so the button on screen is
+    # still enabled — which is exactly why the guard cannot live on the disabled flag.
+    app = next(b for b in app.button if "Gemini" in b.label).click().run()
+    assert len(calls) == 1, "a fallback outcome must not be re-buyable"
+    assert next(b for b in app.button if "Gemini" in b.label).disabled, (
+        "the call was spent even though it fell back"
+    )
+
+
+# --- Reset, delete, and the in-flight controls ---------------------------------------------
+
+
+def test_reset_clears_the_recording_the_text_and_the_result(run_app) -> None:
+    app = seed_result(run_app(), offline_assessment())
+    app.text_area[0].set_value("something I typed").run()
+    assert app.session_state["last_key"]
+
+    app = next(b for b in app.button if "Reset" in b.label).click().run()
+
+    assert not app.exception
+    assert app.text_area[0].value == ""
+    assert app.selectbox[0].value == "Write my own"
+    assert not app.session_state["last_key"], "the previous result must not stay on screen"
+
+
+def test_reset_rebuilds_the_recorder_rather_than_leaving_the_take(run_app) -> None:
+    """audio_input holds its own content and cannot be cleared through session state.
+
+    The only way to empty one is to give it a key it has never seen, so the generation
+    counter moving is what actually clears the take.
+    """
+    app = run_app()
+
+    app = next(b for b in app.button if "Reset" in b.label).click().run()
+
+    # Absent until something bumps it, so the first reset takes both to 1.
+    assert app.session_state["recording_generation"] == 1
+    assert app.session_state["upload_generation"] == 1
+
+
+def test_the_delete_control_only_appears_with_a_recording(run_app) -> None:
+    app = run_app()
+    assert not [b for b in app.button if "Delete recording" in b.label], (
+        "nothing to delete before anything is recorded"
+    )
+
+
+def test_assess_is_disabled_with_no_recording(run_app) -> None:
+    app = run_app()
+    assess = next(b for b in app.button if b.label == "Assess")
+    assert assess.disabled
+
+
+def test_no_stop_button_when_nothing_is_running(run_app) -> None:
+    app = run_app()
+    assert not [b for b in app.button if "Stop" in b.label], (
+        "Stop is only meaningful while a request is in flight"
+    )
+
+
+@pytest.fixture
+def settled_poll(monkeypatch: pytest.MonkeyPatch):
+    """Let the in-flight pass finish instead of re-running forever.
+
+    While a job is alive the script sleeps and calls `st.rerun()`, which is right in a
+    browser — each rerun is a round trip that re-renders Stop and picks up a click. Under
+    AppTest that same loop never settles, so the run times out before anything can be
+    inspected. Neutralising `st.rerun` lets the pass complete and leaves exactly what a
+    browser would have painted on that pass.
+    """
+    import streamlit as st
+
+    monkeypatch.setattr(app_module, "JOB_POLL_SECONDS", 0)
+    monkeypatch.setattr(st, "rerun", lambda *a, **k: None)
+
+
+def _hanging_job(app: AppTest, stop: "threading.Event") -> app_module.AssessJob:
+    import threading
+
+    job = app_module.AssessJob(
+        cancel_event=threading.Event(), key="k",
+        reference_text=REFERENCE, mode=Mode.DRILL,
+    )
+    job.thread = threading.Thread(target=stop.wait, daemon=True)
+    job.thread.start()
+    app.session_state["assess_job"] = job
+    return job
+
+
+def test_a_running_job_disables_assess_and_offers_stop(run_app, settled_poll) -> None:
+    """No double-submit is reachable: the button that starts a run is off while one runs."""
+    import threading
+
+    app = run_app()
+    never_finishes = threading.Event()
+    _hanging_job(app, never_finishes)
+    try:
+        app.run()
+        assert next(b for b in app.button if b.label == "Assess").disabled
+        assert [b for b in app.button if "Stop" in b.label], "Stop must be offered"
+        assert next(b for b in app.button if "Reset" in b.label).disabled
+        assert any("Assessing" in i.value for i in app.info)
+    finally:
+        never_finishes.set()
+
+
+def test_clicking_stop_sets_the_cancel_flag(run_app, settled_poll) -> None:
+    import threading
+
+    app = run_app()
+    never_finishes = threading.Event()
+    job = _hanging_job(app, never_finishes)
+    try:
+        app.run()
+        next(b for b in app.button if "Stop" in b.label).click().run()
+        assert job.cancel_event.is_set(), "Stop must reach the worker's cancel flag"
+    finally:
+        never_finishes.set()
+
+
+def test_a_second_assess_click_while_running_starts_nothing(run_app, settled_poll,
+                                                            monkeypatch) -> None:
+    """The state guard, not the disabled flag, is what closes the double-submit race."""
+    import threading
+
+    started: list[int] = []
+    monkeypatch.setattr(app_module, "start_assessment",
+                        lambda *a, **k: started.append(1))
+
+    app = run_app()
+    never_finishes = threading.Event()
+    _hanging_job(app, never_finishes)
+    try:
+        app.run()
+        assert not started, "a run already in flight must not start another"
+    finally:
+        never_finishes.set()
+
+
+def test_a_cancelled_job_is_reported_and_clears_itself(run_app) -> None:
+    import threading
+
+    app = run_app()
+    job = app_module.AssessJob(
+        cancel_event=threading.Event(), key="k",
+        reference_text=REFERENCE, mode=Mode.DRILL,
+    )
+    job.thread = threading.Thread(target=lambda: None)
+    job.thread.start()
+    job.thread.join()
+    job.outcome = app_module.AssessOutcome(cancelled=True, reached_azure=False)
+    app.session_state["assess_job"] = job
+
+    app.run()
+
+    assert any("stopped before anything was sent" in i.value for i in app.info)
+    assert app.session_state["assess_job"] is None
+    assert not [b for b in app.button if "Stop" in b.label]
+
+
+def test_a_job_that_died_without_an_outcome_does_not_crash_the_page(run_app) -> None:
+    """Unreachable in practice — the worker catches everything — but not a crash if it happens."""
+    import threading
+
+    app = run_app()
+    job = app_module.AssessJob(
+        cancel_event=threading.Event(), key="k",
+        reference_text=REFERENCE, mode=Mode.DRILL,
+    )
+    job.thread = threading.Thread(target=lambda: None)
+    job.thread.start()
+    job.thread.join()
+    app.session_state["assess_job"] = job
+
+    app.run()
+
+    assert not app.exception
+    assert any("ended unexpectedly" in e.value for e in app.error)
+
+
+def test_words_scoring_full_marks_are_collapsed_out_of_the_flagged_list(run_app) -> None:
+    """A monotone 100 is real, but it is not what the flagged list is for."""
+    assessment = offline_assessment()
+    assessment.words.append({
+        "word": "clouds", "accuracy": 100.0, "error_type": "None",
+        "error_source": "azure", "delivery_error_types": ["Monotone"],
+        "syllables": [], "phonemes": [],
+    })
+
+    app = seed_result(run_app(), assessment)
+
+    assert not app.exception
+    assert any("Scored 100 but still flagged" in e.label for e in app.expander), (
+        "a perfect-scoring word flagged for delivery belongs behind a collapsed panel"
+    )
+
+
+def test_a_collapsed_word_still_gets_a_unique_playback_key(run_app) -> None:
+    """The word index keeps counting across both groups; a repeated key is a hard error."""
+    assessment = offline_assessment()
+    for word in ("clouds", "thunder"):
+        assessment.words.append({
+            "word": word, "accuracy": 100.0, "error_type": "None",
+            "error_source": "azure", "delivery_error_types": ["Monotone"],
+            "syllables": [], "phonemes": [],
+        })
+
+    app = seed_result(run_app(), assessment)
+
+    assert not app.exception, "duplicate widget keys raise rather than render"

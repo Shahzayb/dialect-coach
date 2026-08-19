@@ -83,6 +83,45 @@ free-tier Gemini key returns 429 rather than billing, which `ai_coach` already t
 terminal. The usage metadata (`prompt_token_count`, etc.) is still stored verbatim in
 `gemini_raw_json`, so a token meter is a later re-parse if the free tier ever needs one.
 
+### Running an assessment without freezing the page
+
+The assessment runs on a background `threading.Thread`, not inline, and the script polls it
+(`time.sleep(JOB_POLL_SECONDS)` then `st.rerun()`) until it finishes. This is not
+over-engineering — it is forced by three Streamlit facts, all verified rather than assumed:
+
+- **A widget interaction cannot interrupt a blocking call already in progress.** Streamlit's
+  rerun-kills-the-current-run behaviour only fires when the script calls back into
+  Streamlit; a blocking SDK call never yields to it. An inline Azure call therefore leaves
+  the page frozen with no way to draw a Stop button, let alone act on one.
+- **Streamlit does not support calling its API from a custom thread.** The documented
+  pattern is a thread that touches no `st.*` at all, with the main script collecting the
+  result. That is why the worker returns an `AssessOutcome` carrying an (icon, message) pair
+  instead of rendering its own error — the same reason `play()` returns rather than renders.
+- **A widget's `disabled=` reflects the *previous* completed run.** A click is handled in
+  the pass that drew the button, so the button on screen stays enabled until the next rerun.
+  Every guard here is therefore state-based and checked before acting (`if clicked and not
+  running`), never left to the flag — the same lesson the Gemini button already taught.
+
+`AssessJob.outcome` is written once by the worker just before it returns and read only after
+`thread.is_alive()` is False, so the two threads never race over it. `_DB_LOCK` guards the
+worker's `record_attempt` against the meter reads that run at the foot of every rerun.
+
+**Cancelling: a stopped run is never recorded and never metered**, whether or not it reached
+Azure — the cancel check sits before `db.record_attempt`, and the STT meter is derived from
+the attempts table, so writing no row *is* charging nothing. This is a different question
+from the standing rule that a *completed* run counts every attempt it made (retries and
+failures included): those re-uploaded the audio for a result the user kept. Only continuous
+recognition can actually be stopped mid-call, via `stop_continuous_recognition_async`;
+`recognize_once_async` is one blocking round trip with no SDK-exposed abort, so a stop
+during a drill discards the result when it arrives instead. The UI says which of the two
+happened rather than implying every Stop is instant.
+
+Neither `st.audio_input` nor `st.file_uploader` can be cleared by writing to
+`st.session_state` (an open upstream request), so both are keyed on a generation counter;
+bumping it hands Streamlit a key it has never seen, which builds a fresh empty widget. The
+textarea and preset select are cleared the documented way instead — explicit `key=` plus an
+`on_click`/`on_change` callback, which runs before the next render rather than fighting it.
+
 **UI contract**: the offline report renders on every assessment, for free, directly under
 the scores — what to do about them before the evidence for them. "Improve this with
 Gemini" is a button, not a side effect of assessing, and its caption states what a click
@@ -148,6 +187,13 @@ change or the image has no pytest.
 `tests/fixtures/` holds two verbatim Azure responses captured once from a real recording,
 which is what lets parsing, colouring, and coaching be developed without spending quota.
 No lint or type-check setup yet.
+
+**Do not verify row counts by opening the database from a second process.** SQLite's WAL
+needs shared-memory coordination that the macOS bind mount does not provide across
+processes, so a `docker exec … sqlite3` reader sees only checkpointed rows while the app
+holds its connection — measured live at 1 row visible against the app's own 3, with no
+`-wal` file present at all. The app is single-connection, so this never affects it. Read the
+app's own History panel, or its `Recorded attempt` log lines, instead.
 
 ## Technical constraints
 
@@ -237,6 +283,12 @@ the project, and nothing in the app may assume a host. Practical consequences:
 - **Retries count against the meter.** A retry re-uploads the audio and can consume
   allowance even when it fails, so recorded seconds are multiplied by attempts made. The
   same rule applies to TTS characters.
+- **A cancelled assessment does not.** Stopping a run writes no `attempts` row, which is
+  also what keeps it off the meter. The two rules answer different questions: how many times
+  a *kept* result re-uploaded the audio, versus whether a *discarded* attempt should be
+  recorded at all. The second is always no — including the paragraph case where some audio
+  may already have reached Azure before the abort landed, which the message says plainly
+  rather than claiming nothing was sent.
 - **The TTS cache is checked before the meter is touched, never after.** Streamlit re-runs
   the whole script on every widget interaction, so pricing a call ahead of the cache lookup
   would charge again on each unrelated click and the meter would climb while nothing was

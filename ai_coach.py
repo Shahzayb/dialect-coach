@@ -54,6 +54,10 @@ TEMPERATURE = 0.2
 _DATA_TAGS = ("reference_text", "recognised_text")
 _TAG_PATTERN = re.compile(r"</?(?:" + "|".join(_DATA_TAGS) + r")\s*/?>", re.IGNORECASE)
 
+# A phoneme as the prompt asks for it and the UI renders it: /θ/, /oʊ/, /ɔɹ/. Bounded
+# length so a pair of slashes around a whole clause is not read as a sound.
+_SLASHED_PHONEME = re.compile(r"/([^/\s]{1,4})/")
+
 SYSTEM_INSTRUCTION = """
 You are a pronunciation coach for one adult learner of American English (en-US). You are
 given the findings of an Azure pronunciation assessment of a single recording, and you
@@ -200,9 +204,27 @@ def _classify(exc: BaseException) -> Exception:
         return PermanentError(f"Gemini rejected the request ({code}).")
     if isinstance(exc, errors.ServerError):
         return TransientError(f"Gemini was unavailable ({getattr(exc, 'code', None)}).")
-    if isinstance(exc, (TimeoutError, ConnectionError)):
+    if _is_transport_failure(exc):
         return TransientError("Could not reach Gemini.")
     return PermanentError(f"Gemini call failed: {type(exc).__name__}")
+
+
+def _is_transport_failure(exc: BaseException) -> bool:
+    """Whether this is a connection-level failure worth one more try.
+
+    The builtin `TimeoutError`/`ConnectionError` are not enough: the SDK talks over httpx,
+    whose `TimeoutException` and `TransportError` descend from its own base rather than
+    from the builtins, so a real network failure tested against the builtins alone reads as
+    permanent and skips the retry. Both are checked — nothing guarantees every transport
+    failure the SDK can surface is an httpx type.
+    """
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    try:
+        import httpx
+    except ImportError:  # pragma: no cover — httpx ships with the SDK
+        return False
+    return isinstance(exc, httpx.TransportError)
 
 
 def _text_of(response: Any) -> str:
@@ -246,14 +268,26 @@ def _symbol(raw: str | None) -> str:
     return pr.normalise((raw or "").strip().strip("/[]"))
 
 
+def _mentioned_symbols(text: str) -> set[str]:
+    """Every /phoneme/ named in a piece of prose, normalised to Azure's spelling."""
+    return {_symbol(match) for match in _SLASHED_PHONEME.findall(text or "")}
+
+
 def validated(report: CoachingReport, compacted: dict[str, Any]) -> CoachingReport | None:
     """Drop anything the evidence does not support. None when nothing usable is left.
 
     The prompt already forbids inventing a phoneme. This is what makes it true: a model
     that names /ð/ → /z/ on a recording where Azure reported no such thing is not being
     creative, it is fabricating the one fact the learner cannot check for themselves.
+
+    The prose is checked as well as the fixes, because the UI says out loud that every
+    unsupported sound was removed, and a fabrication reads exactly the same to the learner
+    whether it arrives in a fix card or in the practice plan. Prose fails the whole report
+    rather than being edited: there is no way to cut a clause out of a sentence and be left
+    with English, and the offline report that replaces it is complete and correct.
     """
     observed = {(_symbol(e), _symbol(p)) for e, p in compacted["observed_pairs"]}
+    supported = {symbol for pair in observed for symbol in pair}
 
     kept = []
     for fix in report.priority_fixes:
@@ -271,9 +305,21 @@ def validated(report: CoachingReport, compacted: dict[str, Any]) -> CoachingRepo
 
     if not report.overall_comment.strip():
         return None
-    # Nothing survived while the evidence held substitutions: the answer is about some
-    # other recording, and the offline report is better than a hollowed-out one.
-    if not kept and compacted["observed_pairs"]:
+
+    prose = [report.overall_comment, report.practice_plan, report.stress_and_rhythm.drill]
+    prose.extend(report.stress_and_rhythm.issues)
+    for passage in prose:
+        invented = _mentioned_symbols(passage) - supported
+        if invented:
+            logger.warning(
+                "Rejected the model's report: it named %s, absent from the Azure data",
+                ", ".join(f"/{symbol}/" for symbol in sorted(invented)),
+            )
+            return None
+
+    # The model claimed fixes and every one of them was filtered out: the answer is about
+    # some other recording, and the offline report is better than a hollowed-out one.
+    if report.priority_fixes and not kept:
         return None
 
     return report.model_copy(update={"priority_fixes": kept[:MAX_PRIORITY_FIXES]})
@@ -283,13 +329,20 @@ def report_from_raw(raw: Any, source: str) -> CoachingReport | None:
     """Re-read a stored coaching payload. The reason `gemini_raw_json` is kept verbatim.
 
     Two shapes, told apart by `coach_source`: the model path stores the whole response, the
-    offline path stores the report itself.
+    offline path stores the report itself. A `gemini` row can hold *either*, though —
+    `coach()` stores the flat report when the response object will not serialise — so the
+    envelope is tried first and the flat shape is the fall-back rather than an error.
     """
     try:
         if source == SOURCE_GEMINI:
-            parts = (raw or {}).get("candidates", [{}])[0].get("content", {}).get("parts", [])
-            text = "".join(part.get("text") or "" for part in parts)
-            return CoachingReport.model_validate_json(text)
+            try:
+                parts = (
+                    (raw or {}).get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                )
+                text = "".join(part.get("text") or "" for part in parts)
+                return CoachingReport.model_validate_json(text)
+            except Exception:  # noqa: BLE001 — not an envelope, so try the flat shape
+                return CoachingReport.model_validate(raw)
         return CoachingReport.model_validate(raw)
     except Exception as exc:  # noqa: BLE001 — a stored row is not worth crashing a page for
         logger.warning("Could not re-read a stored %s report: %s", source, exc)
@@ -306,8 +359,19 @@ def coach(assessment: Any, reference_text: str, mode: Mode, *, client: Any = Non
     of them ends in the same place, and "ends in the same place" is the property worth
     testing.
     """
-    compacted = fallback_coach.compact(assessment, mode)
-    offline_report = fallback_coach.build_from_compacted(compacted)
+    # Wrapped because everything downstream assumes these two succeeded, and neither is
+    # trivial: compaction walks the whole Azure payload and the offline build ranks and
+    # groups it. A bug in either used to crash the page for the free path as well as the
+    # model one, which is exactly what "always returns a report" is supposed to rule out.
+    try:
+        compacted = fallback_coach.compact(assessment, mode)
+        offline_report = fallback_coach.build_from_compacted(compacted)
+    except Exception as exc:  # noqa: BLE001 — the guarantee is the whole point of the module
+        logger.error("Could not build the offline report", exc_info=True)
+        report = fallback_coach.emergency_report(f"{type(exc).__name__}: {exc}")
+        return CoachingResult(
+            report=report, source=SOURCE_FALLBACK, raw=report.model_dump()
+        )
 
     def fallback(reason: str) -> CoachingResult:
         if reason:

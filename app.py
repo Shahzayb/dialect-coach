@@ -20,8 +20,10 @@ import difflib
 import html
 import logging
 import sqlite3
+import threading
+import time
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import streamlit as st
@@ -50,6 +52,17 @@ CACHE_LIMIT = 10
 # Synthesised audio is orders of magnitude larger than the assessment JSON, so this cache
 # holds fewer entries — still far more than one drill sentence's worth of flagged words.
 TTS_CACHE_LIMIT = 24
+
+# How long the script pauses before re-running to check on a background assessment. Each
+# rerun is a full render, so this trades a little latency on finishing for not spinning the
+# CPU while Azure works.
+JOB_POLL_SECONDS = 0.4
+
+# The assessment now runs on a worker thread, so the cached connection can be touched from
+# two threads at once: the worker's INSERT against the meter reads at the foot of every
+# rerun. `check_same_thread=False` and WAL make that safe at the SQLite level; this makes it
+# safe at the `sqlite3.Connection` level, which is not documented to be thread-safe itself.
+_DB_LOCK = threading.Lock()
 
 MODE_LABELS: dict[str, Mode] = {
     "Drill — one or two sentences": Mode.DRILL,
@@ -174,6 +187,46 @@ class CachedAttempt:
     mode: Mode
 
 
+@dataclass
+class AssessOutcome:
+    """What a background assessment ended up with. Never renders itself.
+
+    `error` is an (icon, message) pair rather than a rendered alert for the same reason
+    `play()` returns one: this is produced on a worker thread, where calling into Streamlit
+    is unsupported. The main thread renders it once the job is collected.
+    """
+
+    assessment: Any = None
+    attempt_id: int | None = None
+    error: tuple[str, str] | None = None
+    cancelled: bool = False
+    reached_azure: bool = False
+
+
+@dataclass
+class AssessJob:
+    """One assessment running off the script thread.
+
+    Streamlit re-runs the whole script on every interaction but cannot interrupt a blocking
+    call already in progress, so an assessment that ran inline would leave the page frozen
+    with no way to render a Stop button, let alone act on it. The work therefore runs on a
+    worker thread that touches no Streamlit API, and the script polls it.
+
+    `outcome` is written exactly once, by the worker, immediately before it returns. The
+    main thread reads it only after `thread.is_alive()` is False, so the two never race.
+    """
+
+    cancel_event: threading.Event
+    key: str
+    reference_text: str
+    mode: Mode
+    thread: threading.Thread | None = None
+    outcome: AssessOutcome | None = None
+
+    def running(self) -> bool:
+        return self.thread is not None and self.thread.is_alive()
+
+
 def _cache_get(key: str) -> CachedAttempt | None:
     return lru_get(_session_cache("assessments"), key)
 
@@ -199,6 +252,16 @@ def severity_key(word: dict[str, Any]) -> tuple[int, float]:
     accuracy = word.get("accuracy")
     rank = 0 if (word.get("error_type") or "None") == "Omission" else 1
     return (rank, accuracy if isinstance(accuracy, (int, float)) else 0.0)
+
+
+def _scored_full(word: dict[str, Any]) -> bool:
+    """Whether a word scored full marks and was flagged for something other than accuracy.
+
+    An omitted word carries `accuracy: None` and must never land here — it was never
+    spoken, which is the opposite of a perfect score.
+    """
+    accuracy = word.get("accuracy")
+    return isinstance(accuracy, (int, float)) and accuracy >= 100
 
 
 def hover_text(word: dict[str, Any]) -> str:
@@ -388,11 +451,11 @@ def playback_buttons(
     left, right, _ = st.columns([1, 1, 3])
     with left:
         if st.button("🔊 Hear it", key=f"{key_prefix}-normal", disabled=offline,
-                     use_container_width=True):
+                     width="stretch"):
             failure = play(conn, text, slow=False, label=label, source=key_prefix)
     with right:
         if st.button("🐢 Slowly", key=f"{key_prefix}-slow", disabled=offline,
-                     use_container_width=True):
+                     width="stretch"):
             failure = play(conn, text, slow=True, label=label, source=key_prefix)
 
     # Rendered here, outside the columns, so a long message gets the full width instead of
@@ -414,6 +477,48 @@ def playback_buttons(
 
 
 # --- Startup and input -------------------------------------------------------------------------
+
+
+# Explicit widget keys, because Reset and Delete write to these through session state.
+TEXT_KEY = "reference_text"
+PRESET_KEY = "preset_choice"
+
+
+def _generation(name: str) -> int:
+    """The current generation of a rebuilt widget's key.
+
+    `st.audio_input` and `st.file_uploader` hold their own content and cannot be cleared by
+    writing to `st.session_state`, so the only way to empty one is to give it a key it has
+    never seen — which makes Streamlit build a fresh, empty widget. Bumping this counter is
+    what does that.
+    """
+    return int(st.session_state.get(f"{name}_generation", 0))
+
+
+def _bump(name: str) -> None:
+    st.session_state[f"{name}_generation"] = _generation(name) + 1
+
+
+def _apply_preset(mode: Mode) -> None:
+    """Load the chosen preset into the textarea. Runs before the next render."""
+    choice = st.session_state.get(PRESET_KEY)
+    st.session_state[TEXT_KEY] = PRESETS[mode].get(choice, "")
+
+
+def _delete_recording() -> None:
+    """Discard the take, keep everything else — the point is re-recording, not starting over."""
+    _bump("recording")
+    st.session_state["now_playing"] = None
+
+
+def _reset_form() -> None:
+    """Clear the whole surface back to a fresh start."""
+    st.session_state[TEXT_KEY] = ""
+    st.session_state[PRESET_KEY] = "Write my own"
+    _bump("recording")
+    _bump("upload")
+    st.session_state["last_key"] = None
+    st.session_state["now_playing"] = None
 
 
 def _metric(label: str, value: float | None) -> None:
@@ -463,13 +568,13 @@ def validate_reference(text: str) -> bool:
     return True
 
 
-def run_assessment(conn: sqlite3.Connection, audio: bytes, reference_text: str, mode: Mode):
-    """Convert, guard, assess, and store.
+def prepare_audio(
+    conn: sqlite3.Connection, audio: bytes, mode: Mode
+) -> tuple[bytes, float] | tuple[None, None]:
+    """Convert and price the recording. Returns (wav bytes, seconds), or (None, None).
 
-    Returns (Assessment, row id), or (None, None) on a handled error. The row id matters:
-    the coaching report is attached to that row later, and `db.attach_coaching` is an
-    UPDATE — the columns have existed since schema version 1 precisely so it is not a
-    migration.
+    Stays on the script thread: both steps are local and fast, and both need to report
+    their own failure immediately rather than through the job machinery.
     """
     try:
         wav_bytes, seconds = audio_utils.prepare(audio, mode)
@@ -483,39 +588,147 @@ def run_assessment(conn: sqlite3.Connection, audio: bytes, reference_text: str, 
         st.error(str(exc), icon="💸")
         return None, None
 
+    return wav_bytes, seconds
+
+
+def run_assessment_job(
+    conn: sqlite3.Connection,
+    wav_bytes: bytes,
+    seconds: float,
+    reference_text: str,
+    mode: Mode,
+    cancel_event: threading.Event,
+) -> AssessOutcome:
+    """Assess and store, off the script thread. Renders nothing, raises nothing.
+
+    Every exit is an `AssessOutcome`, including the unexpected ones: this runs on a worker
+    thread, where an escaping exception kills the thread silently and would leave the page
+    polling a job that never reports anything.
+
+    **A cancelled run is never recorded and never metered.** The check below sits before
+    `db.record_attempt`, so a stopped attempt writes no row — which is also what keeps it
+    off the usage meter, since the meter is derived from the attempts table. That is a
+    different question from the existing rule that a *completed* run counts every attempt
+    it made, retries and failures included: those re-uploaded the audio for a result the
+    user kept.
+    """
+    reached_azure = False
+
+    def note_attempt(_attempt: int) -> None:
+        nonlocal reached_azure
+        reached_azure = True
+
     try:
-        with st.spinner(f"Assessing {seconds:.0f}s of audio…"):
-            with audio_utils.temp_wav(wav_bytes) as wav_path:
-                assessment = speech_analyzer.analyse(wav_path, reference_text, mode)
+        with audio_utils.temp_wav(wav_bytes) as wav_path:
+            assessment = speech_analyzer.analyse(
+                wav_path, reference_text, mode,
+                cancel_event=cancel_event, on_attempt=note_attempt,
+            )
+
+        if cancel_event.is_set():
+            # Drill cannot be interrupted mid-call, so a stop clicked while Azure was
+            # answering lands here: the result arrived, and it is thrown away unrecorded.
+            return AssessOutcome(cancelled=True, reached_azure=reached_azure)
+
+        with _DB_LOCK:
+            attempt_id = db.record_attempt(
+                conn,
+                mode=mode,
+                reference_text=reference_text,
+                recognised_text=assessment.recognised_text,
+                # Attempts, not successes: a retry re-uploads the same audio. Offline
+                # replays report zero attempts and are excluded from the meter anyway.
+                audio_seconds=seconds * max(assessment.attempts, 1),
+                audio_sha256=utils.sha256_bytes(wav_bytes),
+                overall_scores=assessment.overall_scores,
+                azure_raw=assessment.raw if len(assessment.raw) > 1 else assessment.raw[0],
+                offline=assessment.offline,
+            )
+        return AssessOutcome(assessment=assessment, attempt_id=attempt_id)
+
+    except speech_analyzer.Cancelled as exc:
+        return AssessOutcome(cancelled=True, reached_azure=exc.reached_azure)
     except speech_analyzer.NoSpeechDetected as exc:
-        st.warning(str(exc), icon="🤫")
-        return None, None
+        return AssessOutcome(error=("🤫", str(exc)))
     except (utils.PermanentError, utils.TransientError, speech_analyzer.AssessmentError) as exc:
         if speech_analyzer.is_quota_exhausted(exc):
             # Azure is authoritative; block the rest of the month regardless of the meter.
             budget.mark_quota_exhausted()
         # redact() rather than str(): SDK error details can echo request context.
-        st.error(utils.redact(str(exc)), icon="🚫")
         logger.error("Assessment failed", exc_info=True)
-        return None, None
+        return AssessOutcome(error=("🚫", utils.redact(str(exc))))
     except utils.ConfigError as exc:
-        st.error(str(exc), icon="🔑")
-        return None, None
+        return AssessOutcome(error=("🔑", str(exc)))
+    except Exception as exc:  # noqa: BLE001 — nothing may escape a worker thread
+        logger.error("Unexpected assessment failure", exc_info=True)
+        return AssessOutcome(
+            error=("🚫", f"{type(exc).__name__}: {utils.redact(str(exc))}")
+        )
 
-    attempt_id = db.record_attempt(
-        conn,
-        mode=mode,
-        reference_text=reference_text,
-        recognised_text=assessment.recognised_text,
-        # Attempts, not successes: a retry re-uploads the same audio. Offline replays
-        # report zero attempts and are excluded from the meter anyway.
-        audio_seconds=seconds * max(assessment.attempts, 1),
-        audio_sha256=utils.sha256_bytes(wav_bytes),
-        overall_scores=assessment.overall_scores,
-        azure_raw=assessment.raw if len(assessment.raw) > 1 else assessment.raw[0],
-        offline=assessment.offline,
+
+def start_assessment(
+    conn: sqlite3.Connection, wav_bytes: bytes, seconds: float,
+    reference_text: str, mode: Mode, key: str,
+) -> None:
+    """Spawn the worker for one assessment and remember it for the poll loop."""
+    cancel_event = threading.Event()
+    job = AssessJob(
+        cancel_event=cancel_event, key=key, reference_text=reference_text, mode=mode,
     )
-    return assessment, attempt_id
+
+    def work() -> None:
+        # Written once, before the thread ends, so the poll loop never reads a half-set job.
+        job.outcome = run_assessment_job(
+            conn, wav_bytes, seconds, reference_text, mode, cancel_event
+        )
+
+    job.thread = threading.Thread(target=work, name="assessment", daemon=True)
+    st.session_state["assess_job"] = job
+    job.thread.start()
+
+
+def collect_finished_job() -> None:
+    """Fold a finished background assessment into session state. Renders its own alerts.
+
+    Runs before any widget is created, so `Assess` and `Stop` reflect this pass rather than
+    the previous one.
+    """
+    job: AssessJob | None = st.session_state.get("assess_job")
+    if job is None or job.running():
+        return
+
+    st.session_state["assess_job"] = None
+    outcome = job.outcome
+
+    if outcome is None:
+        # The worker catches everything, so this means the thread died before its own
+        # handler ran. Unreachable in practice; still not a reason to crash the page.
+        st.error("The assessment ended unexpectedly. Try it again.", icon="🚫")
+        return
+
+    if outcome.cancelled:
+        if outcome.reached_azure:
+            st.info(
+                "Assessment stopped. Some audio may already have reached Azure, but "
+                "nothing was recorded here and nothing was added to the meter.",
+                icon="🛑",
+            )
+        else:
+            st.info("Assessment stopped before anything was sent to Azure.", icon="🛑")
+        return
+
+    if outcome.error is not None:
+        icon, message = outcome.error
+        st.error(message, icon=icon)
+        return
+
+    _cache_put(CachedAttempt(
+        key=job.key, assessment=outcome.assessment, reference_text=job.reference_text,
+        attempt_id=outcome.attempt_id, mode=job.mode,
+    ))
+    st.session_state["last_key"] = job.key
+    # A fresh result must not open with the previous attempt's word still queued.
+    st.session_state["now_playing"] = None
 
 
 # --- Result rendering --------------------------------------------------------------------------
@@ -536,6 +749,20 @@ def render_scores(assessment) -> None:
 # --- Coaching ------------------------------------------------------------------------------------
 
 
+def _gemini_attempted(key: str) -> bool:
+    """Whether a real Gemini call has already been bought for this attempt.
+
+    Tracked separately from which coach wrote the report on screen, because a call that
+    was spent and then fell back leaves a `fallback` report behind — and that must not read
+    as "never asked".
+    """
+    return bool(lru_get(_session_cache("gemini_attempted"), key))
+
+
+def _mark_gemini_attempted(key: str) -> None:
+    lru_put(_session_cache("gemini_attempted"), key, True, CACHE_LIMIT)
+
+
 def coaching_for(
     conn: sqlite3.Connection, entry: CachedAttempt, *, ask_model: bool
 ) -> tuple[Any, str]:
@@ -549,19 +776,27 @@ def coaching_for(
     """
     cache = _session_cache("coaching")
     cached = lru_get(cache, entry.key)
-    already_asked = cached is not None and cached[1] == fallback_coach.SOURCE_GEMINI
-    if cached is not None and (not ask_model or already_asked):
-        # `already_asked` is not redundant with the button's disabled flag. The click is
+    if cached is not None and (not ask_model or _gemini_attempted(entry.key)):
+        # The attempted-flag is not redundant with the button's disabled flag. The click is
         # handled in the same pass that rendered the button, so the button still shows as
         # enabled until the next rerun — and a second click on it would buy a second call.
         # The guard belongs where the spend is, the same rule the TTS cache follows.
         return cached
 
     if ask_model:
+        # Marked before the call, not after, and on the attempt rather than the outcome: a
+        # call that reached Gemini and then fell back (malformed JSON, nothing surviving
+        # validation) has already been spent, so keying this off the returned source would
+        # leave the button live and let the same failure be bought over and over.
+        _mark_gemini_attempted(entry.key)
         with st.spinner("Asking Gemini for a second opinion…"):
             result = ai_coach.coach(entry.assessment, entry.reference_text, entry.mode)
     else:
-        report = fallback_coach.build(entry.assessment, entry.mode)
+        try:
+            report = fallback_coach.build(entry.assessment, entry.mode)
+        except Exception as exc:  # noqa: BLE001 — a report is promised on every assessment
+            logger.error("Could not build the offline report", exc_info=True)
+            report = fallback_coach.emergency_report(f"{type(exc).__name__}: {exc}")
         result = ai_coach.CoachingResult(
             report=report, source=fallback_coach.SOURCE_FALLBACK, raw=report.model_dump()
         )
@@ -605,13 +840,14 @@ def render_coaching(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
     """
     st.subheader("What to work on")
 
-    _, cached_source = lru_get(_session_cache("coaching"), entry.key) or (None, None)
     usable, reason = ai_coach.available()
 
     asked = st.button(
         "✨ Improve this with Gemini",
         key=f"coach-{entry.key}",
-        disabled=not usable or cached_source == fallback_coach.SOURCE_GEMINI,
+        # Disabled once a call has been *bought* for this attempt, whatever came back:
+        # a spent call that fell back must not be re-buyable.
+        disabled=not usable or _gemini_attempted(entry.key),
         help="One free-tier call. The report below is already complete without it.",
     )
     if usable:
@@ -802,6 +1038,13 @@ def render_result(conn: sqlite3.Connection, entry: CachedAttempt, source) -> Non
     flagged = sorted(
         (w for w in assessment.words if speech_analyzer.is_flagged(w)), key=severity_key
     )
+    # A word can score a perfect 100 and still be flagged, because `is_flagged` also fires
+    # on a delivery fault. Those are worth keeping — a monotone 100 is real — but they are
+    # not what "flagged words" is for, and in a paragraph they bury the words that actually
+    # need work. Collapsed, not dropped.
+    needs_attention = [w for w in flagged if not _scored_full(w)]
+    perfect = [w for w in flagged if _scored_full(w)]
+
     st.subheader(f"Flagged words ({len(flagged)} of {len(assessment.words)})")
     if not flagged:
         st.success("Nothing flagged in that attempt.")
@@ -811,8 +1054,19 @@ def render_result(conn: sqlite3.Connection, entry: CachedAttempt, source) -> Non
             "form — right for drilling a sound, but not how it sounds inside the sentence. "
             "Use the whole-text playback above for that."
         )
-        for index, word in enumerate(flagged):
+        index = 0
+        for word in needs_attention:
             render_word_card(conn, word, index)
+            index += 1
+        if perfect:
+            # The index keeps counting across both groups: `render_word_card` builds its
+            # playback widget keys from it, and a repeated key is a hard Streamlit error.
+            with st.expander(
+                f"Scored 100 but still flagged ({len(perfect)}) — delivery, not sounds"
+            ):
+                for word in perfect:
+                    render_word_card(conn, word, index)
+                    index += 1
 
     render_delivery(assessment)
 
@@ -824,6 +1078,11 @@ def render() -> None:
 
     check_startup()
     conn = get_connection()
+
+    # Before any widget exists, so `running` below describes this pass and not the last one.
+    collect_finished_job()
+    job: AssessJob | None = st.session_state.get("assess_job")
+    running = job is not None
 
     if utils.offline_mode():
         st.info(
@@ -839,33 +1098,69 @@ def render() -> None:
     )
 
     presets = PRESETS[mode]
-    choice = st.selectbox("Practice text", ["Write my own", *presets])
-    default_text = presets.get(choice, "")
-    reference_text = st.text_area("Reference text", value=default_text, height=140)
+    st.selectbox(
+        "Practice text", ["Write my own", *presets], key=PRESET_KEY,
+        on_change=_apply_preset, args=(mode,),
+    )
+    reference_text = st.text_area("Reference text", key=TEXT_KEY, height=140)
 
-    audio = st.audio_input("Record")
+    audio = st.audio_input("Record", key=f"recording-{_generation('recording')}")
+    if audio is not None:
+        st.button(
+            "🗑️ Delete recording", on_click=_delete_recording, disabled=running,
+            help="Discard this take and record again. Your reference text is kept.",
+        )
     uploaded = st.file_uploader(
-        "…or upload a file", type=list(audio_utils.SUPPORTED_UPLOAD_TYPES)
+        "…or upload a file", type=list(audio_utils.SUPPORTED_UPLOAD_TYPES),
+        key=f"upload-{_generation('upload')}",
     )
     source = audio or uploaded
 
-    if st.button("Assess", type="primary", disabled=source is None):
+    # Nothing but the buttons goes inside these columns: a helper called within `with
+    # column:` appends into it, and an alert laid out at a button's width is unreadable.
+    left, middle, right = st.columns([1, 1, 3])
+    with left:
+        assess_clicked = st.button(
+            "Assess", type="primary", disabled=running or source is None,
+            width="stretch",
+        )
+    with middle:
+        stop_clicked = (
+            st.button("🛑 Stop", width="stretch") if running else False
+        )
+    with right:
+        st.button("↺ Reset", on_click=_reset_form, disabled=running)
+
+    if stop_clicked and job is not None:
+        job.cancel_event.set()
+
+    # Guarded on state, not on the button's `disabled` flag: a click is handled in the same
+    # rerun that drew the button, so the on-screen button is still enabled until the next
+    # one. Without this a fast double-click starts two assessments.
+    if assess_clicked and not running and source is not None:
         if validate_reference(reference_text):
             audio_bytes = source.getvalue()
             key = utils.attempt_hash(reference_text, audio_bytes, mode)
             cached = _cache_get(key)
-            if cached is None:
-                assessment, attempt_id = run_assessment(conn, audio_bytes, reference_text, mode)
-                if assessment is not None:
-                    _cache_put(CachedAttempt(
-                        key=key, assessment=assessment, reference_text=reference_text,
-                        attempt_id=attempt_id, mode=mode,
-                    ))
+            if cached is not None:
+                # The fastest path in the app: one click to retry the same drill sentence.
+                # No thread, no polling, no extra rerun.
+                st.session_state["last_key"] = key
+                st.session_state["now_playing"] = None
             else:
-                assessment = cached.assessment
-            st.session_state["last_key"] = key if assessment is not None else None
-            # A fresh result must not open with the previous attempt's word still queued.
-            st.session_state["now_playing"] = None
+                wav_bytes, seconds = prepare_audio(conn, audio_bytes, mode)
+                if wav_bytes is not None:
+                    start_assessment(
+                        conn, wav_bytes, seconds, reference_text, mode, key
+                    )
+                    st.rerun()
+
+    if running:
+        st.info("Assessing… click Stop to cancel.", icon="⏳")
+        # The only way to wait on a worker thread here: end this pass and start another.
+        # Each rerun re-renders Stop and picks up a click made since the last one.
+        time.sleep(JOB_POLL_SECONDS)
+        st.rerun()
 
     last_key = st.session_state.get("last_key")
     if last_key:
@@ -875,8 +1170,11 @@ def render() -> None:
             render_result(conn, cached, source)
 
     st.divider()
-    st.caption(budget.summary_line(conn))
-    recent = db.recent_attempts(conn, limit=5)
+    # Locked: a background assessment may be inserting its row against these same reads.
+    with _DB_LOCK:
+        summary = budget.summary_line(conn)
+        recent = db.recent_attempts(conn, limit=5)
+    st.caption(summary)
     if recent:
         with st.expander(f"History ({len(recent)} most recent)"):
             st.dataframe(
@@ -888,7 +1186,7 @@ def render() -> None:
                     }
                     for r in recent
                 ],
-                hide_index=True, use_container_width=True,
+                hide_index=True, width="stretch",
             )
 
 
