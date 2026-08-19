@@ -24,8 +24,13 @@
 
 name: CI
 
+# `push` is scoped to main so a branch with an open pull request is not built twice — an
+# unscoped `push` plus `pull_request` produces two identical runs for every PR commit. Work
+# happens on branches and lands through a PR, so `pull_request` is what actually gates a
+# merge, and the `push` trigger is there to keep main itself continuously checked.
 on:
   push:
+    branches: [main]
   pull_request:
 
 # No job may write anything. Releases are a separate workflow with its own permissions.
