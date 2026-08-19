@@ -33,22 +33,33 @@ import utils
 logger = logging.getLogger(__name__)
 
 # --- Voices ---------------------------------------------------------------------------------
-# VERIFIED BY INTROSPECTION, not recalled: `scripts/list_voices.py` calls the SDK's
-# `get_voices_async("en-US")` and prints the live roster, which changes without notice. Do not
-# add a name here without seeing it in that output.
+# VERIFIED BY INTROSPECTION on 2026-08-19, not recalled: `scripts/list_voices.py` calls the
+# SDK's `get_voices_async("en-US")` and prints the live roster, which changes without notice.
+# Do not add a name here without seeing it in that output. That run also confirmed the listing
+# itself charges nothing — the TTS meter read 0 before and 0 after.
 #
-# Chosen for spread rather than for quality: two male, two female, and deliberately different
-# in timbre and speaking style, because the variability IS the intervention. A block that
-# cycles four voices of the same character is a single-talker block wearing a disguise.
+# Chosen for SPREAD rather than for quality, because the variability IS the intervention. Six
+# talkers, three male and three female, deliberately drawn from **two different voice
+# generations**: Andrew and Ava are the newer conversational voices, while Aria, Guy, Jenny and
+# Tony are the older ones and carry an audibly different recording character. Four voices of
+# the same generation would be a single-talker block wearing a disguise, which is the failure
+# HVPT exists to avoid — a listener who only ever hears one voice type learns that voice type.
 #
-# This is NOT `AZURE_TTS_VOICE`, and the two must never be collapsed. That setting is the one
-# consistent model "Hear it" plays for imitation everywhere else in the app; identification
-# wants variety. They pull in opposite directions on purpose.
+# Only plain `…Neural` voices, never the DragonHD or MAI families: `en-US-BrianNeural` is the
+# one voice this project has actually seen billed as neural on F0, and the newer families are
+# an unverified pricing class.
+#
+# `en-US-BrianNeural` is deliberately ABSENT even though it is a fine voice: it is the default
+# for `AZURE_TTS_VOICE`, the single consistent model "Hear it" plays for imitation everywhere
+# else in the app. These two settings must never be collapsed — imitation wants one model,
+# identification wants variety, and they pull in opposite directions on purpose.
 VOICES: tuple[str, ...] = (
     "en-US-AndrewNeural",
+    "en-US-AriaNeural",
+    "en-US-GuyNeural",
     "en-US-AvaNeural",
-    "en-US-BrianNeural",
-    "en-US-EmmaNeural",
+    "en-US-JennyNeural",
+    "en-US-TonyNeural",
 )
 
 # Below this, refuse to run rather than degrade. Falling back to one voice would still look

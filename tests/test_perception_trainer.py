@@ -145,32 +145,42 @@ def test_everything_is_novel_the_first_time() -> None:
 
 
 def test_unheard_combinations_are_preferred_over_heard_ones() -> None:
-    """The definition that makes 'unseen items' workable: an unheard (word, voice)."""
+    """The definition that makes 'unseen items' workable: an unheard (word, voice).
+
+    Five pairs over six voices is a 60-stimulus pool, so a second block has plenty left
+    that has never been played and must take from there first.
+    """
     first = build()
     heard = {(t.word, t.voice): "2026-08-01T00:00:00Z" for t in first.trials}
     second = build(heard=heard, rng=random.Random(11))
     reused = [t for t in second.trials if not t.novel]
-    # 5 pairs x 2 words x 4 voices = 40 stimuli; 20 were heard, so 20 unheard remain.
     assert reused == []
     assert not (set((t.word, t.voice) for t in second.trials) & set(heard))
 
 
 def test_once_novelty_runs_out_the_least_recently_heard_comes_back() -> None:
-    every = build(trials=40)
-    old = {(t.word, t.voice): "2026-08-01T00:00:00Z" for t in every.trials[:20]}
-    recent = {(t.word, t.voice): "2026-08-09T00:00:00Z" for t in every.trials[20:]}
+    # The whole pool, so nothing unheard is left for the block to prefer.
+    pool = [(word, voice)
+            for first, second in pt.pairs_for(EXPECTED, PRODUCED)
+            for word in (first, second)
+            for voice in pt.VOICES]
+    half = len(pool) // 2
+    old = {stimulus: "2026-08-01T00:00:00Z" for stimulus in pool[:half]}
+    recent = {stimulus: "2026-08-09T00:00:00Z" for stimulus in pool[half:]}
+
     block = build(heard={**old, **recent}, rng=random.Random(3))
     assert block.novel_count == 0
     assert all((t.word, t.voice) in old for t in block.trials)
 
 
 def test_a_short_pool_caps_the_block_rather_than_repeating_a_stimulus() -> None:
-    # /ð/ → /z/ has three pairs: 3 x 2 x 4 = 24 stimuli.
+    """/ð/ → /z/ has three pairs, so the pool is 3 x 2 words x however many voices."""
+    expected_pool = len(pt.pairs_for("ð", "z")) * 2 * len(pt.VOICES)
     block = pt.build_block(item="/ð/ → /z/", expected="ð", produced="z",
-                           trials=100, rng=random.Random(1))
+                           trials=1000, rng=random.Random(1))
     stimuli = [(t.word, t.voice) for t in block.trials]
-    assert len(stimuli) == 24
-    assert len(set(stimuli)) == 24
+    assert len(stimuli) == expected_pool
+    assert len(set(stimuli)) == expected_pool, "a stimulus was played twice in one block"
 
 
 # --- Determinism and length -------------------------------------------------------------------
