@@ -21,18 +21,18 @@ the PR, the tag, the GitHub release and closing milestone v0.5.0 are still to do
 
 **v0.3.0 — 2026-08-19.** Score breakdown, headline mispronunciation/delivery-fault counts,
 and the per-word phoneme hover tooltip, merged via
-[PR #21](https://github.com/Shahzayb/pronunciation-analyzer/pull/21), tagged, and released
+[PR #21](https://github.com/Shahzayb/dialect-coach/pull/21), tagged, and released
 (`gh release create v0.3.0`). Closes #10, #11, #13. Splits #12 — its content-score half
 (vocabulary/grammar/topic) retitled and moved to milestone v0.12.0, since that data only
 comes from unscripted assessment, not built yet. Milestone v0.3.0 closed.
 
 **v0.2.0 — 2026-08-19.** Stop, reset and delete controls on the record-and-assess surface,
-merged via [PR #20](https://github.com/Shahzayb/pronunciation-analyzer/pull/20), tagged, and
+merged via [PR #20](https://github.com/Shahzayb/dialect-coach/pull/20), tagged, and
 released (`gh release create v0.2.0`). Closes #4, #5, #6, #7, #8. Milestone v0.2.0 closed.
 Also fixed the 8 code-review findings left open at v0.1.0 (see below — no longer "open").
 
 **v0.1.0 — 2026-08-18.** The coaching layer, merged via
-[PR #19](https://github.com/Shahzayb/pronunciation-analyzer/pull/19), tagged, and released
+[PR #19](https://github.com/Shahzayb/dialect-coach/pull/19), tagged, and released
 (`gh release create v0.1.0`). References #9 (prosody feedback) in the release notes without
 closing it — `stress_and_rhythm` addresses the "no way to get feedback" complaint, but the
 issue is left for the user to close once satisfied. Released with the 8 code-review findings

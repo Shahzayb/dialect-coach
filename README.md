@@ -1,4 +1,4 @@
-# pronunciation-analyzer
+# dialect-coach
 
 A single-user English pronunciation and delivery coach. It records spoken en-US English,
 analyses it at the phoneme, syllable, word and prosody level with Azure Speech

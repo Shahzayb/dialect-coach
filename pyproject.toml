@@ -1,4 +1,4 @@
 # pyproject.toml
 [project]
-name = "pronunciation-analyzer"
+name = "dialect-coach"
 version = "0.5.0"
