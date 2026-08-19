@@ -91,3 +91,49 @@ def test_temp_wav_removes_the_file_when_the_body_raises() -> None:
             raise RuntimeError("Azure blew up mid-call")
     assert captured is not None
     assert not os.path.exists(captured)
+
+
+# --- The echo track ---------------------------------------------------------------------------
+# The shadowing warm-up: the model says a phrase, then leaves exactly enough room to say it
+# back. The gap is derived from the clip because a fixed one either runs out mid-phrase on the
+# long sentences or leaves dead air after the short ones.
+
+
+def test_the_echo_track_leaves_a_gap_as_long_as_each_clip() -> None:
+    track = audio_utils.echo_track([make_wav(1.0), make_wav(2.0)])
+    assert audio_utils.duration_seconds(track) == pytest.approx(6.0, abs=0.05)
+
+
+def test_the_echo_tail_widens_every_gap() -> None:
+    track = audio_utils.echo_track([make_wav(1.0)], tail_ms=400)
+    assert audio_utils.duration_seconds(track) == pytest.approx(2.4, abs=0.05)
+
+
+def test_the_echo_track_is_resampled_to_the_assessment_format() -> None:
+    """Azure's synthesiser returns 24 kHz while `to_pcm_wav` targets 16 kHz, and AudioSegment
+    concatenation silently keeps the FIRST segment's rate — a mismatch would not raise, it
+    would play the rest of the track at the wrong pitch."""
+    track = audio_utils.echo_track([make_wav(0.5, sample_rate=24_000, channels=1)])
+    with wave.open(io.BytesIO(track), "rb") as w:
+        assert w.getframerate() == audio_utils.TARGET_SAMPLE_RATE
+        assert w.getnchannels() == audio_utils.TARGET_CHANNELS
+        assert w.getsampwidth() == audio_utils.TARGET_SAMPLE_WIDTH
+
+
+def test_clips_at_different_rates_still_produce_the_right_length() -> None:
+    """The regression the resampling exists to prevent: a wrong rate shows up as a wrong length."""
+    track = audio_utils.echo_track(
+        [make_wav(1.0, sample_rate=24_000, channels=1), make_wav(1.0)]
+    )
+    assert audio_utils.duration_seconds(track) == pytest.approx(4.0, abs=0.05)
+
+
+def test_an_empty_echo_track_is_refused() -> None:
+    with pytest.raises(audio_utils.AudioError):
+        audio_utils.echo_track([])
+
+
+def test_an_undecodable_clip_is_refused_with_a_readable_message() -> None:
+    with pytest.raises(audio_utils.AudioError) as caught:
+        audio_utils.echo_track([b"not audio at all"])
+    assert "could not be decoded" in str(caught.value)

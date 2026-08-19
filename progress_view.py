@@ -662,9 +662,10 @@ def shadow_gap_chart(frame: pd.DataFrame) -> alt.Chart:
     the caption above it says so in as many words.
     """
     base = alt.Chart(frame)
-    zero = alt.Chart(pd.DataFrame({"y": [0.0]})).mark_rule(
-        strokeDash=[4, 4], color="#8a8a8a"
-    ).encode(y=alt.Y("y:Q"))
+    # Drawn from `frame` with a constant datum rather than from a one-row frame of its own:
+    # a facet needs a single top-level data source, and a second one makes altair refuse the
+    # whole chart rather than quietly drawing the rule in the wrong place.
+    zero = base.mark_rule(strokeDash=[4, 4], color="#8a8a8a").encode(y=alt.datum(0))
 
     points = base.mark_line(point=True, strokeWidth=2, color="#c46b1c").encode(
         x=alt.X("when:T", title=None),

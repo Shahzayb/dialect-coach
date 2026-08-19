@@ -7,7 +7,9 @@ including the "—" for an unavailable prosody score.
 
 from __future__ import annotations
 
+import io
 import os
+from datetime import datetime, timezone
 
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -1375,3 +1377,273 @@ def test_a_block_at_the_chance_floor_says_it_proves_nothing(run_app, no_synthesi
 
     warnings = " ".join(w.value for w in app.warning)
     assert "what guessing looks like" in warnings
+
+
+# --- Shadowing ---------------------------------------------------------------------------------
+# The one surface where practice happens WHILE speaking. What is checked here is the wiring the
+# pure modules cannot see: that the offer reaches Today with no history at all, that the model
+# and the recorder end up on screen together with nothing that reruns between them, and above
+# all that the tag reaches the database — an untagged shadowed read is indistinguishable from a
+# cold one afterwards and lands on the trajectory the tag exists to keep it off.
+
+
+def real_wav(seconds: float = 0.5) -> bytes:
+    """A decodable WAV, since the echo track really runs through pydub."""
+    import struct
+    import wave
+
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(24_000)
+        handle.writeframes(struct.pack("<h", 0) * int(seconds * 24_000))
+    return buffer.getvalue()
+
+
+@pytest.fixture
+def shadow_synthesis(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """`tts.synthesise` stubbed with real decodable audio; the meter around it stays real."""
+    import tts
+
+    monkeypatch.setenv("TTS_CACHE_DIR", str(tmp_path / "shadow_cache"))
+    monkeypatch.setenv("OFFLINE_MODE", "false")
+    monkeypatch.setenv("AZURE_SPEECH_KEY", "test-key-not-a-real-one")
+    monkeypatch.setenv("AZURE_SPEECH_REGION", "westeurope")
+    monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
+
+    calls: list[tuple[str, bool]] = []
+
+    def fake(text, *, voice=None, slow=False, on_attempt=None):
+        if on_attempt is not None:
+            on_attempt(1)
+        calls.append((text, slow))
+        payload = tts.payload_for(text, slow=slow, voice=voice)
+        return tts.Synthesis(audio=real_wav(), characters=len(payload),
+                             voice=voice or tts.voice_name(), attempts=1)
+
+    monkeypatch.setattr(tts, "synthesise", fake)
+    return calls
+
+
+def open_shadow(app: AppTest) -> AppTest:
+    return [b for b in app.button if "Shadow this passage" in b.label][0].click().run()
+
+
+def prepare_model(app: AppTest) -> AppTest:
+    return [b for b in app.button if "Prepare the model" in b.label][0].click().run()
+
+
+def test_shadowing_is_offered_with_no_history_at_all(run_app) -> None:
+    """It is the one practice on this page that needs none: it trains rhythm against a model
+    rather than a sound the recordings flagged, so there is nothing for it to wait for."""
+    app = run_app()
+    assert not app.exception
+    assert any("Shadow this passage" in b.label for b in app.button)
+
+
+def test_the_shadow_offer_lists_the_paragraph_presets(run_app) -> None:
+    """Not a second list: a passage differing by one word would pair against nothing."""
+    app = run_app()
+    options = list(app.selectbox(key="shadow-passage").options)
+    assert options == list(app_module.PRESETS[Mode.PARAGRAPH])
+
+
+def test_opening_a_session_renders_it_in_place(run_app) -> None:
+    """Streamlit cannot select a tab programmatically, so the session renders inside Today —
+    the pattern the perception block already established."""
+    app = open_shadow(run_app())
+    assert not app.exception
+    assert app.session_state[app_module.SHADOW_KEY] is not None
+    assert any("Shadowing:" in m.value for m in app.markdown)
+
+
+def test_the_surface_says_nothing_is_scored_while_shadowing(run_app) -> None:
+    app = open_shadow(run_app())
+    captions = " ".join(c.value for c in app.caption)
+    assert "not another reading you get marked on" in captions
+
+
+def test_the_surface_demands_headphones(run_app) -> None:
+    """On speakers Azure hears the model too and scores the mixture."""
+    app = open_shadow(run_app())
+    assert any("Headphones" in w.value for w in app.warning)
+
+
+def test_preparing_the_model_is_disabled_offline(run_app) -> None:
+    """Synthesis is a live call by definition and there is no fixture to replay for audio —
+    the same rule "Hear it" follows."""
+    app = open_shadow(run_app())
+    prepare = [b for b in app.button if "Prepare the model" in b.label][0]
+    assert prepare.disabled
+    captions = " ".join(c.value for c in app.caption)
+    assert "OFFLINE_MODE" in captions
+
+
+def today_recorders(app: AppTest) -> list:
+    """Audio inputs on the Today tab only — the Practice tab has its own on every pass."""
+    return list(app.tabs[0].get("audio_input"))
+
+
+def test_no_recorder_appears_before_the_model_does(run_app) -> None:
+    """The recorder is only useful next to a player, and one that reruns to fetch the model
+    mid-take would cut the recording in half."""
+    app = open_shadow(run_app())
+    assert today_recorders(app) == []
+
+
+def test_the_model_and_the_recorder_arrive_together(run_app, shadow_synthesis) -> None:
+    """The layout constraint, asserted: `st.audio_input` holds a live MediaRecorder, so
+    nothing may rerun between pressing record and pressing play."""
+    app = prepare_model(open_shadow(run_app()))
+    assert not app.exception
+    assert today_recorders(app)
+    assert not any("Prepare the model" in b.label for b in app.button)
+
+
+def test_the_whole_passage_is_bought_as_one_clip_for_speaking_along(
+    run_app, shadow_synthesis
+) -> None:
+    app = open_shadow(run_app())
+    passage = app.session_state[app_module.SHADOW_KEY]["passage"]
+    prepare_model(app)
+    assert [text for text, _ in shadow_synthesis] == [passage]
+
+
+def test_a_second_preparation_charges_nothing(run_app, shadow_synthesis) -> None:
+    """The disk lookup happens before the pre-flight and before the meter, the same ordering
+    `play()` depends on."""
+    app = prepare_model(open_shadow(run_app()))
+    app.session_state[app_module.SHADOW_KEY]["audio"] = {}
+    prepare_model(app.run())
+    assert len(shadow_synthesis) == 1
+
+
+def test_echo_mode_buys_one_clip_per_phrase(run_app, shadow_synthesis) -> None:
+    import shadowing
+
+    app = open_shadow(run_app())
+    passage = app.session_state[app_module.SHADOW_KEY]["passage"]
+    app = app.radio(key="shadow-mode").set_value(shadowing.ECHO).run()
+    prepare_model(app)
+    assert [text for text, _ in shadow_synthesis] == shadowing.phrases(passage)
+
+
+def test_echo_mode_offers_no_recorder_at_all(run_app, shadow_synthesis) -> None:
+    """Its recording would pause between every phrase, so Azure would mark the delivery down
+    for a gap the format put there. Offering it as a warm-up is honest; scoring it is not."""
+    import shadowing
+
+    app = open_shadow(run_app())
+    app = app.radio(key="shadow-mode").set_value(shadowing.ECHO).run()
+    app = prepare_model(app)
+    assert today_recorders(app) == []
+    assert not any("Assess this read" in b.label for b in app.button)
+    assert any("not assessed" in m.value for m in app.markdown)
+
+
+def test_the_slow_rate_is_a_separate_purchase(run_app, shadow_synthesis) -> None:
+    app = prepare_model(open_shadow(run_app()))
+    app = app.checkbox(key="shadow-slow").set_value(True).run()
+    prepare_model(app)
+    assert [slow for _, slow in shadow_synthesis] == [False, True]
+
+
+def test_a_shadowed_read_is_stored_tagged(run_app, shadow_synthesis) -> None:
+    """The load-bearing assertion of the whole chunk."""
+    import shadowing
+
+    app = prepare_model(open_shadow(run_app()))
+    state = app.session_state[app_module.SHADOW_KEY]
+    passage = str(state["passage"])
+
+    conn = db.connect(os.environ["DB_PATH"])
+    attempt_id = db.record_attempt(
+        conn, mode=Mode.PARAGRAPH, reference_text=passage, recognised_text=passage,
+        audio_seconds=70.0, audio_sha256="shadowed-read",
+        overall_scores={"pron_score": 80.0, "accuracy": 85.0, "fluency": 78.0,
+                        "completeness": 100.0, "prosody": 70.0},
+        azure_raw={"RecognitionStatus": "Success"},
+    )
+    db.tag_attempt(conn, attempt_id, shadowing.SHADOW_TAG)
+
+    row = [r for r in db.attempt_series(conn) if r["id"] == attempt_id][0]
+    conn.close()
+    assert row["shadowed"]
+
+
+def test_finishing_a_read_puts_the_passage_on_the_queue(run_app, shadow_synthesis) -> None:
+    """Created on first USE — a session opened and abandoned adds no standing practice."""
+    import practice_queue
+
+    app = open_shadow(run_app())
+    state = app.session_state[app_module.SHADOW_KEY]
+    conn = db.connect(os.environ["DB_PATH"])
+    assert [r for r in db.targets(conn) if r["kind"] == practice_queue.SHADOW] == []
+
+    app_module.record_shadow_session(
+        conn, str(state["title"]), str(state["passage"]),
+        now=datetime(2026, 8, 19, tzinfo=timezone.utc),
+    )
+    rows = [r for r in db.targets(conn) if r["kind"] == practice_queue.SHADOW]
+    conn.close()
+    assert len(rows) == 1
+    assert rows[0]["next_due"] > "2026-08-19"
+
+
+def test_a_shadow_target_does_not_appear_in_the_three_slots(run_app, shadow_synthesis) -> None:
+    """It is never promoted into one and never graduates out of one, so counting it would
+    retire a sound the recordings are still flagging."""
+    import practice_queue
+
+    conn = db.connect(os.environ["DB_PATH"])
+    app_module.record_shadow_session(
+        conn, "Benchmark", app_module.PRESETS[Mode.PARAGRAPH][
+            list(app_module.PRESETS[Mode.PARAGRAPH])[0]
+        ], now=datetime(2026, 8, 19, tzinfo=timezone.utc),
+    )
+    conn.close()
+
+    app = run_app()
+    assert not app.exception
+    headings = " ".join(m.value for m in app.markdown)
+    assert f"Working on (0 of {utils.MAX_ACTIVE_TARGETS})" in headings
+
+
+def test_backing_out_of_a_session_returns_to_today(run_app) -> None:
+    app = open_shadow(run_app())
+    app = [b for b in app.button if "Back to Today" in b.label][0].click().run()
+    assert app.session_state[app_module.SHADOW_KEY] is None
+    assert any("Shadow this passage" in b.label for b in app.button)
+
+
+def test_the_progress_tab_names_the_delta_against_a_cold_read(run_app) -> None:
+    """The exit criterion, on screen: a shadowed read and a cold read of the same passage
+    side by side with their fluency and prosody delta named."""
+    import progress_view
+    import shadowing
+
+    conn = db.connect(os.environ["DB_PATH"])
+    for index, (fluency, prosody, shadowed) in enumerate(
+        [(70.0, 60.0, False), (78.0, 69.0, True)]
+    ):
+        attempt_id = db.record_attempt(
+            conn, mode=Mode.PARAGRAPH,
+            reference_text=progress_view.BENCHMARK_PASSAGE,
+            recognised_text=progress_view.BENCHMARK_PASSAGE,
+            audio_seconds=70.0, audio_sha256=f"pair-{index}",
+            overall_scores={"pron_score": 80.0, "accuracy": 85.0, "fluency": fluency,
+                            "completeness": 100.0, "prosody": prosody},
+            azure_raw={"RecognitionStatus": "Success"},
+            created_at=f"2026-07-0{index + 1}T08:00:00Z",
+        )
+        if shadowed:
+            db.tag_attempt(conn, attempt_id, shadowing.SHADOW_TAG)
+    conn.close()
+
+    app = run_app()
+    assert not app.exception
+    said = " ".join(m.value for m in app.markdown)
+    assert "Fluency +8.0" in said
+    assert "Prosody +9.0" in said
+    assert "1 pair" in said

@@ -223,3 +223,58 @@ def test_the_queue_fingerprint_moves_when_anything_it_covers_does(tmp_path) -> N
     db.record_trial(conn, block_id="b", target_id=target_id, item="x", word="w",
                     voice="v", novel=True, alternatives=2, answered="w", correct=True)
     assert db.queue_fingerprint(conn) != after_target
+
+
+# --- Attempt tags -----------------------------------------------------------------------------
+# How an attempt was produced, when it was produced in some way other than reading the text
+# cold. A separate table rather than a column: `attempts` is created with CREATE TABLE IF NOT
+# EXISTS, so a column would need a real ALTER TABLE and `_migrate` has no upgrade path.
+
+
+def test_tagging_an_attempt_is_readable_back(conn: sqlite3.Connection) -> None:
+    attempt_id = add(conn)
+    db.tag_attempt(conn, attempt_id, db.SHADOW_TAG)
+    assert db.tags_for(conn, attempt_id) == {db.SHADOW_TAG}
+
+
+def test_an_untagged_attempt_has_no_tags(conn: sqlite3.Connection) -> None:
+    assert db.tags_for(conn, add(conn)) == set()
+
+
+def test_tagging_twice_is_a_no_op(conn: sqlite3.Connection) -> None:
+    """Streamlit re-runs the script constantly; a second write must not raise or duplicate."""
+    attempt_id = add(conn)
+    db.tag_attempt(conn, attempt_id, db.SHADOW_TAG)
+    db.tag_attempt(conn, attempt_id, db.SHADOW_TAG)
+    assert db.tags_for(conn, attempt_id) == {db.SHADOW_TAG}
+
+
+def test_the_tag_table_did_not_move_the_schema_version(conn: sqlite3.Connection) -> None:
+    """Additive, exactly like the v0.7.0 queue tables: an existing v1 database gains it on the
+    next connect() and `user_version` never moves."""
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 1
+
+
+def test_the_series_reader_carries_the_shadow_flag(conn: sqlite3.Connection) -> None:
+    cold = add(conn, created_at="2026-08-01T08:00:00Z")
+    shadowed = add(conn, created_at="2026-08-02T08:00:00Z")
+    db.tag_attempt(conn, shadowed, db.SHADOW_TAG)
+
+    by_id = {row["id"]: row for row in db.attempt_series(conn)}
+    assert not by_id[cold]["shadowed"]
+    assert by_id[shadowed]["shadowed"]
+
+
+def test_the_payload_reader_carries_the_shadow_flag_too(conn: sqlite3.Connection) -> None:
+    """Both readers, or the rhythm chart and the score chart would disagree about one row."""
+    shadowed = add(conn)
+    db.tag_attempt(conn, shadowed, db.SHADOW_TAG)
+    assert db.attempt_payloads(conn)[0]["shadowed"]
+
+
+def test_a_tag_never_reaches_the_meter(conn: sqlite3.Connection) -> None:
+    """A shadowed read is real billable audio and stays on the meter like any other."""
+    attempt_id = add(conn, audio_seconds=70.0,
+                     created_at=f"{db.month_prefix()}-05T08:00:00Z")
+    db.tag_attempt(conn, attempt_id, db.SHADOW_TAG)
+    assert db.monthly_stt_seconds(conn) == pytest.approx(70.0)
