@@ -161,6 +161,148 @@ def test_delivery_error_types_are_extracted_when_present(reference: str) -> None
     assert words[0]["delivery_error_types"] == ["UnexpectedBreak", "Monotone"]
 
 
+# --- Timing and SNR ---------------------------------------------------------------------------
+# Azure sends Offset and Duration on every word, syllable AND phoneme, in 100-ns ticks, plus a
+# top-level SNR. The parser discarded all of it until the rhythm work needed it. These assert
+# the numbers survive the parser, and — just as importantly — the two arithmetic properties
+# `rhythm.vocalic_intervals` relies on, so a change in what Azure sends fails here rather than
+# silently producing a different nPVI.
+
+
+def test_the_payload_carries_the_offsets_and_snr_the_parser_used_to_drop(
+    drill_payload: dict,
+) -> None:
+    """The raw values, before any parsing. The rest of this section builds on them."""
+    assert drill_payload["Offset"] == 16_900_000
+    assert drill_payload["SNR"] == 25.035732
+
+
+def test_phoneme_timing_survives_normalisation(drill_payload: dict, reference: str) -> None:
+    """The /ð/ of "the": 1.69 s into the stream, 190 ms long.
+
+    Ticks are carried through unconverted because they are exact integers; the seconds are
+    derived. Both are asserted, so a change to the divisor cannot pass by leaving the ticks
+    right.
+    """
+    _, _, words = sa.normalise([drill_payload], reference, Mode.DRILL)
+    first = words[0]["phonemes"][0]
+    assert first["phoneme"] == "ð"
+    assert first["offset_ticks"] == 16_900_000
+    assert first["duration_ticks"] == 1_900_000
+    assert first["start_s"] == 1.69
+    assert first["end_s"] == 1.88
+
+
+def test_timing_is_present_at_all_three_levels(drill_payload: dict, reference: str) -> None:
+    _, _, words = sa.normalise([drill_payload], reference, Mode.DRILL)
+    keys = {"offset_ticks", "duration_ticks", "start_s", "end_s"}
+    for word in words:
+        assert keys <= set(word)
+        for node in [*word["syllables"], *word["phonemes"]]:
+            assert keys <= set(node)
+            assert node["offset_ticks"] is not None
+            assert node["duration_ticks"] is not None
+
+
+def test_an_omitted_word_carries_the_timing_keys_as_none() -> None:
+    """Present and None, never absent.
+
+    A word that was never spoken has no extent, but every consumer must see one shape from
+    both construction paths — the same contract `prosody_detail` already holds here.
+    """
+    omission = sa._omission("ghost")
+    assert omission["offset_ticks"] is None
+    assert omission["duration_ticks"] is None
+    assert omission["start_s"] is None
+    assert omission["end_s"] is None
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["sample_azure_response.json", "sample_azure_continuous.json",
+     "bad_delivery_capture.json", "synthetic_delivery_faults.json"],
+)
+def test_every_timing_value_lands_on_the_ten_millisecond_grid(fixtures_dir, name: str) -> None:
+    """Every Offset and Duration, at every level, is a whole multiple of FRAME_TICKS.
+
+    Asserted rather than trusted: `rhythm.vocalic_intervals` decides what counts as contiguous
+    vocalic material by comparing gaps against exactly one frame, so a payload off the grid
+    would silently change every nPVI this project produces.
+    """
+    payload = json.loads((fixtures_dir / name).read_text())
+    for utterance in payload if isinstance(payload, list) else [payload]:
+        for word in utterance["NBest"][0].get("Words") or []:
+            nodes = [word, *(word.get("Syllables") or []), *(word.get("Phonemes") or [])]
+            for node in nodes:
+                assert node["Offset"] % sa.FRAME_TICKS == 0
+                assert node["Duration"] % sa.FRAME_TICKS == 0
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["sample_azure_response.json", "sample_azure_continuous.json",
+     "bad_delivery_capture.json", "synthetic_delivery_faults.json"],
+)
+def test_segments_tile_their_parent_with_a_one_frame_seam(fixtures_dir, name: str) -> None:
+    """The seam `_timing` documents, held to at every level.
+
+    A word's first phoneme starts exactly at the word's Offset and its last ends exactly at
+    Offset + Duration, yet consecutive phonemes are separated by exactly one frame. So
+    `sum(durations) + 10 ms x (n-1) == parent duration`. This is the evidence for reading
+    Azure's Duration as `(frames - 1) * 10 ms`, and the reason nPVI is computed from the raw
+    value with the resulting bias documented rather than silently corrected.
+    """
+    payload = json.loads((fixtures_dir / name).read_text())
+    seams = 0
+    for utterance in payload if isinstance(payload, list) else [payload]:
+        for word in utterance["NBest"][0].get("Words") or []:
+            for key in ("Syllables", "Phonemes"):
+                children = word.get(key) or []
+                if not children:
+                    continue
+                assert children[0]["Offset"] == word["Offset"]
+                last = children[-1]
+                assert last["Offset"] + last["Duration"] == word["Offset"] + word["Duration"]
+                for before, after in zip(children, children[1:]):
+                    gap = after["Offset"] - (before["Offset"] + before["Duration"])
+                    assert gap == sa.FRAME_TICKS
+                    seams += 1
+    assert seams, "fixture carried no multi-segment word, so the seam went untested"
+
+
+def test_snr_reaches_the_overall_scores(drill_payload: dict, reference: str) -> None:
+    """Exactly, not approximately.
+
+    Single-shot short-circuits the duration weighting for this reason: `v * w / w` returns
+    25.035731999999996 for this input, and that artefact would be stored and charted as
+    though it were a measurement.
+    """
+    overall, _, _ = sa.normalise([drill_payload], reference, Mode.DRILL)
+    assert overall["snr_db"] == 25.035732
+    assert overall["snr_db_min"] == 25.035732
+
+
+def test_continuous_snr_is_weighted_and_keeps_the_worst_utterance(fixtures_dir) -> None:
+    """Continuous mode returns one SNR per utterance, not one per recording.
+
+    The captured bad reading carries seven. `snr_db` is duration-weighted like every other
+    merged score; `snr_db_min` is the worst of them, because measurement quality is governed
+    by the worst segment and averaging hides exactly the utterance that ruins a reading.
+    """
+    payloads = json.loads((fixtures_dir / "bad_delivery_capture.json").read_text())
+    reported = [p["SNR"] for p in payloads]
+    assert len(reported) > 1
+
+    overall, _, _ = sa.normalise(payloads, "", Mode.PARAGRAPH)
+    assert overall["snr_db_min"] == min(reported)
+    assert overall["snr_db_min"] < overall["snr_db"] < max(reported)
+
+
+def test_snr_is_none_rather_than_zero_when_azure_sent_none() -> None:
+    """0 dB is signal at the noise floor — a real and very bad reading, not a missing one."""
+    assert sa._snr([{"Duration": 100, "NBest": []}]) == {"snr_db": None, "snr_db_min": None}
+
+
 # --- Continuous mode -------------------------------------------------------------------------
 
 
