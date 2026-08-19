@@ -323,6 +323,47 @@ a day is a habit anyone keeps, and whether the perception gain shows up in the A
 all, are questions only weeks of real blocks answer — the same shape as the benchmark's 30-day
 check. The graduation rule (90% across two blocks) has never fired on real listening.
 
+**Practice against a model, in real time (milestone v0.8.0).** Shadowing: press record,
+press play, and speak **with** a synthesised reading of the passage. The read is then assessed
+as an ordinary Mode B attempt — nothing in the analysis pipeline changed — and tagged
+`shadowed`, so a shadowed read and a cold read of the same passage can be set side by side
+with their fluency and prosody delta named. A second mode, **echo** (per-sentence clips with a
+silence matched to each clip's own duration), is a warm-up and is deliberately never assessed:
+its recording would pause between every phrase, so Azure would mark the delivery down for a gap
+the format put there.
+
+The feature carries its own acceptance test and the test is free, because both reads are
+already stored attempts. **It is pre-registered**, in `progress_view`'s section header and in
+the plan file, so the outcome is a finding rather than a retrofit:
+
+1. A shadowed read should score higher on fluency and prosody than a cold read of the same
+   passage.
+2. **That gap should narrow over weeks**, as the shadowed pattern becomes the cold-read
+   pattern. The narrowing is transfer, and transfer is the only thing that makes the practice
+   worth the minutes.
+3. **If the gap never narrows, the practice is not transferring and the design is wrong** — the
+   model is a crutch that carries the read and puts nothing down. The comparison surface says
+   so in as many words rather than leaving it to be explained away later.
+
+Verified offline, no keys and no network: `make test` is **632 tests** (up from 556). The whole
+surface was driven in the browser on the seeded demo, both themes — the shadow card is offered
+on Today with no history at all (it is the one practice here that needs none), the session
+renders in place the way a listening block does, "Prepare the model" is disabled under
+`OFFLINE_MODE` with the reason, echo mode names its 14 phrases and offers no recorder at all,
+and the comparison names `Fluency +7.7` and `Prosody +7.3` **beside its four pairs** with the
+gap chart converging on zero. The browser check caught one thing the tests could not: a dashed
+orange line with no legend entry reads as a second trajectory, which is the one thing it must
+not be taken for, so a caption now says what it is.
+
+**What this does not prove, and it is the larger half.** *No real shadowed read has ever been
+recorded.* Everything above is the plumbing, verified against seeded rows whose gap was
+*written* to narrow because that is the shape the design predicts — seeding the failure shape
+would have demoed a broken feature, but it means the demo is an illustration and not evidence.
+Whether a real shadowed read beats a real cold one, and whether the gap really closes, needs
+weeks of real reads on headphones and is answered by nothing in the repository. Same shape as
+the benchmark's 30-day check and the perception trainer's "has been run, not used" — and this
+one additionally needs a human at a microphone, so it could not be closed here at all.
+
 ## Known issues
 
 **The 8 code-review findings from 2026-08-18 are all fixed** (2026-08-19, in the
@@ -341,6 +382,18 @@ Worth keeping from that pass:
   stress-and-rhythm lines) as well as the fixes, and rejects the whole report rather than
   editing a fabricated sound out of a sentence — there is no way to cut a clause and be
   left with English, and the offline report that replaces it is complete.
+
+**A shadowed read is only as clean as the headphones.** The model plays while the microphone
+is open, so on speakers Azure assesses a mixture of the speaker and the synthesiser. The UI
+says so above the recorder, but nothing enforces it and nothing in the stored row records
+which was used — an unexplained jump in *accuracy* on a shadowed read is the symptom to
+suspect, since shadowing trains delivery and should not move articulation.
+
+**Preparing the model for the benchmark passage is one 975-character synthesis** (about
+1,150 as SSML at the slow rate), and echo mode is 14 separate clips of the same text. Both are
+cached on disk and bought once per (passage, rate), so the cost is paid the first time and
+never again — but the first slow echo track on a fresh cache is 14 sequential calls before
+anything plays.
 
 **Preparing a fresh block takes about 40 seconds.** Synthesis is sequential at roughly one
 second per clip and a block needs ~38 of them, so the first block on a new contrast has a real

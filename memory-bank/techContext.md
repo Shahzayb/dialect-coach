@@ -548,6 +548,81 @@ and the first that remembers anything between sessions.
   40 seconds to prepare before the first trial. The progress bar names the count while it
   runs. Repeat blocks on a warm cache are instant; this cost is paid once per contrast.
 
+### Shadowing practice
+
+Landed 2026-08-19 (milestone v0.8.0). The first feature where practice happens **while
+speaking** rather than afterwards, and the first that measures itself.
+
+- **A flow wrapped around the existing path, not a new analysis path.** A shadowed read goes
+  through the same `prepare_audio` → `start_assessment` → `speech_analyzer.analyse` as any
+  Mode B attempt and is stored as an ordinary row. No parsing branch, no new normalised shape,
+  no new merge rule. The only addition is a tag.
+- **Two modes, and only one is assessed — the split is a finding, not a preference.**
+  *Simultaneous* is one continuous clip of the whole passage; the recording is continuous, so
+  its fluency and prosody are directly comparable to a cold read, and that comparability is
+  the whole acceptance test. *Echo* is per-sentence clips concatenated with a silence matched
+  to each clip's own duration; it is **never assessed**, because a recording made of phrases
+  separated by silences carries a structural pause between every one of them and Azure would
+  mark the delivery down for a gap the format put there. Offering it as a warm-up is honest;
+  scoring it would not be.
+- **Headphones are a requirement, not a suggestion.** Both modes play a voice while the
+  microphone is open, so on speakers Azure hears the model as well as the speaker and assesses
+  a mixture. `shadowing.HEADPHONES` says so above the recorder. This is also the first thing to
+  suspect if accuracy ever moves: shadowing trains delivery, and a large accuracy delta is more
+  likely the model bleeding into the take than a result.
+- **No rerun may happen between "record" and "play".** `st.audio_input` holds a live
+  `MediaRecorder` in the browser and a Streamlit rerun re-renders that component, so the model
+  player and the recorder are both on screen *before* recording starts, on a plain `st.audio`
+  with native controls and no `autoplay`, with no button between them. A "fetch the model now"
+  button sitting there would cut the take in half.
+- **Tagging is a new additive `attempt_tags` table; `SCHEMA_VERSION` is still 1.** `attempts`
+  is created with `CREATE TABLE IF NOT EXISTS`, so a column would need a real `ALTER TABLE` and
+  `db._migrate` has no upgrade path — the v0.7.0 precedent (`practice_targets` /
+  `perception_trials` added additively) applies directly. `attempt_series` and
+  `attempt_payloads` join the flag in, so no reader needs a second query.
+  **`rhythm.BASELINE_CAPTURE_MARKER`'s reference-text prefix is deliberately NOT reused here**:
+  the comparison pairs a shadowed read to a cold one *by matching that text*, so a marker in it
+  would break the very match the feature depends on.
+- **Keeping shadowed reads off the cold trajectory is the correctness crux.**
+  `progress_view.is_benchmark` identifies a benchmark read by matching its reference text, so
+  an untagged shadowed read would land on the headline line and the nPVI series as though it
+  were cold — inflating the exact line the benchmark design exists to keep honest.
+  `progress_view.cold_attempts()` is applied at the score trajectory, the rhythm chart and
+  `days_since_benchmark`. Shadowed benchmark reads get their **own dashed series** on the score
+  chart rather than being dropped, because two lines converging is the acceptance test
+  rendered; the rhythm chart excludes them outright, since a shadowed read's nPVI is largely
+  the synthesiser's and would be `benchmark_tts_baseline.json` taking a detour through a human.
+- **The flagged aggregates deliberately keep including shadowed reads.**
+  `progress_view._tally` counts the attempts a thing appeared in and
+  `practice_queue.candidates` thresholds on that cumulative count, so an assisted read can only
+  ever *raise* a count, never retire a target early. A sound still flagged while a model is
+  carrying the read is stronger evidence, not weaker.
+- **A fourth `shadow` kind in `practice_targets`, which never graduates.** It is kept out of
+  `KIND_ORDER` (that tuple drives promotion) and `practice_queue.promotable()` is what every
+  other rule keys on — without it a standing practice would eat one of the three
+  `MAX_ACTIVE_TARGETS` slots and silently retire a sound the recordings were still flagging.
+  `grade()` returns its state unchanged so `apply_decisions` writes nothing for it; `next_due`
+  is a fixed `utils.SHADOW_INTERVAL_DAYS` gap that never widens, because there is no graduation
+  for a widening schedule to grow confident about. **The row is created on first use, never by
+  `promote()`** — the "queue never invents a target" rule is about claims made from the user's
+  own flagged history, and a standing practice makes no such claim.
+- **`MAX_DURATION_SECONDS_PARAGRAPH` is 180, not 120.** The benchmark passage is 61.8 s through
+  Azure TTS at the normal rate and ~95 s at `rate="-35%"`, and a shadowed read starts recording
+  before the model and stops after it. A read is billed for its own seconds either way, so the
+  higher ceiling costs nothing unspent.
+- **The disk cache already took a `rate`,** so `tts.py` needed no change: a slow rendering is
+  cached separately from the normal one under the existing `(voice, text, rate)` key.
+  `app.synthesise_clip` was extracted from `buy_block_audio` so the perception block and the
+  shadow model charge the meter by exactly the same rule; the batch pre-flight stays with each
+  caller, which is what stops a guard approving a run whose real charge lands mid-batch.
+- **What the comparison is, and what a failure of it looks like.** `progress_view.shadow_pairs`
+  sets each shadowed read against the **nearest cold read of the same passage by time, either
+  side** — requiring the cold read to come first would throw away every pair from the first
+  weeks, which are exactly the weeks the narrowing question is about — and carries the distance
+  in days on the row, so a pair straddling two months looks like the weak evidence it is. Only
+  fluency and prosody are compared. `shadow_summary` never states a delta without the number of
+  pairs beside it, the same discipline as the perception trainer's chance floor.
+
 ### Timing data and nPVI
 
 Landed 2026-08-19 (milestone v0.6.0). The de-risking chunk for all later accent work — rhythm,
