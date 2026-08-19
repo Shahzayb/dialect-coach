@@ -892,3 +892,88 @@ def test_a_collapsed_word_still_gets_a_unique_playback_key(run_app) -> None:
     app = seed_result(run_app(), assessment)
 
     assert not app.exception, "duplicate widget keys raise rather than render"
+
+
+# --- The Progress tab -----------------------------------------------------------------------
+# The frames, the rankings and the chart spec are covered in `test_progress_view.py` against
+# real payloads. What is checked here is only that the tab is wired in: that it renders, that
+# it says something useful when there is nothing to draw, and that giving Practice a tab of
+# its own did not break the page it used to be.
+
+
+def seed_attempts(app: AppTest, count: int = 3, *, benchmark: bool = False) -> None:
+    """Write attempts straight into the app's own database, the way a real session would."""
+    import json
+    import progress_view
+
+    payload = json.loads((ROOT / "tests" / "fixtures" / "sample_azure_response.json").read_text())
+    conn = db.connect(os.environ["DB_PATH"])
+    for index in range(count):
+        db.record_attempt(
+            conn,
+            mode=Mode.PARAGRAPH if benchmark else Mode.DRILL,
+            reference_text=progress_view.BENCHMARK_PASSAGE if benchmark else REFERENCE,
+            recognised_text=REFERENCE, audio_seconds=12.0, audio_sha256=f"seed-{index}",
+            overall_scores={"pron_score": 80.0 + index, "accuracy": 85.0, "fluency": 78.0,
+                            "completeness": 100.0, "prosody": None if index else 70.0},
+            azure_raw=payload, created_at=f"2026-07-0{index + 1}T08:00:00Z",
+        )
+    conn.close()
+
+
+def test_the_page_has_a_practice_tab_and_a_progress_tab(run_app) -> None:
+    app = run_app()
+    assert not app.exception
+    assert len(app.tabs) == 2
+
+
+def test_the_progress_tab_says_so_when_there_is_no_history(run_app) -> None:
+    """An empty chart area explains nothing; the empty state has to be words."""
+    app = run_app()
+    assert not app.exception
+    assert any("Nothing recorded yet" in info.value for info in app.info)
+
+
+def test_the_progress_tab_renders_a_chart_once_there_is_history(run_app) -> None:
+    app = run_app()
+    seed_attempts(app)
+    app.run()
+    assert not app.exception
+    charts = [element for element in app.main if element.type == "vega_lite_chart"]
+    assert charts, "the trajectory should be drawn"
+
+
+def test_free_practice_alone_says_the_headline_series_is_still_empty(run_app) -> None:
+    """The whole point of the benchmark, said out loud while it has not been read."""
+    app = run_app()
+    seed_attempts(app)
+    app.run()
+    assert not app.exception
+    assert any("has not been read" in warning.value for warning in app.warning)
+
+
+def test_a_benchmark_read_replaces_that_warning_with_when_it_last_happened(run_app) -> None:
+    app = run_app()
+    seed_attempts(app, benchmark=True)
+    app.run()
+    assert not app.exception
+    assert not any("has not been read" in warning.value for warning in app.warning)
+    assert any("Benchmark passage last read" in caption.value for caption in app.caption)
+
+
+def test_the_benchmark_passage_is_the_first_paragraph_preset(run_app) -> None:
+    """It has to be selected, not retyped: the series is identified by matching the text."""
+    import progress_view
+
+    assert list(app_module.PRESETS[Mode.PARAGRAPH])[0] == progress_view.BENCHMARK_TITLE
+    assert progress_view.is_benchmark(
+        app_module.PRESETS[Mode.PARAGRAPH][progress_view.BENCHMARK_TITLE]
+    )
+
+
+def test_the_history_table_still_renders_under_the_charts(run_app) -> None:
+    app = run_app()
+    seed_attempts(app)
+    app.run()
+    assert not app.exception
+    assert any("History" in expander.label for expander in app.expander)

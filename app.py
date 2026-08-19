@@ -33,6 +33,7 @@ import audio_utils
 import budget
 import db
 import fallback_coach
+import progress_view
 import speech_analyzer
 import tts
 import utils
@@ -128,6 +129,10 @@ PRESETS: dict[Mode, dict[str, str]] = {
             "She chose the usual visual measure just as the season closed.",
     },
     Mode.PARAGRAPH: {
+        # First, and deliberately so. The progress view identifies a benchmark read by
+        # matching this text, so it has to be selected rather than typed from memory — a
+        # hand-typed near-copy would quietly start a second series.
+        progress_view.BENCHMARK_TITLE: progress_view.BENCHMARK_PASSAGE,
         "Mixed diagnostic paragraph":
             "There are three things I think about whenever I have to explain my work to "
             "someone else. The first is whether the other person actually needs the "
@@ -1279,19 +1284,93 @@ def render_result(conn: sqlite3.Connection, entry: CachedAttempt, source) -> Non
     render_delivery(assessment)
 
 
-def render() -> None:
-    st.set_page_config(page_title=PAGE_TITLE, page_icon=PAGE_ICON, layout="centered")
-    st.title(f"{PAGE_ICON} {PAGE_TITLE}")
-    st.caption("Personal English pronunciation and delivery coach — en-US.")
+# --- The progress view ----------------------------------------------------------------------
 
-    check_startup()
-    conn = get_connection()
 
-    # Before any widget exists, so `running` below describes this pass and not the last one.
-    collect_finished_job()
-    job: AssessJob | None = st.session_state.get("assess_job")
-    running = job is not None
+@st.cache_data(show_spinner=False)
+def parsed_attempts(_conn: sqlite3.Connection, fingerprint: tuple[int, int]):
+    """Re-parse every stored payload, cached against `fingerprint`.
 
+    Not optional. Streamlit renders *both* tab bodies on every rerun, including the 0.4 s
+    `JOB_POLL_SECONDS` reruns while an assessment is in flight, and each pass would otherwise
+    re-parse tens of 45-170 kB payloads. `fingerprint` is `db.attempt_fingerprint`, which
+    changes exactly when a new attempt lands; the connection is `_conn` so Streamlit does not
+    try to hash it.
+    """
+    with _DB_LOCK:
+        payloads = db.attempt_payloads(_conn)
+    return progress_view.parse_attempts(payloads)
+
+
+def render_progress(conn: sqlite3.Connection) -> None:
+    """The Progress tab: the trajectory, then what keeps going wrong.
+
+    The frames and the chart specs are built in `progress_view`, which never imports
+    Streamlit — the same boundary the pure render helpers above sit on. This function is the
+    impure half: it reads, calls them, and hands the results to `st.*`.
+    """
+    with _DB_LOCK:
+        rows = db.attempt_series(conn)
+        fingerprint = db.attempt_fingerprint(conn)
+
+    st.subheader("Progress")
+    if not rows:
+        st.info(
+            "Nothing recorded yet. Assess an attempt on the Practice tab and it will appear "
+            "here. Offline replays are left out — the fixture scores the same every time.",
+            icon="📈",
+        )
+        return
+
+    frame = progress_view.score_frame(rows)
+    st.altair_chart(progress_view.score_chart(frame), width="stretch")
+
+    since = progress_view.days_since_benchmark(rows)
+    if since is None:
+        st.warning(
+            f"The headline line is empty because the benchmark passage has not been read "
+            f"yet. Pick **{progress_view.BENCHMARK_TITLE}** from the paragraph presets and "
+            f"read it. Until then the faint points are all there is, and they are not "
+            f"comparable to each other: a score on an easier text is a higher score, not a "
+            f"better reading.",
+            icon="🎯",
+        )
+    else:
+        when = "today" if since == 0 else f"{since} day{'' if since == 1 else 's'} ago"
+        st.caption(
+            f"Benchmark passage last read {when}. The faint points behind it are free "
+            f"practice on other texts — shown for context, never comparable to the line or "
+            f"to each other, since Drill and Paragraph scores are computed differently."
+        )
+
+    parsed = parsed_attempts(conn, fingerprint)
+    phonemes = progress_view.flagged_phonemes(parsed)
+    words = progress_view.flagged_words(parsed)
+
+    left, right = st.columns(2)
+    with left:
+        if len(phonemes):
+            st.altair_chart(progress_view.phoneme_chart(phonemes), width="stretch")
+        else:
+            st.caption("No sound has been flagged yet.")
+    with right:
+        if len(words):
+            st.altair_chart(progress_view.word_chart(words), width="stretch")
+        else:
+            st.caption("No word has been flagged yet.")
+
+    st.caption(
+        "Counted by how many attempts a sound or word was flagged in, not by raw "
+        "occurrences, so one long paragraph cannot dominate the list."
+    )
+
+
+def render_practice(conn: sqlite3.Connection, job: "AssessJob | None", running: bool) -> None:
+    """The Practice tab: record or upload, assess, and read the result.
+
+    Unchanged in substance from when this was the whole page — it moved into a tab so the
+    progress view could have a surface of its own rather than sitting under every result.
+    """
     if utils.offline_mode():
         st.info(
             "OFFLINE_MODE is on: results are replayed from the committed fixture and no "
@@ -1377,6 +1456,9 @@ def render() -> None:
             st.divider()
             render_result(conn, cached, source)
 
+
+def render_history(conn: sqlite3.Connection) -> None:
+    """The usage meter and the recent-attempts table, under the progress charts."""
     st.divider()
     # Locked: a background assessment may be inserting its row against these same reads.
     with _DB_LOCK:
@@ -1396,6 +1478,31 @@ def render() -> None:
                 ],
                 hide_index=True, width="stretch",
             )
+
+
+def render() -> None:
+    st.set_page_config(page_title=PAGE_TITLE, page_icon=PAGE_ICON, layout="centered")
+    st.title(f"{PAGE_ICON} {PAGE_TITLE}")
+    st.caption("Personal English pronunciation and delivery coach — en-US.")
+
+    check_startup()
+    conn = get_connection()
+
+    # Before any widget exists, so `running` below describes this pass and not the last one.
+    collect_finished_job()
+    job: AssessJob | None = st.session_state.get("assess_job")
+    running = job is not None
+
+    # Two tabs, not two pages: `AppTest.from_file` addresses one script and the bare
+    # `render()` below is the entry point, so `st.navigation`/`pages/` would cost more than
+    # it buys. Note Streamlit executes BOTH tab bodies on every rerun — which is why the
+    # progress view's re-parse is cached rather than recomputed on each of the 0.4 s polls.
+    practice_tab, progress_tab = st.tabs(["Practice", "Progress"])
+    with practice_tab:
+        render_practice(conn, job, running)
+    with progress_tab:
+        render_progress(conn)
+        render_history(conn)
 
 
 render()

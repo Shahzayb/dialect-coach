@@ -14,6 +14,11 @@ into `speech_analyzer` when the coaching layer landed, because that layer needs 
 cannot import a module that pulls in Streamlit; one definition means the word card and the
 coaching report can never disagree about a substitution.
 
+`progress_view.py` follows the same rule as those helpers and is the strictest case of it:
+it builds pandas frames and altair chart specs and **never imports Streamlit**, so `app.py`
+owns every `st.altair_chart` call and the caching around them. That is what makes the chart
+spec assertable in a test — including the rule that Mode A and Mode B never share a line.
+
 `db.py` and `budget.py` are additions to the master plan's §8 file list — it predates both
 the SQLite decision and the decision to derive the meter from it.
 
@@ -396,3 +401,62 @@ the project, and nothing in the app may assume a host. Practical consequences:
   per-word phoneme tooltip (`word_tooltip_html`/`colour_coded_html`, #13) needed an opaque
   background and the obvious "read the live theme" approach silently never engaged. It uses
   one fixed light card instead, checked to read on both the light and dark theme.
+
+
+### The progress view and the benchmark passage
+
+Landed 2026-08-19 (milestone v0.5.0). The first feature that reads the stored history back.
+
+- **Why a fixed passage at all.** Plotting scores across arbitrary self-chosen texts measures
+  **text difficulty, not the speaker** — an easy paragraph scores higher and reads as
+  progress. So `progress_view.BENCHMARK_PASSAGE` is frozen, read on a schedule, and its
+  series is the headline; free practice is drawn behind it as unconnected points, context
+  only.
+- **One passage, two instruments.** It was chosen once for this chart *and* for the vowel
+  measurement a later chunk needs a calibration read for, because two different passages
+  would mean two different recordings of the same 80 seconds. 196 words. It carries the
+  commonly substituted consonants (/θ/ /ð/ /v/ /w/, non-flapped /t/ /d/, dark /l/, /ʃ/ /s/,
+  /z/ /dʒ/, fourteen final clusters) and the full en-US vowel inventory including FACE and
+  GOAT, in stressed unreduced positions.
+- **`BENCHMARK_COVERAGE` is that claim as data, and a test asserts every token it lists
+  really appears in the passage.** This is not decoration — it caught a token ("which") that
+  was listed but had been edited out. A prose justification would have drifted silently.
+- **/t/ and /d/ are placed where General American does not flap them** — word-initial, after
+  /s/, and word-final or in a cluster. Never *better/water/city*. `phoneme_reference` maps
+  `ɾ → t`, so a flapped token scores as /t/ and says nothing about the dental-versus-alveolar
+  contrast the passage exists to measure.
+- **Three honest gaps, recorded so they are not rediscovered.** ʊɹ (CURE) gets two tokens and
+  cannot naturally get more — it is the rarest en-US vowel and is merging into ɔɹ, so treat it
+  as best-effort. ɑ and ɔ are subject to the cot–caught merger, so a merged speaker's tokens
+  will measure alike; that is a finding, not a defect. Stressed /ð/ lives almost entirely in
+  function words, so six tokens is close to the ceiling for natural prose.
+- **A benchmark attempt is identified by matching the normalised `reference_text`, not by a
+  new column.** `db._migrate` has no upgrade path and `SCHEMA_VERSION` is still 1; the v1
+  precedent (coaching columns created NULL so coaching was an UPDATE) says not to add one.
+  `progress_view.benchmark_key` reuses `utils.normalise_words`, the same tokeniser the miscue
+  diff runs on, so casing and whitespace never split the series — and it works retroactively
+  on rows already stored. The consequence: **editing the passage starts a new series**, which
+  is what `BENCHMARK_VERSION` records.
+- **Mode A and Mode B never share a line, enforced structurally.** Only the benchmark subset
+  gets a line mark, and it is single-mode by construction (a 196-word passage is always read
+  in paragraph mode); free practice is points shaped by mode, so there is no line for two
+  modes to share. A test asserts against `chart.to_dict()` that no `line` layer encodes
+  `mode`.
+- **A NULL prosody produces no row, never a zero.** The y scale is pinned to 0-100 for the
+  same reason: an auto-scaled axis magnifies noise into a trend, which is the exact failure
+  the benchmark exists to prevent.
+- **Offline replays are excluded from both readers.** An `OFFLINE_MODE` run replays the same
+  fixture, so its scores are a constant; thirty identical points is not a trajectory.
+- **Rankings count attempts, not tokens.** "Flagged most often" is a question about
+  recurrence across sessions; counting raw occurrences would let one long paragraph dominate.
+  `benchmark_attempts` is carried beside the total, because on the fixed passage that count
+  is comparable read to read.
+- **`pandas==3.0.5` and `altair==6.2.2` are pinned explicitly**, read out of the built image
+  rather than recalled. Both arrive transitively with streamlit, but `progress_view.py`
+  imports them directly and a direct import should not depend on a transitive gift. `numpy`
+  is deliberately not pinned — nothing imports it directly.
+- **The re-parse is cached, and has to be.** Streamlit executes *both* tab bodies on every
+  rerun, including the 0.4 s poll reruns during an assessment, and each pass would otherwise
+  re-parse tens of 45-170 kB payloads. `app.parsed_attempts` is `@st.cache_data` keyed on
+  `db.attempt_fingerprint` — `(max id, row count)` — with the connection passed as `_conn`
+  so Streamlit does not try to hash it.
