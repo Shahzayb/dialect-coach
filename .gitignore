@@ -15,6 +15,12 @@ __pycache__/
 .streamlit/secrets.toml
 .usage.json
 
+# Local state: the SQLite database and the synthesised-audio cache both live here. The
+# cache holds neural-voice renderings of dictionary words — no personal data, which is why
+# caching it does not touch the no-stored-audio rule (that rule covers YOUR recordings, and
+# nothing ever writes one of those to disk).
+data/
+
 # Local SQLite database, including WAL sidecar files. A committed database is a leaked one
 # the moment it holds anything real.
 *.db

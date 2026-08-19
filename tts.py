@@ -19,8 +19,10 @@ one place rather than being split across every caller.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable
 from xml.sax.saxutils import escape as xml_escape, quoteattr
 
@@ -30,6 +32,74 @@ from speech_analyzer import classify_cancellation
 logger = logging.getLogger(__name__)
 
 LOCALE = "en-US"
+
+
+
+# --- The disk cache ---------------------------------------------------------------------
+# THIS CACHES SYNTHESISED AUDIO ONLY, AND NEVER A BYTE OF RECORDED INPUT. The project's
+# no-stored-audio rule exists for privacy and covers the *user's* recordings; a neural voice
+# reading "think" carries no personal data, and re-buying it every restart is a charge for
+# nothing. The perception trainer plays the same few dozen words across four voices over and
+# over, so without this the same corpus is paid for on every run.
+#
+# Keyed by (voice, text, rate) — the three things that change the bytes. `rate` is
+# NORMAL_RATE for a plain-text call and the SSML rate string otherwise, so a slow rendering
+# is a separate entry rather than a collision with the normal one.
+
+NORMAL_RATE = "normal"
+
+CACHE_DIR_VAR = "TTS_CACHE_DIR"
+DEFAULT_CACHE_DIR = "./data/tts_cache"
+
+
+def cache_dir() -> Path:
+    """Where synthesised clips live. Under `data/`, which is gitignored in full."""
+    return Path(utils.get(CACHE_DIR_VAR) or DEFAULT_CACHE_DIR)
+
+
+def cache_key(voice: str, text: str, rate: str = NORMAL_RATE) -> str:
+    """A stable filename for one clip.
+
+    Hashed rather than slugified because `text` is arbitrary — a phrase with a slash or a
+    hundred characters of punctuation is not a filename, and truncating one silently
+    collides two different clips onto the same bytes.
+    """
+    digest = hashlib.sha256()
+    digest.update(voice.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(text.encode("utf-8"))
+    digest.update(b"\x00")
+    digest.update(rate.encode("utf-8"))
+    return digest.hexdigest()
+
+
+def cache_path(voice: str, text: str, rate: str = NORMAL_RATE) -> Path:
+    return cache_dir() / f"{cache_key(voice, text, rate)}.wav"
+
+
+def cached_audio(voice: str, text: str, rate: str = NORMAL_RATE) -> bytes | None:
+    """The stored clip, or None. An unreadable file is a miss, never an error."""
+    path = cache_path(voice, text, rate)
+    try:
+        return path.read_bytes() if path.is_file() else None
+    except OSError:
+        logger.warning("Could not read the cached clip at %s; re-synthesising", path)
+        return None
+
+
+def store_audio(voice: str, text: str, audio: bytes, rate: str = NORMAL_RATE) -> None:
+    """Write a clip to the cache. A failure here costs quota next time, not correctness."""
+    path = cache_path(voice, text, rate)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Write beside the target and rename, so an interrupted write cannot leave a
+        # truncated WAV that every later run reads as a valid cache hit.
+        temporary = path.with_suffix(".part")
+        temporary.write_bytes(audio)
+        temporary.replace(path)
+    except OSError:
+        logger.warning("Could not cache the clip at %s; it will be synthesised again", path)
+
 
 # Slow enough that an unfamiliar phoneme separates out from its neighbours, not so slow the
 # word stops sounding like speech. Hearing a contrast you cannot catch at conversational

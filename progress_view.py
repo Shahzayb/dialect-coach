@@ -26,6 +26,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import altair as alt
 import pandas as pd
 
+import fallback_coach
 import rhythm
 import speech_analyzer
 import utils
@@ -558,6 +559,49 @@ def flagged_words(parsed: Sequence[ParsedAttempt]) -> pd.DataFrame:
     ])
 
 
+def weak_syllables(parsed: Sequence[ParsedAttempt]) -> pd.DataFrame:
+    """Which multi-syllable words keep losing the stress, and where.
+
+    The signal is `fallback_coach.SYLLABLE_RED` — the same cut the coaching report already
+    renders as *"the stress is landing somewhere else"* — imported rather than restated so
+    the queue's evidence and the report on screen can never disagree about which words those
+    are.
+
+    Single-syllable words are skipped: they have no stress to misplace, and a low score on
+    one is a sound problem, which the phoneme ranking already carries.
+    """
+    per_attempt: list[tuple[bool, list[str]]] = []
+    detail: dict[str, str] = {}
+    for attempt in parsed:
+        occurrences: list[str] = []
+        for word in attempt.words:
+            syllables = [s for s in (word.get("syllables") or [])
+                         if s.get("score") is not None]
+            if len(syllables) < 2:
+                continue
+            weakest = min(syllables, key=lambda s: s["score"])
+            if weakest["score"] >= fallback_coach.SYLLABLE_RED:
+                continue
+            name = str(word.get("word") or "").lower()
+            if not name:
+                continue
+            detail[name] = str(weakest.get("syllable") or "")
+            occurrences.append(name)
+        per_attempt.append((attempt.benchmark, occurrences))
+
+    rows = _tally(per_attempt)
+    if not rows:
+        return pd.DataFrame({name: pd.Series(dtype="object") for name in
+                             ("word", "syllable", "attempts", "benchmark_attempts",
+                              "tokens")})
+    return pd.DataFrame([
+        {"word": row["_name"], "syllable": detail[row["_name"]],
+         "attempts": row["attempts"], "benchmark_attempts": row["benchmark_attempts"],
+         "tokens": row["tokens"]}
+        for row in rows
+    ])
+
+
 # How many bars each ranking shows. Long enough to see a pattern, short enough that the bar
 # at the bottom still means something.
 TOP_PHONEMES = 12
@@ -590,3 +634,87 @@ def phoneme_chart(frame: pd.DataFrame, limit: int = TOP_PHONEMES) -> alt.Chart:
 def word_chart(frame: pd.DataFrame, limit: int = TOP_WORDS) -> alt.Chart:
     """The words that recur in the flagged list."""
     return _ranking_chart(frame, "word", "Words that keep coming back", "#6a4fa0", limit)
+
+
+# --- Perception blocks over time -----------------------------------------------------------
+# The chart the perception trainer earns. Its one non-negotiable feature is the CHANCE RULE:
+# a two-alternative forced choice scores 50% by guessing, so an accuracy plotted against a
+# zero baseline reports near-noise as progress. The floor is read off the stored
+# `alternatives` column rather than assumed, so rows from a task with a different number of
+# choices keep reporting their own.
+
+PERCEPTION_COLUMNS = ("when", "item", "accuracy", "correct", "total",
+                      "novel", "chance", "review")
+
+
+def perception_frame(trials: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
+    """One row per block: accuracy, and the chance floor that block was scored against.
+
+    Incomplete blocks are kept. They are real evidence of how the listening went even though
+    `practice_queue` refuses to graduate on them — the exclusion belongs to the verdict, not
+    to the picture.
+    """
+    grouped: dict[str, list[Mapping[str, Any]]] = {}
+    order: list[str] = []
+    for row in trials:
+        block_id = str(row["block_id"])
+        if block_id not in grouped:
+            grouped[block_id] = []
+            order.append(block_id)
+        grouped[block_id].append(row)
+
+    records: list[dict[str, Any]] = []
+    for block_id in order:
+        rows = grouped[block_id]
+        when = _parse_when(str(rows[0].get("created_at") or ""))
+        if when is None:
+            continue
+        total = len(rows)
+        correct = sum(1 for r in rows if r.get("correct"))
+        alternatives = int(rows[0].get("alternatives") or 2)
+        records.append({
+            "when": when,
+            "item": str(rows[0].get("item") or ""),
+            "accuracy": 100.0 * correct / total if total else 0.0,
+            "correct": correct,
+            "total": total,
+            "novel": sum(1 for r in rows if r.get("novel")),
+            "chance": 100.0 / alternatives if alternatives else 50.0,
+            "review": bool(rows[0].get("review")),
+        })
+
+    if not records:
+        return pd.DataFrame({name: pd.Series(dtype="object")
+                             for name in PERCEPTION_COLUMNS})
+    return pd.DataFrame.from_records(records)[list(PERCEPTION_COLUMNS)]
+
+
+def perception_chart(frame: pd.DataFrame) -> alt.Chart:
+    """Per-contrast accuracy over time, drawn against the chance floor.
+
+    y is pinned 0-100 for the same reason `score_chart` pins it: an auto-scaled axis magnifies
+    noise into a trend. The dashed rule is the chance floor and is layered from the frame's
+    own `chance` column, so it follows a facet whose task had a different number of choices
+    instead of being drawn once at a hardcoded 50.
+    """
+    points = alt.Chart(frame).mark_line(point=True, strokeWidth=2).encode(
+        x=alt.X("when:T", title=None),
+        y=alt.Y("accuracy:Q", title="Correct (%)",
+                scale=alt.Scale(domain=[0, 100], nice=False)),
+        color=alt.Color("item:N", title="Contrast"),
+        tooltip=[alt.Tooltip("when:T", title="When"),
+                 alt.Tooltip("item:N", title="Contrast"),
+                 alt.Tooltip("accuracy:Q", title="Correct (%)", format=".0f"),
+                 alt.Tooltip("correct:Q", title="Right"),
+                 alt.Tooltip("total:Q", title="Trials"),
+                 alt.Tooltip("novel:Q", title="Never heard before"),
+                 alt.Tooltip("chance:Q", title="Guessing scores (%)", format=".0f"),
+                 alt.Tooltip("review:N", title="Spaced review")],
+    )
+    chance = alt.Chart(frame).mark_rule(
+        color="#8a8a8a", strokeDash=[6, 4], strokeWidth=2,
+    ).encode(y=alt.Y("chance:Q", scale=alt.Scale(domain=[0, 100], nice=False)))
+
+    return alt.layer(points, chance).properties(
+        height=200, title="Hearing the contrast — per block, against the chance floor"
+    ).resolve_scale(y="shared")

@@ -109,6 +109,39 @@ def azure_score_band(score: float | None) -> AzureBand:
     return AzureBand.EXCELLENT
 
 
+# --- Perception-training conventions -------------------------------------------------------
+# Like WORD_RED/WORD_AMBER above, these are cut points THIS PROJECT chose. They are NOT
+# values Azure defines, and they are not fixed by any published training protocol either:
+# the HVPT literature varies block length and criterion from study to study, so these are a
+# defensible reading of it rather than a citation. Kept here so there is exactly one place
+# to retune them.
+PERCEPTION_BLOCK_TRIALS = 20      # a block short enough to do daily without dreading it
+PERCEPTION_REVIEW_TRIALS = 10     # a spaced re-check is a spot check, not a full block
+PERCEPTION_GRADUATE_ACCURACY = 0.90
+PERCEPTION_GRADUATE_BLOCKS = 2    # sustained across two, so one lucky block cannot graduate
+PERCEPTION_REGRESS_ACCURACY = 0.75  # a review below this returns the item to rotation
+
+# At most three active targets, because a target set you cannot hold in your head while
+# speaking is not a target set.
+MAX_ACTIVE_TARGETS = 3
+
+# Widening gaps for a graduated item. A graduated contrast that is never re-tested is an
+# unverified claim; the last interval is the point past which it stops being re-checked.
+REVIEW_INTERVAL_DAYS = (3, 7, 21, 60)
+
+# How many separate attempts a substitution or a weak syllable has to appear in before the
+# queue will promote it. One bad reading is not evidence of a pattern.
+RECUR_ATTEMPTS = 2
+
+# Below this many minimal pairs a contrast cannot fill a block with enough item variety to
+# be worth calling training, so it is not offered. `phoneme_reference` has eleven contrasts
+# with no pairs at all, which are honest empties rather than gaps to paper over.
+MIN_PAIRS_FOR_BLOCK = 3
+
+# NOTE: the chance floor is deliberately NOT here. It is arithmetic, not a threshold —
+# `perception_trainer.chance_floor` derives it from the number of alternatives on the trial.
+
+
 # How many times a paid call may be sent before giving up. Named here because the budget
 # guard has to price the worst case (every attempt reaches the provider and is charged),
 # not the lucky case, and the guard and the retry loop must not drift apart.
