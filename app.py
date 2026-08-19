@@ -992,6 +992,31 @@ def render_fix(fix: Any, rank: int) -> None:
             st.markdown(f"**Drill these pairs** — {pairs}")
 
 
+def render_delivery_drills(report: Any) -> None:
+    """The delivery faults, each with something to perform about it.
+
+    Issue #9: the prosody score was the one number on this page that could be read but not
+    practised. The score and the fault counts above already say *that* something went
+    wrong; this says where, and what to do about it.
+
+    Nothing renders when there are none. `render_delivery` further down already reports a
+    clean attempt, and a second "no problems here" three sections above it is noise.
+    """
+    if not report.delivery_drills:
+        return
+
+    st.markdown("**Delivery**")
+    for drill in report.delivery_drills:
+        with st.container(border=True):
+            st.markdown(f"**{DELIVERY_LABELS.get(drill.fault, drill.fault)}**")
+            if drill.span:
+                st.caption("In this attempt: " + ", ".join(drill.span))
+            if drill.what_happened:
+                st.markdown(drill.what_happened)
+            if drill.drill:
+                st.markdown(f"**Drill** — {drill.drill}")
+
+
 def render_coaching(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
     """The report, with the button that offers to spend a Gemini call improving it.
 
@@ -1046,6 +1071,8 @@ def render_coaching(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
             render_fix(fix, rank)
     else:
         st.info("No single sound substitution stood out in that attempt.", icon="✅")
+
+    render_delivery_drills(report)
 
     if report.stress_and_rhythm.issues or report.stress_and_rhythm.drill:
         st.markdown("**Stress and rhythm**")
@@ -1161,16 +1188,23 @@ def render_word_card(conn: sqlite3.Connection, word: dict[str, Any], index: int)
 
 
 def render_delivery(assessment) -> None:
-    """Counts and locations of UnexpectedBreak / MissingBreak / Monotone."""
+    """Counts, locations and measurements of UnexpectedBreak / MissingBreak / Monotone.
+
+    The evidence for what the Delivery drills in the coaching section above ask for. The
+    measurement sentence comes from `fallback_coach.measurement_note`, the same function
+    that wrote it up there, so the two cannot quote different numbers for one fault.
+    """
     st.subheader("Delivery")
-    summary = speech_analyzer.delivery_summary(assessment.words)
-    if not summary:
+    faults = speech_analyzer.delivery_faults(assessment.words)
+    if not faults:
         st.success("No pausing or intonation problems flagged in that attempt.")
         return
-    for fault, words in summary.items():
+    for fault in faults:
+        words = fault["words"]
         st.markdown(
-            f"**{DELIVERY_LABELS.get(fault, fault)}** — {len(words)} "
-            f"{'word' if len(words) == 1 else 'words'}: {', '.join(words)}"
+            f"**{DELIVERY_LABELS.get(fault['fault'], fault['fault'])}** — {len(words)} "
+            f"{'word' if len(words) == 1 else 'words'}: {', '.join(words)}."
+            f"{fallback_coach.measurement_note(fault)}"
         )
 
 

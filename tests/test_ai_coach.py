@@ -54,6 +54,7 @@ def answer(**overrides) -> str:
             "articulation": "Tongue tip to the top teeth, blow air past it.",
             "minimal_pairs": [{"a": "think", "b": "sink"}],
         }],
+        "delivery_drills": [],
         "stress_and_rhythm": {"issues": ["The first syllable is weak."], "drill": "Clap the stress."},
         "practice_plan": "One minute on think/sink, then read the line again.",
     }
@@ -116,6 +117,40 @@ def no_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
         utils, "retry_transient",
         lambda fn, **kwargs: real(fn, sleep=lambda _delay: None, **kwargs),
     )
+
+
+@pytest.fixture
+def flat_attempt() -> sa.Assessment:
+    """Synthetic: the captured payload carries no delivery fault, so this one is built.
+
+    Same substitution as `attempt`, plus a Monotone span — the shape #9 is about.
+    """
+    return sa.Assessment(
+        raw=[],
+        overall_scores={"pron_score": 62.0, "prosody": 55.0},
+        recognised_text="sursday brought thunder and thick clouds",
+        words=[
+            {
+                "word": "thursday", "accuracy": 34.0, "error_type": "Mispronunciation",
+                "error_source": "azure", "delivery_error_types": [],
+                "prosody_detail": {"break_length_ms": None, "monotone_confidence": 0.2},
+                "syllables": [], "phonemes": [phoneme("θ", 41.0, ("s", 100.0))],
+            },
+            {
+                "word": "clouds", "accuracy": 96.0, "error_type": "None",
+                "error_source": "azure", "delivery_error_types": ["Monotone"],
+                "prosody_detail": {"break_length_ms": None, "monotone_confidence": 0.88},
+                "syllables": [], "phonemes": [],
+            },
+        ],
+    )
+
+
+DELIVERY_ANSWER = [{
+    "fault": "Monotone", "span": ["clouds"],
+    "what_happened": "The pitch did not move across clouds.",
+    "drill": "Say clouds three times, lifting the pitch on the vowel each time.",
+}]
 
 
 # --- The happy path -----------------------------------------------------------------------------
@@ -343,3 +378,109 @@ def test_a_stored_offline_report_can_be_re_read(attempt) -> None:
 def test_an_unreadable_stored_row_returns_nothing_rather_than_crashing() -> None:
     assert ai_coach.report_from_raw({"junk": True}, fc.SOURCE_GEMINI) is None
     assert ai_coach.report_from_raw(None, fc.SOURCE_FALLBACK) is None
+
+
+# --- Delivery drills (#9) -----------------------------------------------------------------------
+# Every case here is synthetic: the committed fixture contains no delivery fault at all.
+
+
+def test_a_drill_the_azure_data_supports_is_kept(flat_attempt) -> None:
+    response = FakeResponse(answer(delivery_drills=DELIVERY_ANSWER))
+    result = ai_coach.coach(flat_attempt, REFERENCE, Mode.DRILL, client=FakeClient(response))
+
+    assert result.source == fc.SOURCE_GEMINI
+    assert [d.fault for d in result.report.delivery_drills] == ["Monotone"]
+    assert "lifting the pitch" in result.report.delivery_drills[0].drill
+
+
+def test_a_drill_for_a_fault_azure_never_reported_is_dropped(flat_attempt) -> None:
+    """The delivery half of the rule that stops the model coaching another recording."""
+    invented = DELIVERY_ANSWER + [{
+        "fault": "UnexpectedBreak", "span": ["thursday"],
+        "what_happened": "You paused after thursday.",
+        "drill": "Read it straight through.",
+    }]
+    response = FakeResponse(answer(delivery_drills=invented))
+    result = ai_coach.coach(flat_attempt, REFERENCE, Mode.DRILL, client=FakeClient(response))
+
+    assert [d.fault for d in result.report.delivery_drills] == ["Monotone"]
+
+
+def test_a_fault_the_model_ignored_is_backfilled_from_the_templates(flat_attempt) -> None:
+    """A fault in the data always produces advice — that is the exit criterion, and it
+    must not depend on the model having bothered. The fixes it did get right survive."""
+    response = FakeResponse(answer(delivery_drills=[]))
+    result = ai_coach.coach(flat_attempt, REFERENCE, Mode.DRILL, client=FakeClient(response))
+
+    assert result.source == fc.SOURCE_GEMINI, "a missing drill is not a reason to fall back"
+    assert [d.fault for d in result.report.delivery_drills] == ["Monotone"]
+    assert "clouds" in result.report.delivery_drills[0].drill
+    assert result.report.priority_fixes[0].expected_phoneme == "θ"
+
+
+def test_an_empty_drill_is_backfilled_rather_than_rendered_blank(flat_attempt) -> None:
+    hollow = [{"fault": "Monotone", "span": ["clouds"],
+               "what_happened": "Flat.", "drill": "   "}]
+    response = FakeResponse(answer(delivery_drills=hollow))
+    result = ai_coach.coach(flat_attempt, REFERENCE, Mode.DRILL, client=FakeClient(response))
+
+    assert result.report.delivery_drills[0].drill.strip()
+    assert "clouds" in result.report.delivery_drills[0].drill
+
+
+def test_the_span_is_rewritten_from_the_payload_not_taken_from_the_answer(flat_attempt) -> None:
+    """The coaching section and the delivery panel must never name different words."""
+    wrong = [{"fault": "Monotone", "span": ["thunder", "wednesday"],
+              "what_happened": "Flat across the line.",
+              "drill": "Say it three times with the pitch moving."}]
+    response = FakeResponse(answer(delivery_drills=wrong))
+    result = ai_coach.coach(flat_attempt, REFERENCE, Mode.DRILL, client=FakeClient(response))
+
+    assert result.report.delivery_drills[0].span == ["clouds"]
+
+
+def test_a_fabricated_phoneme_inside_a_drill_rejects_the_report(flat_attempt) -> None:
+    """Prose is prose wherever it lands: a made-up sound in a drill reads exactly the same
+    to the learner as one in the practice plan."""
+    fabricated = [{"fault": "Monotone", "span": ["clouds"],
+                   "what_happened": "Flat across clouds.",
+                   "drill": "Hold the /ŋ/ at the end of each one."}]
+    response = FakeResponse(answer(delivery_drills=fabricated))
+    result = ai_coach.coach(flat_attempt, REFERENCE, Mode.DRILL, client=FakeClient(response))
+
+    assert result.source == fc.SOURCE_FALLBACK
+
+
+def test_a_clean_attempt_gets_no_drills_even_if_the_model_offers_one(attempt) -> None:
+    response = FakeResponse(answer(delivery_drills=DELIVERY_ANSWER))
+    result = ai_coach.coach(attempt, REFERENCE, Mode.DRILL, client=FakeClient(response))
+
+    assert result.report.delivery_drills == []
+
+
+def test_the_delivery_section_reaches_the_prompt(flat_attempt) -> None:
+    compacted = fc.compact(flat_attempt, Mode.DRILL)
+    prompt = ai_coach.build_prompt(compacted, REFERENCE, "clouds")
+
+    assert '"delivery_faults"' in prompt
+    assert '"Monotone"' in prompt
+
+
+def test_a_report_stored_before_delivery_drills_existed_still_re_reads() -> None:
+    """v0.1.0-v0.3.0 rows have no such key. Absent means the coach of the day had no
+    delivery section, not that the row is corrupt — and the whole reason the payload is
+    kept verbatim is that a later change of mind is a re-parse rather than a re-spend."""
+    stored = json.loads(answer())
+    stored.pop("delivery_drills", None)
+
+    for source in (fc.SOURCE_FALLBACK, fc.SOURCE_GEMINI):
+        report = ai_coach.report_from_raw(stored, source)
+        assert report is not None, f"a stored {source} row became unreadable"
+        assert report.delivery_drills == []
+
+
+def test_the_new_nested_model_still_converts_to_a_gemini_schema() -> None:
+    """The public-API check, re-run against the shape with DeliveryDrill in it."""
+    from google.genai import types
+
+    assert types.GenerateContentConfig(response_schema=fc.CoachingReport)

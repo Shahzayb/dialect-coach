@@ -10,6 +10,12 @@ Run it from the container, which is the only place the pinned SDKs live:
 
     docker compose run --rm app python scripts/coach_test.py
 
+`OFFLINE_FIXTURE` picks which committed payload is replayed, so the delivery half of the
+report can be exercised too — neither capture carries a break or an intonation fault:
+
+    docker compose run --rm -e OFFLINE_FIXTURE=synthetic_delivery_faults.json app \
+        python scripts/coach_test.py
+
 Not collected by pytest: `pytest.ini` scopes collection to `tests/`, and this file makes a
 real, billable-in-principle API call.
 """
@@ -79,6 +85,10 @@ def main() -> int:
         print(f"   why: {fix.why_it_matters}")
         print(f"   how: {fix.articulation}")
         print(f"   pairs: {pairs}")
+    for drill in report.delivery_drills:
+        print(f"\n[{drill.fault}] {drill.span}")
+        print(f"   what: {drill.what_happened}")
+        print(f"   drill: {drill.drill}")
     print(f"\nstress/rhythm: {report.stress_and_rhythm.issues}")
     print(f"drill: {report.stress_and_rhythm.drill}")
     print(f"\n{report.practice_plan}")
@@ -90,11 +100,18 @@ def main() -> int:
         if (fix.expected_phoneme, fix.produced_phoneme) not in observed
     ]
     words = len(" ".join([report.overall_comment, report.practice_plan]).split())
+    reported = {fault["fault"] for fault in compacted["delivery_faults"]}
+    answered = {drill.fault for drill in report.delivery_drills}
     print(f"\ninvented pairs surviving validation: {invented or 'none'}")
+    print(f"delivery faults reported: {sorted(reported) or 'none'}; "
+          f"drilled: {sorted(answered) or 'none'}; "
+          f"unmatched: {sorted(answered ^ reported) or 'none'}")
     print(f"re-parsed from the stored payload: "
           f"{ai_coach.report_from_raw(result.raw, result.source) is not None}")
     print(f"prose length (comment + plan): {words} words")
-    return 1 if invented else 0
+    # Every reported fault must come back with a drill — the model's, or a backfilled
+    # template — and no drill for a fault Azure never reported.
+    return 1 if invented or (answered ^ reported) else 0
 
 
 if __name__ == "__main__":

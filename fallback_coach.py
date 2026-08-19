@@ -47,6 +47,36 @@ _DELIVERY_SENTENCES: dict[str, str] = {
     "Monotone": "Your pitch stayed flat",
 }
 
+# One drill per fault, written once, formatted with the words it actually happened on.
+# This is the half of the coaching layer that has to work with no key and no network, so
+# the delivery advice cannot live in the prompt: a learner without a Gemini key would get
+# a score for their prosody and nothing to do about it, which is the complaint that
+# started this. Each one is something to *perform* — the sentence in `_DELIVERY_SENTENCES`
+# above is what already happened, and describing a problem back at someone is not coaching.
+_DELIVERY_DRILLS: dict[str, str] = {
+    "UnexpectedBreak": (
+        "Read the phrase containing {words} straight through once, without stopping "
+        "anywhere inside it. Then read it again and put the only pause at the punctuation. "
+        "Record both and listen for where the break actually landed."
+    ),
+    "MissingBreak": (
+        "Mark the boundary at {words} with a pencil stroke. Read the sentence at half "
+        "speed putting one clear beat there, then at normal speed keeping the same beat."
+    ),
+    "Monotone": (
+        "Say {words} three times: once with the pitch rising on the last stressed "
+        "syllable, once falling, once the way you would say it to someone in the room. "
+        "Record it and listen for whether the shape changed at all between the three."
+    ),
+}
+
+# For a fault Azure starts reporting that has no template yet. It still gets an entry —
+# a fault named on the page with no drill under it is the exact gap this chunk closes.
+_GENERIC_DELIVERY_DRILL = (
+    "Read the text containing {words} at half speed and then at normal speed, recording "
+    "both, and listen to the two back to back for what changes between them."
+)
+
 # A syllable below this is worth naming as a stress problem. Same cut as a phoneme: below
 # it, Azure is reporting something the listener can hear.
 SYLLABLE_RED = utils.PHONEME_RED
@@ -77,6 +107,22 @@ class PriorityFix(BaseModel):
     minimal_pairs: list[MinimalPair] = Field(description="Real word pairs to drill the contrast.")
 
 
+class DeliveryDrill(BaseModel):
+    """One delivery fault, and something to perform about it."""
+
+    fault: str = Field(description="UnexpectedBreak, MissingBreak or Monotone.")
+    span: list[str] = Field(description="The words from this attempt that carry it.")
+    what_happened: str = Field(
+        description="One sentence naming the span. What happened, not what to do."
+    )
+    drill: str = Field(
+        description=(
+            "An exercise the learner performs, naming those words. Never a restatement "
+            "of the problem."
+        )
+    )
+
+
 class StressAndRhythm(BaseModel):
     """Delivery rather than sounds: pausing, stress placement, intonation."""
 
@@ -93,6 +139,12 @@ class CoachingReport(BaseModel):
     priority_fixes: list[PriorityFix] = Field(
         description=(
             f"At most {MAX_PRIORITY_FIXES}, ranked by how much they cost intelligibility."
+        )
+    )
+    delivery_drills: list[DeliveryDrill] = Field(
+        description=(
+            "One per delivery fault reported in `delivery_faults`, and none for a fault "
+            "that is not there."
         )
     )
     stress_and_rhythm: StressAndRhythm
@@ -218,6 +270,11 @@ def compact(assessment: Any, mode: Mode) -> dict[str, Any]:
         "flagged_words": words,
         "omitted_words": [w["word"] for w in words if w["error_type"] == "Omission"],
         "delivery": speech_analyzer.delivery_summary(assessment.words),
+        # Its own section, and the reason it is separate from "delivery" above: this one
+        # carries what Azure *measured* where each fault happened, which is what turns a
+        # prosody score into something with a span attached. Three entries at most, so the
+        # payload stays the fraction of the raw response that `compact` exists to be.
+        "delivery_faults": speech_analyzer.delivery_faults(assessment.words),
         # The only pairs a report is allowed to discuss. `ai_coach` validates against this.
         "observed_pairs": observed,
     }
@@ -350,12 +407,61 @@ def _overall_comment(compacted: dict[str, Any], groups: list[dict[str, Any]]) ->
     return " ".join(sentences)
 
 
-def _stress_and_rhythm(compacted: dict[str, Any]) -> StressAndRhythm:
-    issues: list[str] = []
+def measurement_note(fault: dict[str, Any]) -> str:
+    """What Azure measured on this span, said in a way a learner can act on.
 
-    for fault, words in compacted["delivery"].items():
-        sentence = _DELIVERY_SENTENCES.get(fault, f"Azure flagged {fault}")
-        issues.append(f"{sentence}, on: {', '.join(words[:6])}.")
+    Used by the coaching section and by the delivery panel further down the page, so the
+    two can never quote different numbers for the same fault.
+
+    A break is given in milliseconds — see `speech_analyzer._prosody_detail` for how that
+    unit was pinned down, since the SDK never states it. The pitch-delta confidence is
+    left as Azure's own 0-1 number under Azure's own name: it is a confidence, not a
+    quantity of anything, and glossing it as "how flat you were" would be inventing a
+    scale nobody published.
+    """
+    longest = fault.get("break_length_ms_max")
+    if isinstance(longest, (int, float)) and longest:
+        return f" The longest of them was about {longest:.0f} ms."
+    pitch = fault.get("monotone_confidence_mean")
+    if isinstance(pitch, (int, float)):
+        return f" Azure's SyllablePitchDeltaConfidence across that span was {pitch:.2f}."
+    return ""
+
+
+def delivery_drills(compacted: dict[str, Any]) -> list[DeliveryDrill]:
+    """A drill for every delivery fault in the payload. Never fewer, never invented ones.
+
+    This is the offline half of what makes the prosody score actionable: a fault in the
+    data always produces something to perform, with no key, no network and no model. The
+    ordering is `speech_analyzer.delivery_faults`' own, which is deterministic.
+    """
+    drills: list[DeliveryDrill] = []
+    for fault in compacted.get("delivery_faults") or []:
+        span = [w for w in fault["words"] if w]
+        named = ", ".join(span[:6]) or "the flagged span"
+        sentence = _DELIVERY_SENTENCES.get(fault["fault"], f"Azure flagged {fault['fault']}")
+        template = _DELIVERY_DRILLS.get(fault["fault"], _GENERIC_DELIVERY_DRILL)
+        drills.append(
+            DeliveryDrill(
+                fault=fault["fault"],
+                span=span,
+                what_happened=f"{sentence}, on: {named}.{measurement_note(fault)}",
+                drill=template.format(words=named),
+            )
+        )
+    return drills
+
+
+def _stress_and_rhythm(compacted: dict[str, Any]) -> StressAndRhythm:
+    """Stress and rhythm *other than* the delivery faults, which have their own section.
+
+    The delivery sentences used to be the first thing in `issues` and the break-derived
+    drill was the first branch below. Both moved into `delivery_drills`, where each fault
+    gets its own exercise instead of sharing one line — leaving this for what is genuinely
+    its own: syllables carrying the stress in the wrong place, and the overall score. The
+    two sections sit inches apart on the page, so saying it in both would read as padding.
+    """
+    issues: list[str] = []
 
     for word in compacted["flagged_words"]:
         syllables = word["syllables"]
@@ -378,17 +484,10 @@ def _stress_and_rhythm(compacted: dict[str, Any]) -> StressAndRhythm:
             f"up than a native reading of the same text."
         )
 
-    broken = [
-        word for fault, words in compacted["delivery"].items()
-        for word in words if fault in {"UnexpectedBreak", "MissingBreak"}
-    ]
-    if broken:
-        drill = (
-            f"Read the text again and mark where you actually pause. Then read it once "
-            f"more running straight through {', '.join(broken[:3])} without stopping, and "
-            f"put the pause only at the punctuation."
-        )
-    elif any(len(word["syllables"]) > 1 for word in compacted["flagged_words"]):
+    # No break branch here any more: a break fault now gets its own drill in
+    # `delivery_drills`, and a second one phrased differently three inches away helped
+    # nobody.
+    if any(len(word["syllables"]) > 1 for word in compacted["flagged_words"]):
         multi = [word["word"] for word in compacted["flagged_words"] if len(word["syllables"]) > 1]
         drill = (
             f"Say {', '.join(multi[:3])} three times each, clapping once on the stressed "
@@ -455,6 +554,7 @@ def emergency_report(reason: str) -> CoachingReport:
             "— read those instead."
         ),
         priority_fixes=[],
+        delivery_drills=[],
         stress_and_rhythm=StressAndRhythm(
             issues=[],
             drill=(
@@ -487,6 +587,7 @@ def build_from_compacted(compacted: dict[str, Any]) -> CoachingReport:
     return CoachingReport(
         overall_comment=_overall_comment(compacted, groups),
         priority_fixes=fixes,
+        delivery_drills=delivery_drills(compacted),
         stress_and_rhythm=_stress_and_rhythm(compacted),
         practice_plan=_practice_plan(compacted, fixes),
     )

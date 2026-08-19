@@ -37,6 +37,11 @@ LOCALE = "en-US"
 # produced /t/ where /θ/ was expected" rather than "your /θ/ scored 41".
 NBEST_PHONEME_COUNT = 5
 
+# Azure times everything in this payload in 100-ns ticks — Offset, Duration, and
+# Break.BreakLength with them. See `_prosody_detail` for how the last of those was pinned
+# down, since the SDK never names its unit.
+TICKS_PER_MS = 10_000
+
 FIXTURE_DIR = Path(__file__).resolve().parent / "tests" / "fixtures"
 FIXTURES: dict[Mode, str] = {
     Mode.DRILL: "sample_azure_response.json",
@@ -311,14 +316,32 @@ def _assess_continuous(
 
 
 def _load_fixture(mode: Mode) -> list[dict[str, Any]]:
-    """Replay a committed payload. The true zero-cost path — no network call at all."""
-    name = FIXTURES.get(mode) or FIXTURES[Mode.DRILL]
-    path = FIXTURE_DIR / name
+    """Replay a committed payload. The true zero-cost path — no network call at all.
+
+    `OFFLINE_FIXTURE` names a different file in `tests/fixtures/` to replay instead of the
+    per-mode default. A development setting, and the reason it exists is narrow: the
+    captured recordings came back clean on Break and Intonation, so without it there is no
+    way to see the delivery coaching in the running app at all — only in the test suite.
+
+    The name is resolved inside `FIXTURE_DIR` and refused if it escapes: this selects one
+    of the committed payloads, and it is not a way to point the app at an arbitrary file
+    on the machine.
+    """
+    override = (utils.get("OFFLINE_FIXTURE") or "").strip()
+    name = override or FIXTURES.get(mode) or FIXTURES[Mode.DRILL]
+    path = (FIXTURE_DIR / name).resolve()
+    if not path.is_relative_to(FIXTURE_DIR.resolve()):
+        raise AssessmentError(
+            f"OFFLINE_FIXTURE={name!r} points outside {FIXTURE_DIR.name}/. Name one of the "
+            f"committed fixtures, not a path."
+        )
     if not path.exists():
         raise AssessmentError(
             f"OFFLINE_MODE is on but the fixture {path.name} is missing, so there is "
             f"nothing to replay."
         )
+    if override:
+        logger.info("OFFLINE_FIXTURE: replaying %s instead of the %s default", name, mode.value)
     data = json.loads(path.read_text(encoding="utf-8"))
     return data if isinstance(data, list) else [data]
 
@@ -429,6 +452,41 @@ def _delivery_error_types(word: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+def _prosody_detail(word: dict[str, Any]) -> dict[str, float | None]:
+    """The numbers Azure reports beside the delivery faults, from the same block.
+
+    `_delivery_error_types` above says *which* fault; this says what was measured where it
+    happened: `Break.BreakLength`, and `Intonation.Monotone.SyllablePitchDeltaConfidence`.
+
+    Kept even when the word carries no fault, because Azure sends them regardless. The
+    committed capture reports a break length of 200 ms on "thursday" with
+    `Break.ErrorTypes: ["None"]` — an ordinary pause at a sentence boundary — and the same
+    pitch-delta confidence on every word in the recording. Filtering those down to the
+    words actually flagged is `delivery_faults`' job, not the parser's.
+
+    **`BreakLength` is in 100-ns ticks**, and is converted here. SDK 1.51.1 never mentions
+    the field — not in its Python layer, not in the strings of its native libraries
+    (checked, not assumed) — so the unit is derived from the committed payload instead:
+    the values are 0, 200000 and 2000000, in a response whose `Offset` and `Duration` are
+    ticks and whose utterance is 9.79 s long. Read as milliseconds the largest would be a
+    2000-second pause inside a ten-second recording; read as ticks it is 200 ms, and the
+    same divisor gives the word durations their sane 0.27-0.41 s. Ticks is the only
+    self-consistent reading, so the value is exposed as milliseconds and can be said out
+    loud to a learner.
+    """
+    scores = _scores(word)
+    prosody = ((scores.get("Feedback") or word.get("Feedback") or {}).get("Prosody") or {})
+    break_length = (prosody.get("Break") or {}).get("BreakLength")
+    monotone = ((prosody.get("Intonation") or {}).get("Monotone") or {})
+    confidence = monotone.get("SyllablePitchDeltaConfidence")
+    return {
+        "break_length_ms": (
+            float(break_length) / TICKS_PER_MS if isinstance(break_length, (int, float)) else None
+        ),
+        "monotone_confidence": float(confidence) if isinstance(confidence, (int, float)) else None,
+    }
+
+
 def _normalise_word(word: dict[str, Any]) -> dict[str, Any]:
     accuracy = _score(word, "AccuracyScore")
     phonemes = []
@@ -455,6 +513,7 @@ def _normalise_word(word: dict[str, Any]) -> dict[str, Any]:
         "error_type": _scores(word).get("ErrorType") or "None",
         "error_source": "azure",
         "delivery_error_types": _delivery_error_types(word),
+        "prosody_detail": _prosody_detail(word),
         "syllables": [
             {"syllable": s.get("Syllable"), "score": _score(s, "AccuracyScore")}
             for s in word.get("Syllables") or []
@@ -530,6 +589,9 @@ def _omission(word: str) -> dict[str, Any]:
         "error_type": "Omission",
         "error_source": "local_diff",
         "delivery_error_types": [],
+        # Present and empty rather than absent: every normalised word has the key, so no
+        # consumer needs a guard for one construction path and not the other.
+        "prosody_detail": {"break_length_ms": None, "monotone_confidence": None},
         "syllables": [],
         "phonemes": [],
     }
@@ -720,4 +782,77 @@ def delivery_summary(words: list[dict[str, Any]]) -> dict[str, list[str]]:
         for fault in word.get("delivery_error_types") or []:
             summary.setdefault(fault, []).append(str(word.get("word") or ""))
     return summary
+
+
+# Which delivery fault to put in front of which, when two damaged the same number of words.
+# A pause dropped into the middle of a phrase breaks the phrase a listener is assembling;
+# two phrases run together makes them assemble the wrong one; a flat phrase is still
+# understood. Ordering by the *measurements* instead would be the obvious thing and is
+# deliberately not done — see `_prosody_detail` on why no meaning is attached to their
+# magnitude.
+FAULT_PRECEDENCE: tuple[str, ...] = ("UnexpectedBreak", "MissingBreak", "Monotone")
+
+# Which measurement belongs to which fault. `BreakLength` is reported on the Break block,
+# so it says nothing about a Monotone span, and quoting it there would be noise dressed as
+# evidence.
+_BREAK_FAULTS = frozenset({"UnexpectedBreak", "MissingBreak"})
+
+
+def _mean(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def delivery_faults(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One entry per delivery fault present: the span, and what Azure measured on it.
+
+    `delivery_summary` answers "which words"; this answers "which words, and what was
+    measured there", which is the form the coaching payload needs — a fault the coach can
+    only name is a fault the learner can only be told about.
+
+    Ordered by how many words the fault damaged, then by `FAULT_PRECEDENCE`. A total
+    order, because a report that reshuffles between two runs on identical input is not
+    deterministic, and this one is rendered straight onto the page.
+
+    The measurements are averaged over **the words carrying that fault only**. Azure
+    reports `SyllablePitchDeltaConfidence` on clean words too, so averaging across the
+    whole attempt would hand every reader a monotone number whether or not anything was
+    flagged.
+    """
+    summary = delivery_summary(words)
+    carriers: dict[str, list[dict[str, Any]]] = {}
+    for word in words:
+        for fault in word.get("delivery_error_types") or []:
+            carriers.setdefault(fault, []).append(word)
+
+    faults: list[dict[str, Any]] = []
+    for fault, span in summary.items():
+        detail = [(w.get("prosody_detail") or {}) for w in carriers.get(fault, [])]
+        breaks = [d["break_length_ms"] for d in detail if d.get("break_length_ms") is not None]
+        pitches = [
+            d["monotone_confidence"] for d in detail if d.get("monotone_confidence") is not None
+        ]
+        entry: dict[str, Any] = {
+            "fault": fault,
+            "words": span,
+            "break_length_ms_max": None,
+            "break_length_ms_mean": None,
+            "monotone_confidence_mean": None,
+        }
+        if fault in _BREAK_FAULTS and breaks:
+            entry["break_length_ms_max"] = round(max(breaks), 1)
+            entry["break_length_ms_mean"] = round(_mean(breaks), 1)
+        if fault == "Monotone" and pitches:
+            entry["monotone_confidence_mean"] = round(_mean(pitches), 3)
+        faults.append(entry)
+
+    def rank(entry: dict[str, Any]) -> tuple[int, int, str]:
+        fault = entry["fault"]
+        precedence = (
+            FAULT_PRECEDENCE.index(fault) if fault in FAULT_PRECEDENCE else len(FAULT_PRECEDENCE)
+        )
+        # The name is the last term so an unrecognised fault Azure adds later still sorts
+        # somewhere fixed rather than wherever the dict happened to put it.
+        return (-len(entry["words"]), precedence, fault)
+
+    return sorted(faults, key=rank)
 

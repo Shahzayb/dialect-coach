@@ -140,6 +140,7 @@ def _report(**overrides):
             "articulation": "Tongue tip between the teeth.",
             "minimal_pairs": [{"a": "thin", "b": "sin"}],
         }],
+        "delivery_drills": [],
         "stress_and_rhythm": {"issues": [], "drill": "Read it twice."},
         "practice_plan": "Five minutes on thursday.",
     }
