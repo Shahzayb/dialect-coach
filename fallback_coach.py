@@ -425,7 +425,7 @@ def _measurement(fault: dict[str, Any]) -> str:
     return ""
 
 
-def _delivery_drills(compacted: dict[str, Any]) -> list[DeliveryDrill]:
+def delivery_drills(compacted: dict[str, Any]) -> list[DeliveryDrill]:
     """A drill for every delivery fault in the payload. Never fewer, never invented ones.
 
     This is the offline half of what makes the prosody score actionable: a fault in the
@@ -584,7 +584,7 @@ def build_from_compacted(compacted: dict[str, Any]) -> CoachingReport:
     return CoachingReport(
         overall_comment=_overall_comment(compacted, groups),
         priority_fixes=fixes,
-        delivery_drills=_delivery_drills(compacted),
+        delivery_drills=delivery_drills(compacted),
         stress_and_rhythm=_stress_and_rhythm(compacted),
         practice_plan=_practice_plan(compacted, fixes),
     )
