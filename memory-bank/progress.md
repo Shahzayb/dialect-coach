@@ -7,13 +7,21 @@ layer turns it into something to practise, the record-and-assess surface now beh
 repeated and impatient clicking, the v0.1.0 code-review findings are fixed, the scores
 and error metrics for milestone v0.3.0 (#11, #13, #10, pronunciation half of #12) are built
 and verified live, the prosody score now comes with a drill attached (#9, v0.4.0), and the
-stored history is finally shown back over time on a fixed benchmark passage (v0.5.0).
+stored history is finally shown back over time on a fixed benchmark passage (v0.5.0). Azure's
+timing data now survives the parser and turns into a rhythm measurement, nPVI, against a
+same-pipeline TTS baseline (v0.6.0) — the de-risking step for every later accent measurement.
 **Milestone v0.3.0 is closed** — #10, #11, #13 closed with comments
 pointing at what implemented them; #12 split, its content-score half (vocabulary/grammar/
 topic) retitled and moved to v0.12.0 since scripted assessment never returns it. What
 remains is Mode C (unscripted), which is also what unblocks #12's remaining half.
 
 ## Releases
+
+**v0.6.0 — built 2026-08-19, not yet tagged.** Azure's `Offset`/`Duration` (word, syllable and
+phoneme) and the top-level `SNR` carried through the parser, plus nPVI over vocalic intervals in
+a new `rhythm.py`, measured against a captured Azure TTS baseline of the benchmark passage. On
+the branch and verified; the PR, the tag, the GitHub release and closing milestone v0.6.0 are
+still to do.
 
 **v0.5.0 — built 2026-08-19, not yet tagged.** The progress view: the first feature that
 reads the SQLite history back, on a fixed benchmark passage. On the branch and verified;
@@ -44,8 +52,13 @@ below still open, on the user's explicit instruction (fix-after rather than fix-
 that is not a defect, it is the first day. Four or five reads spread over a month are what
 make the chart worth looking at, and the first one also settles whether 196 words really
 lands inside 60-90 seconds at an actual reading pace (the attempt's own `audio_seconds`
-says). Until then the only thing on screen is the free-practice cloud, which is exactly the
-thing that cannot be read as progress.
+says; the TTS baseline took 61.8 s, and a human reads it slower). Until then the only thing
+on screen is the free-practice cloud, which is exactly the thing that cannot be read as
+progress.
+
+Two charts now depend on it rather than one: the rhythm chart plots benchmark reads only,
+because nPVI moves with the text as much as with the speaker. The first read is also the
+first number that can be set against the TTS baseline's 58.45.
 
 **Then Mode C (unscripted speech)** — free speech scored on vocabulary, grammar and
 topic, not just a script. Blocked on a real question, not busywork:
@@ -55,6 +68,9 @@ verified before it can be planned. `UNSCRIPTED_TWO_PASS` is defined and priced b
 `budget.passes_for` but unread by any recognition code yet.
 
 ## Active plan
+
+`plans/2026-08-19_timing-data-and-npvi.md` — complete. The TTS baseline was captured, so the
+nPVI figure ships with the comparison that makes it mean something rather than with a caveat.
 
 `plans/2026-08-19_progress-view-benchmark.md` — complete; the 30-day check is a
 calendar item, not a merge gate (see below).
@@ -326,7 +342,10 @@ itself now re-reads both stored shapes, so wiring it up is all that is left). `a
   The `SpeechSynthesizer` default-speaker trap was found by printing the constructor
   signature in the project image, and it would not have been found by reading a sample.
 - Spend API quota deliberately and say so, not incidentally: two calls captured both
-  fixtures, and every guard now also applies to the capture script.
+  fixtures, and every guard now also applies to the capture script. **`OFFLINE_MODE` is the
+  only thing standing between a capture script and a real charge** — `.env` is bind-mounted
+  and `compose.yaml` loads it, so running a capture script with `OFFLINE_MODE=false` bills
+  immediately, with no further prompt. Treat unsetting it as the decision to spend.
 - **The app runs locally. Deploying it is not a goal** — treat hosting as an option left
   open for someone else, never as a requirement to design around. See `techContext.md`.
 

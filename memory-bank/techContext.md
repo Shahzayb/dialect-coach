@@ -460,3 +460,91 @@ Landed 2026-08-19 (milestone v0.5.0). The first feature that reads the stored hi
   re-parse tens of 45-170 kB payloads. `app.parsed_attempts` is `@st.cache_data` keyed on
   `db.attempt_fingerprint` — `(max id, row count)` — with the connection passed as `_conn`
   so Streamlit does not try to hash it.
+
+### Timing data and nPVI
+
+Landed 2026-08-19 (milestone v0.6.0). The de-risking chunk for all later accent work — rhythm,
+vowel-space drift, an F0 track, slicing audio to play a sound back — and a measurement in its
+own right.
+
+**What the parser now carries.** Azure sends `Offset` and `Duration` on every word, syllable
+*and* phoneme; `_normalise_word` discarded all of it. Every level now carries `offset_ticks`,
+`duration_ticks`, `start_s` and `end_s`, always present, `None` on an `_omission` (a word never
+spoken has no extent). The top-level `SNR` goes into `overall_scores` as `snr_db` and
+`snr_db_min` — no column, no migration, because `db.record_attempt` reads five named keys and
+ignores the rest. Continuous mode returns **one SNR per utterance, not one per recording**, so
+both a duration-weighted figure and the worst utterance are kept: measurement quality is
+governed by the worst segment, and averaging hides the utterance that ruins a reading.
+
+**Purely additive, and retroactive.** `progress_view.parse_attempts` re-parses `azure_raw_json`
+through `speech_analyzer.normalise` on every Progress render, so every attempt already stored
+gained timing and an nPVI with no migration and no backfill. This is the second time storing
+responses verbatim has paid for itself.
+
+**Three facts about Azure's timing, established from the payloads rather than the docs:**
+
+- **Offsets are ticks from the start of the AUDIO STREAM, not the start of the file.** In the
+  drill fixture the whole response carries `Offset: 16900000` and the first word begins at
+  exactly that tick — 1.69 s in. Nothing yet depends on it. **The chunk that slices audio must
+  read the payload's own top-level `Offset` first** rather than treating a word offset as a file
+  position.
+- **Everything lands on a 10 ms grid.** Every `Offset` and `Duration` at every level is a whole
+  multiple of `speech_analyzer.FRAME_TICKS`. Asserted across all fixtures, not trusted.
+- **Segments tile their parent with a systematic one-frame seam.** A word's first phoneme starts
+  exactly at the word's `Offset` and its last ends exactly at `Offset + Duration` (20/20 words),
+  yet consecutive phonemes are separated by exactly 10 ms (62/62; syllables 9/9). So
+  `sum(durations) + 10 ms x (n-1) == parent duration`, and the self-consistent reading is that
+  Azure reports `Duration` as `(frames - 1) * 10 ms`. **`Duration` is used raw anyway** — the
+  correction is an inference, the reported value is a fact — and the resulting upward bias on
+  nPVI (~5 points) is documented rather than silently applied.
+
+**nPVI lives in `rhythm.py`**, a pure reader of the normalised shape on the same boundary as
+`progress_view.py`. The vowel predicate reuses `phoneme_reference`'s existing
+`consonant | vowel | diphthong | r-coloured` classification rather than restating an inventory
+that would then have two places to drift from; a test asserts all 39 symbols across all fixtures
+resolve through it. Three segmentation decisions, each measured:
+
+- adjacent vocalic phonemes **merge** into one interval, because a vocalic interval is
+  contiguous vowel and not a phoneme (it happens for real: "rather" /ɚ/ into "unpredictable"
+  /ʌ/);
+- an interval's length is its **span**, not the sum of its phonemes' durations, so the
+  frame-grid bias is one frame per *interval* rather than one per *phoneme*;
+- **pauses over 100 ms end the run** and no pair spans one — the fixture's gaps are bimodal
+  (one frame, a few at 30 ms, then real pauses at 210 ms) and the score is flat at 55.85 for any
+  threshold from 50 to 200 ms, so 100 sits mid-plateau.
+
+**Which comparison is primary — and the intuitive answer is wrong.** Published General American
+bands come from hand-segmented corpora reading different material, so scoring Azure-derived
+durations against one compares three things at once. Measured on the committed fixture, four
+defensible policies give **50.3 / 54.75 / 55.85 / 56.25 on the same unchanged recording** — a
+5.4-point spread from policy alone, wider than several published cross-language contrasts. So
+the primary comparison is `tests/fixtures/benchmark_tts_baseline.json`: the same passage through
+Azure TTS and the same pipeline, one variable. **Published bands get no chart ink anywhere** —
+with a same-pipeline baseline on the same axes, drawing a band that cannot be compared to it
+would only invite the comparison. The baseline is a fixed point, *not* a native speaker; a
+synthesiser's rhythm is its own, and the UI says so.
+
+- Captured once by `scripts/capture_baseline.py`: en-US-BrianNeural, **nPVI 58.45 over 180
+  pairs**, 61.8 s, SNR ~47 dB (synthesised audio is far cleaner than the ~25 dB of a real
+  recording). Synthesised at the plain rate, never `slow_ssml`, which would stretch exactly the
+  durations being measured. The script refuses to overwrite without `--force`, since re-capturing
+  moves the fixed point every stored reading is plotted against.
+- **The capture writes an attempts row, and that row must be marked.** It really was billable
+  seconds and the meter derives from that table, so skipping it would under-report the spend —
+  but its reference text *is* the benchmark passage, so unmarked it puts a point nobody spoke on
+  the trajectory, reports the benchmark as read today by a machine, and lets the synthesiser's
+  weak sounds into "what keeps going wrong". `rhythm.BASELINE_CAPTURE_MARKER` prefixes the row
+  and `progress_view.spoken_attempts` filters it at every entry point, so the trajectory, the
+  rankings and the last-read date cannot disagree about which attempts exist.
+- `MIN_PAIRS = 20` gates on **how much connected speech there was, not on the mode label** —
+  which is why the two-sentence drill fixture does produce a figure and a real three-word drill
+  does not.
+- The seeder borrows phoneme timings from the baseline (its 196 words are the same passage in
+  the same order), so the demo shows a real trend rather than a random walk. Without that fixture
+  the seeded rows carry no timing and the rhythm chart renders its empty state.
+
+**Audio on disk is now permitted but not built.** The user lifted the "no stored audio" rule on
+2026-08-19: recordings may be kept on disk, never committed, with the path and hash in the
+database. Nothing in v0.6.0 needed it, so no column was added and `SCHEMA_VERSION` stays 1 — a
+schema v2 would be this project's first real migration and belongs to the chunk that needs it.
+The only audio landing on disk today is the baseline WAV under the gitignored `audio/`.
