@@ -418,6 +418,76 @@ def test_a_clean_attempt_reports_no_delivery_faults() -> None:
     assert sa.delivery_faults([word("the", 99.0, monotone_confidence=0.2)]) == []
 
 
+# --- The captured bad reading -----------------------------------------------------------------
+# The one payload in this directory that carries a real delivery fault. Everything asserted
+# here is Azure's own output, not a hand-built shape.
+
+
+@pytest.fixture
+def bad_delivery_payloads(fixtures_dir) -> list[dict]:
+    return json.loads((fixtures_dir / "bad_delivery_capture.json").read_text())
+
+
+@pytest.fixture
+def bad_delivery_reference() -> str:
+    return (
+        "I need to drop off a quick package at the post office before grabbing a hot "
+        "coffee. Honestly, the traffic this morning was pretty heavy, so I might just "
+        # A curly apostrophe, as the recording's own transcript has it. A straight one
+        # makes the miscue diff insert an omission and split the flat run in two.
+        "walk over instead. Once I get back to my desk, I\u2019ll call the team to check "
+        "on the project updates and see if everyone is ready for our afternoon meeting."
+    )
+
+
+def test_a_real_monotone_span_is_parsed_off_the_captured_reading(
+    bad_delivery_payloads: list[dict], bad_delivery_reference: str
+) -> None:
+    """Captured live on 2026-08-19 from a reading done badly on purpose.
+
+    Until this existed, every delivery-fault assertion in the suite was against a
+    hand-built payload. Azure flagged Monotone and nothing else on that take, so
+    UnexpectedBreak and MissingBreak are still synthetic-only.
+    """
+    _, _, words = sa.normalise(bad_delivery_payloads, bad_delivery_reference, Mode.PARAGRAPH)
+    faults = sa.delivery_faults(words)
+
+    assert [f["fault"] for f in faults] == ["Monotone"]
+    assert len(faults[0]["words"]) == 30
+    assert faults[0]["monotone_confidence_mean"] == pytest.approx(0.211, abs=0.001)
+
+
+def test_the_captured_monotone_falls_into_two_contiguous_stretches(
+    bad_delivery_payloads: list[dict], bad_delivery_reference: str
+) -> None:
+    """What the flat word list hides, and the reason `runs` exists.
+
+    The span's first entries are "i, i, need" — the head of a 30-word list in reading
+    order, not a phrase. The stretch worth practising is the 27-word one that starts at
+    "once", and it runs straight across four utterance boundaries.
+    """
+    _, _, words = sa.normalise(bad_delivery_payloads, bad_delivery_reference, Mode.PARAGRAPH)
+    runs = sa.delivery_faults(words)[0]["runs"]
+
+    assert [len(run) for run in runs] == [3, 27]
+    assert runs[0] == ["i", "i", "need"]
+    assert runs[1][:4] == ["once", "i", "get", "back"]
+
+
+def test_the_captured_reading_confirms_break_length_is_in_ticks(
+    bad_delivery_payloads: list[dict], bad_delivery_reference: str
+) -> None:
+    """A second recording, independently: the raw values reach 31100000 in a 38.5-second
+    take. As milliseconds that is over eight hours; as 100-ns ticks it is 3.1 seconds,
+    which is what a deliberately halting reading sounds like."""
+    _, _, words = sa.normalise(bad_delivery_payloads, bad_delivery_reference, Mode.PARAGRAPH)
+    longest = max(
+        w["prosody_detail"]["break_length_ms"] for w in words
+        if w["prosody_detail"]["break_length_ms"] is not None
+    )
+    assert 3000 < longest < 4000
+
+
 # --- Choosing which payload is replayed ------------------------------------------------------
 
 

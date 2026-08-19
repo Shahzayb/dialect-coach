@@ -478,6 +478,27 @@ def test_a_monotone_span_produces_a_drill_that_names_it_offline(run_app) -> None
     assert "clouds" in drill, "advice that does not name the span is not actionable"
 
 
+def test_a_long_span_is_summarised_rather_than_listed_in_full(run_app) -> None:
+    """From the captured bad reading: a real Monotone ran 30 words. Listing them all
+    buries the sentence and the drill under a wall of commas, and the stretch worth
+    practising is quoted in the drill anyway."""
+    assessment = offline_assessment()
+    for index in range(20):
+        assessment.words.append({
+            "word": f"word{index}", "accuracy": 96.0, "error_type": "None",
+            "error_source": "azure", "delivery_error_types": ["Monotone"],
+            "prosody_detail": {"break_length_ms": None, "monotone_confidence": 0.9},
+            "syllables": [], "phonemes": [],
+        })
+
+    app = seed_result(run_app(), assessment)
+
+    # `render_fix` uses the same "In this attempt:" caption, so pick the delivery one.
+    caption = next(c.value for c in app.caption if "word0" in c.value)
+    assert "and 8 more" in caption
+    assert "word19" not in caption
+
+
 def test_the_delivery_panel_shows_what_azure_measured(run_app) -> None:
     """Synthetic. The panel and the coaching section read the same helper, so they cannot
     disagree about the number — which is the reason the panel quotes one at all."""

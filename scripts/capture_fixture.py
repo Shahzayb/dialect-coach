@@ -104,7 +104,12 @@ def main() -> int:
     out_path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n",
                         encoding="utf-8")
 
-    print(f"[capture] wrote {out_path.relative_to(ROOT)} ({len(payloads)} utterance(s))")
+    # `relative_to` raises on a path outside the repo, and a `--out` typed relative to the
+    # working directory is one of those — which used to crash *after* the quota was spent
+    # and the file written, reporting a traceback for a capture that had actually worked.
+    shown = out_path.resolve()
+    shown = shown.relative_to(ROOT) if shown.is_relative_to(ROOT) else shown
+    print(f"[capture] wrote {shown} ({len(payloads)} utterance(s))")
     print("[capture] read it before committing — it should contain no key and no audio.")
     return 0
 
