@@ -106,7 +106,9 @@ verified before it can be planned. `UNSCRIPTED_TWO_PASS` is defined and priced b
 ## Active plan
 
 `plans/2026-08-19_shadowing-practice-flow.md` — **built and complete offline; the live half is
-outstanding and cannot be closed without a human at a microphone.** 632 tests and the whole
+outstanding and cannot be closed without a human at a microphone.** Open as
+[PR #27](https://github.com/Shahzayb/dialect-coach/pull/27) with the v0.8.0 milestone attached,
+version bumped to 0.8.0 — **not yet merged, tagged or released.** 632 tests and the whole
 surface driven in the browser, but no real shadowed read exists yet, so the acceptance test it
 carries has no data. Unlike every earlier chunk's deferred check, this one is not just a
 calendar item — nothing in the repository can answer it.
