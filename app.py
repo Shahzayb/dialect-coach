@@ -36,7 +36,7 @@ import fallback_coach
 import speech_analyzer
 import tts
 import utils
-from utils import Band, Mode
+from utils import AzureBand, Band, Mode
 
 logger = logging.getLogger(__name__)
 
@@ -79,13 +79,38 @@ BAND_COLOURS: dict[Band, str] = {
     Band.NONE: "#8a8a8a",
 }
 
+# Azure's own pron/accuracy/fluency/prosody bands (utils.AzureBand) — a different
+# convention from BAND_COLOURS above, which colours word/phoneme accuracy against this
+# project's own heuristics. LOW and FAIR intentionally reuse the same red/amber as
+# BAND_COLOURS so "bad" reads the same everywhere; GOOD is a distinct step between amber
+# and green because Azure's convention, unlike the word/phoneme one, has four bands.
+AZURE_BAND_COLOURS: dict[AzureBand, str] = {
+    AzureBand.LOW: "#d6455d",
+    AzureBand.FAIR: "#c07f16",
+    AzureBand.GOOD: "#6fa83f",
+    AzureBand.EXCELLENT: "#2f8f63",
+    AzureBand.NONE: "#8a8a8a",
+}
+
 # What Azure's prosody feedback means in words. The raw names are accurate but say nothing
-# to someone trying to fix their delivery.
+# to someone trying to fix their delivery. Used in the per-word tooltip and the detailed
+# delivery panel; the headline error-count badges use ERROR_BADGE_LABELS instead, which are
+# short enough to sit next to a number.
 DELIVERY_LABELS: dict[str, str] = {
     "UnexpectedBreak": "Paused in the middle of a phrase",
     "MissingBreak": "Ran two phrases together with no pause",
     "Monotone": "Flat intonation across the span",
 }
+
+# Short labels + colours for the headline error-count badges (#10/#12) — distinct from
+# DELIVERY_LABELS' longer prose, which explains a fault rather than naming it.
+ERROR_BADGES: list[tuple[str, str | None, str]] = [
+    # (badge label, delivery_summary() key or None for the mispronunciation count, colour)
+    ("Mispronunciations", None, "#c07f16"),
+    ("Unexpected break", "UnexpectedBreak", "#d6455d"),
+    ("Missing break", "MissingBreak", "#8a8a8a"),
+    ("Monotone", "Monotone", "#6a4fa0"),
+]
 
 # Chosen to load the sounds most likely to be substituted by Urdu/Punjabi L1 speakers
 # (master plan §7): /θ/ /ð/, /v/ vs /w/, /æ/ vs /ɛ/, /ʃ/ /s/ /z/ /dʒ/, dark /l/, and final
@@ -264,30 +289,76 @@ def _scored_full(word: dict[str, Any]) -> bool:
     return isinstance(accuracy, (int, float)) and accuracy >= 100
 
 
-def hover_text(word: dict[str, Any]) -> str:
-    """The title attribute for a word: its score, and why it was flagged."""
+def word_tooltip_html(word: dict[str, Any]) -> str:
+    """The rich hover-tooltip content for one word (#13): a `word : score` header, then the
+    phoneme breakdown as two aligned rows — symbols, then their scores — followed by why it
+    was flagged.
+
+    The phoneme rows are a quick-glance shape, deliberately different from
+    `render_word_card`'s "expected → produced" substitution list further down the page:
+    both read `speech_analyzer.phoneme_pairs`, the single source for what was actually
+    produced, so the two views can never disagree about a phoneme's score even though they
+    lay it out differently.
+    """
+    text = str(word.get("word") or "")
     accuracy = word.get("accuracy")
-    parts = [f"{accuracy:.0f}" if isinstance(accuracy, (int, float)) else "not spoken"]
+    score_text = f"{accuracy:.0f}" if isinstance(accuracy, (int, float)) else "not spoken"
+    parts = [
+        '<div style="font-weight:600;margin-bottom:0.35rem;">'
+        f"{html.escape(text)} : {html.escape(score_text)}</div>"
+    ]
+
+    pairs = [(expected, score) for expected, _produced, score in speech_analyzer.phoneme_pairs(word) if expected]
+    if pairs:
+        symbol_cells = "".join(
+            f'<span style="color:{BAND_COLOURS[utils.phoneme_band(score)]};min-width:1.6rem;'
+            f'display:inline-block;text-align:center;font-weight:600;">'
+            f"{html.escape(symbol)}</span>"
+            for symbol, score in pairs
+        )
+        score_cells = "".join(
+            '<span style="min-width:1.6rem;display:inline-block;text-align:center;'
+            f'opacity:0.8;">{f"{score:.0f}" if isinstance(score, (int, float)) else "—"}'
+            "</span>"
+            for _symbol, score in pairs
+        )
+        parts.append(f'<div>{symbol_cells}</div><div>{score_cells}</div>')
+
+    notes = []
     error_type = word.get("error_type") or "None"
     if error_type != "None":
         # Says whose judgement it is: continuous mode ignores enableMiscue, so omissions
         # and insertions there are our diff, not Azure's.
-        parts.append(f"{error_type} (flagged by {word.get('error_source') or 'azure'})")
-    parts.extend(word.get("delivery_error_types") or [])
-    return " · ".join(parts)
+        notes.append(f"{error_type} (flagged by {word.get('error_source') or 'azure'})")
+    notes.extend(DELIVERY_LABELS.get(f, f) for f in word.get("delivery_error_types") or [])
+    if notes:
+        parts.append(
+            f'<div style="margin-top:0.35rem;opacity:0.8;">{html.escape(" · ".join(notes))}</div>'
+        )
+    return "".join(parts)
 
 
 def colour_coded_html(words: list[dict[str, Any]]) -> str:
-    """The assessed words as one colour-coded block, each carrying its score on hover.
+    """The assessed words as one colour-coded block, each carrying a rich tooltip on hover.
 
     Built from the aligned word list rather than the raw reference string, because that is
     what carries the scores — so the original punctuation and capitalisation are not
     reproduced here. The verbatim reference stays visible in the diff panel above it.
 
-    HTML rather than Streamlit's native `:red[…]` markdown because only an attribute can
-    carry hover text, and §11 asks for the score on hover. Both the word and the title are
-    escaped: they originate in the reference textarea, which is arbitrary user input being
-    interpolated into markup.
+    HTML rather than Streamlit's native `:red[…]` markdown because only markup can carry
+    hover content, and §11/#13 ask for the score — now the full phoneme breakdown — on
+    hover. A CSS `:hover` tooltip rather than a `title=` attribute because a native tooltip
+    is one plain line and cannot lay out the phoneme/score rows #13's image asks for. The
+    tooltip panel needs a real background to be legible, unlike the inline word colours
+    elsewhere in this file (kept as text/border colours so they survive both themes without
+    needing one). Streamlit 1.61.1 does not expose its theme as CSS custom properties
+    anywhere in the DOM (checked live: `getComputedStyle` returns nothing for
+    `--text-color`/`--secondary-background-color` on `body`, `.stApp`, or any Streamlit
+    container), so this deliberately uses one fixed light card instead of chasing a
+    variable that would never resolve — verified live in the browser on both the light and
+    dark Streamlit themes. Both the word and the tooltip content are escaped: they
+    originate in the reference textarea, which is arbitrary user input being interpolated
+    into markup.
     """
     spans: list[str] = []
     for word in words:
@@ -303,10 +374,22 @@ def colour_coded_html(words: list[dict[str, Any]]) -> str:
         elif error_type == "Insertion":
             style += "font-style:italic;"
         spans.append(
-            f'<span style="{style}" title="{html.escape(hover_text(word), quote=True)}">'
-            f"{html.escape(text)}</span>"
+            '<span class="pa-word-wrap" style="position:relative;display:inline-block;">'
+            f'<span style="{style}">{html.escape(text)}</span>'
+            f'<span class="pa-tooltip">{word_tooltip_html(word)}</span>'
+            "</span>"
         )
-    return '<div style="line-height:2.4;">' + " ".join(spans) + "</div>"
+    style_block = (
+        "<style>"
+        ".pa-tooltip{display:none;position:absolute;bottom:100%;left:0;z-index:10;"
+        "background:#f0f2f6;color:#31333f;"
+        "border:1px solid rgba(128,128,128,0.35);border-radius:6px;"
+        "padding:0.5rem 0.65rem;box-shadow:0 2px 10px rgba(0,0,0,0.2);"
+        "white-space:nowrap;font-size:0.85rem;line-height:1.5;margin-bottom:6px;}"
+        ".pa-word-wrap:hover .pa-tooltip{display:block;}"
+        "</style>"
+    )
+    return style_block + '<div style="line-height:2.6;">' + " ".join(spans) + "</div>"
 
 
 def reference_vs_heard(reference_text: str, recognised_text: str) -> list[tuple[str, str]]:
@@ -734,16 +817,93 @@ def collect_finished_job() -> None:
 # --- Result rendering --------------------------------------------------------------------------
 
 
+def _score_bar_html(label: str, score: float | None) -> str:
+    """One row of the "Score breakdown" (#11/#12): label, `N / 100`, a banded bar.
+
+    A `None` score renders "—" and an empty bar, never `0 / 100` — a missing prosody score
+    (drill mode can return one) is not a zero score, and this is the one place besides
+    `_metric` that has to hold that line.
+    """
+    band = utils.azure_score_band(score)
+    colour = AZURE_BAND_COLOURS[band]
+    value = f"{score:.0f} / 100" if isinstance(score, (int, float)) else "—"
+    width = f"{max(0.0, min(100.0, score)):.1f}%" if isinstance(score, (int, float)) else "0%"
+    return (
+        '<div style="margin-bottom:0.85rem;">'
+        '<div style="display:flex;justify-content:space-between;font-size:0.95rem;">'
+        f"<span>{html.escape(label)}</span><span>{html.escape(value)}</span></div>"
+        '<div style="background:rgba(128,128,128,0.25);border-radius:4px;height:8px;'
+        'margin-top:4px;overflow:hidden;">'
+        f'<div style="background:{colour};width:{width};height:100%;"></div>'
+        "</div></div>"
+    )
+
+
 def render_scores(assessment) -> None:
+    """Pronunciation headline + Completeness, then the Accuracy/Fluency/Prosody breakdown.
+
+    Banding is presentation only: `overall_scores` keeps the raw floats `normalise()`
+    produced, and `utils.azure_score_band` is applied here, at render time, against Azure's
+    own 0-59/60-79/80-89/90-100 convention — a different set of cut points from the
+    word/phoneme colours in `colour_coded_html`, which are this project's own heuristics.
+    """
     scores = assessment.overall_scores
-    columns = st.columns(5)
-    for column, (label, key) in zip(
-        columns,
-        [("Pronunciation", "pron_score"), ("Accuracy", "accuracy"), ("Fluency", "fluency"),
-         ("Completeness", "completeness"), ("Prosody", "prosody")],
-    ):
-        with column:
-            _metric(label, scores.get(key))
+    pron_score = scores.get("pron_score")
+    pron_colour = AZURE_BAND_COLOURS[utils.azure_score_band(pron_score)]
+    pron_text = f"{pron_score:.0f}" if isinstance(pron_score, (int, float)) else "—"
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown(
+            '<div style="text-align:center;">'
+            '<div style="font-size:0.9rem;opacity:0.75;">Pronunciation</div>'
+            f'<div style="font-size:2.75rem;font-weight:700;color:{pron_colour};">'
+            f"{html.escape(pron_text)}</div></div>",
+            unsafe_allow_html=True,
+        )
+    with right:
+        _metric("Completeness", scores.get("completeness"))
+
+    st.markdown("**Score breakdown**")
+    st.markdown(
+        "".join(
+            _score_bar_html(label, scores.get(key))
+            for label, key in
+            [("Accuracy score", "accuracy"), ("Fluency score", "fluency"),
+             ("Prosody score", "prosody")]
+        ),
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Bands follow Azure's own score interpretation — under 60 low, 60-79 fair, 80-89 "
+        "good, 90-100 excellent. A different convention from the word/phoneme colours "
+        "further down, which are heuristics this tool chose."
+    )
+
+
+def render_error_counts(assessment) -> None:
+    """Headline counts for #10/#12: Mispronunciations, Unexpected break, Missing break,
+    Monotone. Counts only — which words carry each fault is already shown by the flagged-
+    word cards (mispronunciations) and `render_delivery` below (the other three), so this
+    is not a second copy of that detail, just the number every issue image puts up top.
+    """
+    mispronounced = speech_analyzer.mispronounced_words(assessment.words)
+    summary = speech_analyzer.delivery_summary(assessment.words)
+
+    cells = []
+    for label, fault_key, colour in ERROR_BADGES:
+        count = len(mispronounced) if fault_key is None else len(summary.get(fault_key, []))
+        cells.append(
+            '<div style="display:flex;align-items:center;gap:0.4rem;margin:0.2rem 1.3rem '
+            '0.2rem 0;">'
+            f'<span style="background:{colour};color:#fff;border-radius:4px;'
+            f'padding:0.05rem 0.55rem;font-weight:600;min-width:1.4rem;text-align:center;">'
+            f"{count}</span><span>{html.escape(label)}</span></div>"
+        )
+    st.markdown(
+        '<div style="display:flex;flex-wrap:wrap;">' + "".join(cells) + "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 # --- Coaching ------------------------------------------------------------------------------------
@@ -924,10 +1084,10 @@ def render_colour_coded(assessment) -> None:
     st.subheader("Word by word")
     st.markdown(colour_coded_html(assessment.words), unsafe_allow_html=True)
     st.caption(
-        f"Hover any word for its score. Red below {utils.WORD_RED:g}, amber below "
-        f"{utils.WORD_AMBER:g}, green above. Struck through: never spoken. Italic: heard "
-        f"but not in the script. These cut points are heuristics chosen for this tool — "
-        f"Azure returns a 0-100 score and says nothing about where \"bad\" starts."
+        f"Hover any word for its score and phoneme breakdown. Red below {utils.WORD_RED:g}, "
+        f"amber below {utils.WORD_AMBER:g}, green above. Struck through: never spoken. "
+        f"Italic: heard but not in the script. These cut points are heuristics chosen for "
+        f'this tool — Azure returns a 0-100 score and says nothing about where "bad" starts.'
     )
 
 
@@ -1017,6 +1177,7 @@ def render_delivery(assessment) -> None:
 def render_result(conn: sqlite3.Connection, entry: CachedAttempt, source) -> None:
     assessment, reference_text = entry.assessment, entry.reference_text
     render_scores(assessment)
+    render_error_counts(assessment)
     # Directly under the scores: what to do about them comes before the evidence for them.
     render_coaching(conn, entry)
     render_diff(assessment, reference_text)

@@ -18,7 +18,7 @@ import fallback_coach
 import speech_analyzer as sa
 import utils
 from tests.conftest import ROOT
-from utils import Mode
+from utils import AzureBand, Mode
 
 APP = str(ROOT / "app.py")
 REFERENCE = (
@@ -143,20 +143,64 @@ def offline_assessment(mode: Mode = Mode.DRILL):
     return sa.analyse("/nonexistent.wav", REFERENCE, mode)
 
 
-def test_a_result_renders_the_full_metric_row(run_app) -> None:
+def test_a_result_renders_the_score_breakdown(run_app) -> None:
+    """#11/#12: Pronunciation headline, Completeness, then Accuracy/Fluency/Prosody bars."""
     app = seed_result(run_app(), offline_assessment())
     assert not app.exception
+
+    # Only Completeness stays a plain st.metric — Pronunciation is now a banded headline
+    # number and Accuracy/Fluency/Prosody are the "Score breakdown" bars, neither of which
+    # is an st.metric widget.
     labels = [m.label for m in app.metric]
-    assert labels == ["Pronunciation", "Accuracy", "Fluency", "Completeness", "Prosody"]
-    assert all(m.value != "—" for m in app.metric), "the fixture has every score populated"
+    assert labels == ["Completeness"]
+    assert app.metric[0].value == "85", "the fixture has completeness populated"
+
+    rendered = " ".join(m.value for m in app.markdown)
+    assert "Score breakdown" in rendered
+    # Fixture values from tests/fixtures/sample_azure_response.json: pron 83.0 (good, 80-89),
+    # accuracy 89.0 (good), fluency 88.0 (good), prosody 76.4 (fair, 60-79).
+    assert "83" in rendered
+    for label, value in (("Accuracy score", "89"), ("Fluency score", "88"),
+                          ("Prosody score", "76")):
+        assert f"{label}</span><span>{value} / 100</span>" in rendered
+    assert app_module.AZURE_BAND_COLOURS[AzureBand.GOOD] in rendered
+    assert app_module.AZURE_BAND_COLOURS[AzureBand.FAIR] in rendered
 
 
 def test_unavailable_prosody_renders_as_a_dash_not_zero(run_app) -> None:
     assessment = offline_assessment()
     assessment.overall_scores["prosody"] = None
     app = seed_result(run_app(), assessment)
-    prosody = next(m for m in app.metric if m.label == "Prosody")
-    assert prosody.value == "—", "a missing score and a score of zero are different things"
+    rendered = " ".join(m.value for m in app.markdown)
+    assert "Prosody score</span><span>—</span>" in rendered, (
+        "a missing score and a score of zero are different things"
+    )
+    assert "Prosody score</span><span>0 / 100</span>" not in rendered
+
+
+def test_a_missing_pronunciation_score_renders_as_a_dash(run_app) -> None:
+    assessment = offline_assessment()
+    assessment.overall_scores["pron_score"] = None
+    app = seed_result(run_app(), assessment)
+    rendered = " ".join(m.value for m in app.markdown)
+    assert ">—</div>" in rendered
+
+
+def test_the_error_counts_reflect_the_fixtures_real_mispronunciations(run_app) -> None:
+    """#10/#12: the committed drill fixture carries real Mispronunciation words — no
+    synthetic payload needed to prove the headline count is wired up."""
+    assessment = offline_assessment()
+    expected = len(sa.mispronounced_words(assessment.words))
+    assert expected > 0, "fixture is expected to carry real Mispronunciation words"
+    app = seed_result(run_app(), assessment)
+    rendered = " ".join(m.value for m in app.markdown)
+    assert f">{expected}</span><span>Mispronunciations</span>" in rendered
+    # The committed fixture has no UnexpectedBreak/MissingBreak/Monotone (documented gap in
+    # memory-bank/progress.md), so those three badges are exercised in test_render.py against
+    # a synthetic payload instead, the same way the rest of the delivery-fault code is.
+    assert ">0</span><span>Unexpected break</span>" in rendered
+    assert ">0</span><span>Missing break</span>" in rendered
+    assert ">0</span><span>Monotone</span>" in rendered
 
 
 def test_the_result_diffs_the_script_against_what_azure_heard(run_app) -> None:

@@ -304,6 +304,21 @@ def test_a_clean_attempt_has_no_delivery_entries() -> None:
     assert sa.delivery_summary([word("the", 99.0)]) == {}
 
 
+def test_mispronounced_words_reads_the_errortype_not_the_accuracy() -> None:
+    """A word can be badly scored without being ErrorType Mispronunciation, and vice versa —
+    the headline count in #10/#12 is specifically what Azure classified this way."""
+    words = [
+        word("thursday", 41.0, error_type="Mispronunciation"),
+        word("weather", 99.0),
+        word("today", None, error_type="Omission"),
+    ]
+    assert sa.mispronounced_words(words) == ["thursday"]
+
+
+def test_a_clean_attempt_has_no_mispronounced_words() -> None:
+    assert sa.mispronounced_words([word("the", 99.0)]) == []
+
+
 def test_a_clean_high_scoring_word_is_not_flagged() -> None:
     assert not sa.is_flagged(word("weather", 99.0))
 
