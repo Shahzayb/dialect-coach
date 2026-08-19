@@ -258,7 +258,12 @@ def score_chart(frame: pd.DataFrame) -> alt.Chart:
     """
     base = alt.Chart(frame)
     x = alt.X("when:T", title=None)
-    y = alt.Y("value:Q", title=None, scale=alt.Scale(domain=[0, 100]))
+    y = alt.Y("value:Q", title=None, scale=alt.Scale(domain=[0, 100]),
+              axis=alt.Axis(tickCount=5))
+
+    # Only the modes actually present get a shape. Mode C is declared in `utils.Mode` but is
+    # not built, and a legend entry for it would advertise something that cannot happen.
+    modes = [label for label in MODE_LABELS.values() if label in set(frame.get("mode", []))]
 
     # Free practice: points only, never joined. Shape carries the mode, so Mode A and Mode B
     # are distinguishable and there is no line for them to share.
@@ -268,8 +273,8 @@ def score_chart(frame: pd.DataFrame) -> alt.Chart:
         x=x,
         y=y,
         shape=alt.Shape("mode:N", title="Free practice",
-                        scale=alt.Scale(domain=list(MODE_LABELS.values()),
-                                        range=["triangle-up", "circle", "square"])),
+                        scale=alt.Scale(domain=modes,
+                                        range=["triangle-up", "circle", "square"][:len(modes)])),
         color=alt.value("#8a8a8a"),
         tooltip=[alt.Tooltip("when:T", title="When"), alt.Tooltip("mode:N", title="Mode"),
                  alt.Tooltip("metric:N", title="Metric"),
@@ -290,7 +295,7 @@ def score_chart(frame: pd.DataFrame) -> alt.Chart:
                  alt.Tooltip("label:N", title="Text")],
     )
 
-    return alt.layer(cloud, benchmark).facet(
+    return alt.layer(cloud, benchmark).properties(height=130).facet(
         row=alt.Row("metric:N", title=None, sort=list(METRIC_ORDER),
                     header=alt.Header(labelFontWeight="bold", labelAnchor="start")),
     ).properties(title="Scores over time").resolve_scale(y="shared")
@@ -474,12 +479,15 @@ def _ranking_chart(frame: pd.DataFrame, field: str, title: str, colour: str,
     return alt.Chart(data).mark_bar(color=colour, cornerRadiusEnd=2).encode(
         x=alt.X("attempts:Q", title="Attempts it was flagged in",
                 axis=alt.Axis(tickMinStep=1)),
-        y=alt.Y(f"{field}:N", title=None, sort="-x"),
+        # labelOverlap=False: Vega drops every other label when the band is tight, and a
+        # ranking whose bars are half unlabelled says nothing at all.
+        y=alt.Y(f"{field}:N", title=None, sort="-x",
+                axis=alt.Axis(labelOverlap=False, labelLimit=180)),
         tooltip=[alt.Tooltip(f"{field}:N", title=title),
                  alt.Tooltip("attempts:Q", title="Attempts"),
                  alt.Tooltip("benchmark_attempts:Q", title="of those, benchmark reads"),
                  alt.Tooltip("tokens:Q", title="Times in total")],
-    ).properties(title=title, height=alt.Step(18))
+    ).properties(title=title, height=alt.Step(20))
 
 
 def phoneme_chart(frame: pd.DataFrame, limit: int = TOP_PHONEMES) -> alt.Chart:
