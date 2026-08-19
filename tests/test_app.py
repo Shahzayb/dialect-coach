@@ -1647,3 +1647,48 @@ def test_the_progress_tab_names_the_delta_against_a_cold_read(run_app) -> None:
     assert "Fluency +8.0" in said
     assert "Prosody +9.0" in said
     assert "1 pair" in said
+
+
+def test_the_tag_travels_through_the_worker_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The row and its tag are written under one `_DB_LOCK`, on the assessment thread.
+
+    Exercised through `run_assessment_job` itself rather than by writing the row directly:
+    that function is the only place a tag is ever attached, it runs off the script thread, and
+    a tag that failed to land there would be invisible until a shadowed read had already gone
+    onto the cold trajectory. Offline, so it replays the fixture and spends nothing.
+    """
+    import threading
+
+    import shadowing
+
+    conn = db.connect(":memory:")
+    outcome = app_module.run_assessment_job(
+        conn,
+        b"RIFF" + b"\x00" * 40,
+        12.0,
+        REFERENCE,
+        Mode.DRILL,
+        threading.Event(),
+        (shadowing.SHADOW_TAG,),
+    )
+
+    assert outcome.error is None, outcome.error
+    assert outcome.attempt_id is not None
+    assert db.tags_for(conn, outcome.attempt_id) == {shadowing.SHADOW_TAG}
+    # `attempt_series` is deliberately NOT asserted here: this row is an offline replay, and
+    # both progress readers exclude those — the fixture scores the same every time, so thirty
+    # identical points would not be a trajectory. `test_db` covers the join on a real row.
+    conn.close()
+
+
+def test_an_untagged_assessment_writes_no_tag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cold read must stay untagged, or the trajectory it belongs on would lose it."""
+    import threading
+
+    conn = db.connect(":memory:")
+    outcome = app_module.run_assessment_job(
+        conn, b"RIFF" + b"\x00" * 40, 12.0, REFERENCE, Mode.DRILL, threading.Event(),
+    )
+    assert outcome.attempt_id is not None
+    assert db.tags_for(conn, outcome.attempt_id) == set()
+    conn.close()
