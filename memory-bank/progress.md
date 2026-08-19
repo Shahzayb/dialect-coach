@@ -376,6 +376,28 @@ gap chart converging on zero. The browser check caught one thing the tests could
 orange line with no legend entry reads as a second trajectory, which is the one thing it must
 not be taken for, so a caption now says what it is.
 
+**Measured live against Azure on 2026-08-19, and the meter is the assertion** — same
+discipline as v0.7.0, on a database and a month that both started at zero, so every charge is
+attributable:
+
+- The benchmark model clip charged **exactly one `tts_usage` row of 975 characters**, the
+  passage's own length, and came back as **61.775 s of audio** — the committed TTS baseline
+  says 61.8 s, so the arithmetic the 180-second duration ceiling was chosen on is right.
+- Leaving the session and preparing again charged **nothing**: *"Shadow audio served entirely
+  from the disk cache; nothing charged."*
+- The echo track needed **14 clips and charged 959 characters**, which is
+  `sum(len(p) for p in phrases(BENCHMARK_PASSAGE))` exactly — one row per clip, none
+  double-charged — and produced a **129.15 s** track against the 129.2 s the gap rule predicts.
+- Switching back to speak-along charged nothing; 15 clips on disk, 15 rows, meter unmoved.
+- **The layout constraint holds in a real browser**: the model player has `autoplay=false` and
+  native controls, the recorder sits after it, and there are **zero buttons between them**, so
+  nothing can trigger a rerun between pressing record and pressing play.
+- **Echo mode renders no recorder at all** — the Today tab panel held 0 recorders and 1 audio
+  element, so an echo take cannot be submitted even by accident.
+- On a completely empty database the queue correctly offers nothing while **shadowing is still
+  offered**, which is the branch that matters: it is the one practice here that needs no history.
+- Total spend for the whole exercise: **1,934 TTS characters** of 500,000, and **no STT at all**.
+
 **What this does not prove, and it is the larger half.** *No real shadowed read has ever been
 recorded.* Everything above is the plumbing, verified against seeded rows whose gap was
 *written* to narrow because that is the shape the design predicts — seeding the failure shape
@@ -403,6 +425,13 @@ Worth keeping from that pass:
   stress-and-rhythm lines) as well as the fixes, and rejects the whole report rather than
   editing a fabricated sound out of a sentence — there is no way to cut a clause and be
   left with English, and the offline report that replaces it is complete.
+
+**A real `.env` can silently undo the 180-second paragraph ceiling.** The default moved from
+120 to 180 for shadowing, but `.env.example` and any existing `.env` set the variable
+explicitly, so a file written before this chunk still says 120 and wins. A slow shadowed read of
+the benchmark is 61.775 s x 1.54 = **~95 s of model audio** plus the lead-in and tail, so ~105 s
+lands inside 120 with almost no margin for a shadower who trails the model. Check the live
+`.env`, not just `utils._DEFAULTS`.
 
 **A shadowed read is only as clean as the headphones.** The model plays while the microphone
 is open, so on speakers Azure assesses a mixture of the speaker and the synthesiser. The UI

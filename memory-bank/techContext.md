@@ -615,6 +615,10 @@ speaking** rather than afterwards, and the first that measures itself.
   `app.synthesise_clip` was extracted from `buy_block_audio` so the perception block and the
   shadow model charge the meter by exactly the same rule; the batch pre-flight stays with each
   caller, which is what stops a guard approving a run whose real charge lands mid-batch.
+- **Measured live on 2026-08-19.** The model clip is 975 characters and 61.775 s (the committed
+  TTS baseline says 61.8 s); the echo track is 14 clips, 959 characters, and 129.15 s. Both are
+  bought once per `(passage, rate)` and served from disk after that — a second preparation
+  charged nothing. The whole live exercise cost **1,934 TTS characters and no STT**.
 - **What the comparison is, and what a failure of it looks like.** `progress_view.shadow_pairs`
   sets each shadowed read against the **nearest cold read of the same passage by time, either
   side** — requiring the cold read to come first would throw away every pair from the first
