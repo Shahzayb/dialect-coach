@@ -44,8 +44,7 @@ verified before it can be planned. `UNSCRIPTED_TWO_PASS` is defined and priced b
 
 ## Active plan
 
-`plans/2026-08-19_prosody-coaching-payload.md` — code complete; one live recording read
-badly on purpose is still outstanding.
+`plans/2026-08-19_prosody-coaching-payload.md` — complete, live recording included.
 `plans/2026-08-19_record-assess-defects.md` — complete.
 `plans/2026-08-18_coaching-layer.md` — complete.
 `plans/2026-08-18_legible-audible-diagnosis.md` — complete.
@@ -127,7 +126,11 @@ which is the whole point, since "Prosody 76.4" with nothing to do about it was t
 complaint. `ai_coach` asks the model for the same section and backfills from the templates
 for any fault it skips, so a fault in the data always produces advice on both paths.
 
-Verified offline in the browser on 2026-08-19, with no `GEMINI_API_KEY` and
+Verified offline in the browser on 2026-08-19 **against the real captured bad reading**
+(`OFFLINE_FIXTURE=bad_delivery_capture.json`, paragraph mode, no `GEMINI_API_KEY`):
+prosody 81, and a Delivery block quoting the flat stretch back — *"once i get back to my
+desk i'll call the team to …"* — with a drill on it, and a note that it went flat in two
+separate stretches. Also verified earlier against the synthetic payload with
 `OFFLINE_FIXTURE=synthetic_delivery_faults.json`: prosody 54, and a Delivery block naming
 the Monotone span ("stayed, warm, clear") with a drill for it, an UnexpectedBreak span
 ("unpredictable, thursday", longest about 420 ms) and a MissingBreak span ("clouds,
@@ -141,9 +144,26 @@ drilled with the spans Azure reported, nothing invented, 3298 tokens in and 742 
 the stored payload re-parsed. Nothing had to be backfilled on that run, so the backfill
 path itself is covered by tests rather than by observation.
 
-**`BreakLength` is in 100-ns ticks.** Derived from the committed capture, not from docs —
-SDK 1.51.1 never mentions the field anywhere. See `techContext.md`; an earlier reading that
-called every value 0 was wrong.
+**A deliberately bad reading was captured on 2026-08-19** (38.5 s, 39 s of the 18,000 s
+allowance) and committed as `tests/fixtures/bad_delivery_capture.json` — the first payload
+in the repo carrying a real delivery fault. Azure flagged **Monotone on 30 words across 7
+utterances and nothing else**, so the `UnexpectedBreak` / `MissingBreak` paths are still
+covered only by the synthetic payload. Reading three sentences haltingly, with pauses run
+together, did not produce a break fault; whatever provokes one, that was not it.
+
+**The real capture broke the coaching immediately, which is what it was for.** The
+synthetic payload's spans were three words long, so naming the first few of them read
+fine. A real Monotone is a long unbroken passage, and its span is in reading order — so
+the coach produced *"Say i, i, need, once, i, get three times"*. `delivery_faults` now
+cuts a span into contiguous `runs` and the coach quotes the longest one back as the phrase
+it is, capped at 12 words. Runs stop at a gap, so a quote can never join words the speaker
+never said next to each other. **The lesson worth keeping: a synthetic payload sized like
+a unit test hides everything that only shows up at real length.**
+
+**`BreakLength` is in 100-ns ticks.** Derived from the committed captures, not from docs —
+SDK 1.51.1 never mentions the field anywhere. The bad reading confirms it independently:
+31100000 in a 38.5-second take is over eight hours as milliseconds and 3.1 seconds as
+ticks. See `techContext.md`; an earlier reading that called every value 0 was wrong.
 
 **The record-and-assess surface** survives being used impatiently. `Assess` is disabled
 while a request is in flight and a `Stop` button appears beside it for the duration; a
@@ -174,7 +194,7 @@ the word's score, then its phoneme symbols and their scores as two aligned rows,
 the old single-line `title=` attribute. Content score (vocabulary/grammar/topic, #12's other
 half) is out of scope — scripted assessment never returns it.
 
-`make test` is 345 tests, all offline with no keys and no network.
+`make test` is 352 tests, all offline with no keys and no network.
 
 Not built: Mode C (unscripted).
 
@@ -220,13 +240,12 @@ itself now re-reads both stored shapes, so wiring it up is all that is left). `a
 - The multi-utterance merge is only covered by synthetic payloads. The captured 12.8 s
   recording came back as a single utterance in continuous mode, so the real multi-utterance
   path has never run against live data. A longer paragraph recording would close this.
-- The captured recording contains no `UnexpectedBreak` / `MissingBreak` / `Monotone`, so
-  delivery-fault aggregation **and the whole delivery-coaching chunk** are covered by a
-  hand-built payload marked synthetic, not by a captured one. Since v0.4.0 that payload is
-  committed as `tests/fixtures/synthetic_delivery_faults.json` and `OFFLINE_FIXTURE`
-  selects it, so the feature can at least be *seen* in the running app. Closing the gap
-  properly needs one live recording read badly on purpose — agreed with the user, not yet
-  taken.
+- **`UnexpectedBreak` and `MissingBreak` have still never been seen from Azure.** The
+  deliberately bad reading closed the gap for `Monotone` only
+  (`tests/fixtures/bad_delivery_capture.json`); the two break faults are covered by
+  `tests/fixtures/synthetic_delivery_faults.json`, which is hand-built and says so inside
+  the file. `OFFLINE_FIXTURE` selects either. A reading that actually provokes a break
+  fault would close the rest — halting delivery with sentences run together did not.
 - The reference text sent to TTS is the *script*, not what was heard, so whole-text
   playback always renders the intended reading. That is the point, but it means a
   paragraph's playback does not line up word-for-word with a recording that omitted words.
