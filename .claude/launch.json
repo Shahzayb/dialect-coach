@@ -15,7 +15,7 @@
         "-e", "DB_PATH=data/seed_demo.db",
         "-e", "OFFLINE_MODE=true",
         "app",
-        "streamlit", "run", "app.py",
+        "streamlit", "run", "src/app.py",
         "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"
       ],
       "port": 8501

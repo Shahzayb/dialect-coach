@@ -1,13 +1,13 @@
 """Test-suite setup.
 
-Two jobs: put the repo root on `sys.path` so the root-level modules import (there is no
-package and no `pyproject.toml`), and force `OFFLINE_MODE=true` for every test so a
-misconfigured environment can never turn a test run into a billable API call.
+One job: force `OFFLINE_MODE=true` for every test so a misconfigured environment can never
+turn a test run into a billable API call. Import resolution is `pythonpath = src` in
+pytest.ini — the source modules live under `src/` and are imported flat, and pytest is the
+only thing that needs to be told where they are.
 """
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
@@ -15,9 +15,6 @@ import pytest
 import utils
 
 ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-
 FIXTURES = ROOT / "tests" / "fixtures"
 
 

@@ -20,10 +20,10 @@ import db
 import fallback_coach
 import speech_analyzer as sa
 import utils
-from tests.conftest import ROOT
+from conftest import ROOT
 from utils import AzureBand, Mode
 
-APP = str(ROOT / "app.py")
+APP = str(ROOT / "src" / "app.py")
 REFERENCE = (
     "The weather this month has been rather unpredictable. Thursday brought thunder "
     "and thick clouds, while Wednesday stayed warm and clear."

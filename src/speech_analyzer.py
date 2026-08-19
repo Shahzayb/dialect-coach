@@ -50,7 +50,9 @@ TICKS_PER_SECOND = 10_000_000
 # comparing gaps against exactly one frame.
 FRAME_TICKS = 100_000
 
-FIXTURE_DIR = Path(__file__).resolve().parent / "tests" / "fixtures"
+# Two levels up: this module lives in src/, the fixtures live beside the tests at the
+# repo root. Derived from __file__ rather than cwd so a script run from anywhere finds them.
+FIXTURE_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 FIXTURES: dict[Mode, str] = {
     Mode.DRILL: "sample_azure_response.json",
     Mode.PARAGRAPH: "sample_azure_continuous.json",

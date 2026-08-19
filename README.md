@@ -46,7 +46,7 @@ python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
 
 ```bash
-.venv/bin/streamlit run app.py
+.venv/bin/streamlit run src/app.py
 ```
 
 If you use `uv`, `uv venv --python 3.12 && uv pip install -r requirements.txt` fetches a
@@ -207,7 +207,7 @@ Be clear-eyed about this rather than reassured:
 Not required — this is built to run on your own machine, and nothing in the app assumes
 otherwise. It is laid out to make a Hugging Face Space possible for anyone who wants one:
 `packages.txt` lists the apt packages such an image needs, and the app is a single
-`app.py` Streamlit entry point.
+`src/app.py` Streamlit entry point.
 
 Going that route means adding YAML frontmatter to the top of this file, since a Space will
 not build without it:
@@ -220,7 +220,7 @@ colorFrom: indigo
 colorTo: blue
 sdk: streamlit
 sdk_version: 1.61.1
-app_file: app.py
+app_file: src/app.py
 pinned: false
 ---
 ```
