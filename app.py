@@ -583,6 +583,15 @@ def playback_buttons(
 TEXT_KEY = "reference_text"
 PRESET_KEY = "preset_choice"
 
+# Which surface produced the result currently in `last_key`. Two tabs can now start an
+# assessment, and `last_key` is a single slot, so without this BOTH render it — Streamlit
+# executes every tab body on every rerun, and `render_result` builds widget keys from the
+# attempt, so the second render collides with the first on a duplicate key. Found live, not
+# in a test: the offline suite never had a shadowed result and a Practice result at once.
+RESULT_OWNER_KEY = "result_owner"
+SHADOW_OWNER = "shadow"
+PRACTICE_OWNER = "practice"
+
 
 def _generation(name: str) -> int:
     """The current generation of a rebuilt widget's key.
@@ -618,6 +627,7 @@ def _reset_form() -> None:
     _bump("recording")
     _bump("upload")
     st.session_state["last_key"] = None
+    st.session_state[RESULT_OWNER_KEY] = None
     st.session_state["now_playing"] = None
 
 
@@ -2383,6 +2393,11 @@ def render_shadow(conn: sqlite3.Connection, job: "AssessJob | None", running: bo
     if st.button("← Back to Today", key="shadow-back", disabled=running):
         st.session_state[SHADOW_KEY] = None
         st.session_state["now_playing"] = None
+        # The result goes with the session that produced it. Leaving it in `last_key` would
+        # surface a shadowed read's report on the Practice tab, which did not produce it.
+        if st.session_state.get(RESULT_OWNER_KEY) == SHADOW_OWNER:
+            st.session_state["last_key"] = None
+            st.session_state[RESULT_OWNER_KEY] = None
         st.rerun()
 
 
@@ -2421,6 +2436,7 @@ def render_shadow_assess(
             audio_bytes = recording.getvalue()
             key = utils.attempt_hash(passage, audio_bytes, Mode.PARAGRAPH)
             state["key"] = key
+            st.session_state[RESULT_OWNER_KEY] = SHADOW_OWNER
             cached = _cache_get(key)
             if cached is not None:
                 st.session_state["last_key"] = key
@@ -2558,6 +2574,7 @@ def render_practice(conn: sqlite3.Connection, job: "AssessJob | None", running: 
         if validate_reference(reference_text):
             audio_bytes = source.getvalue()
             key = utils.attempt_hash(reference_text, audio_bytes, mode)
+            st.session_state[RESULT_OWNER_KEY] = PRACTICE_OWNER
             cached = _cache_get(key)
             if cached is not None:
                 # The fastest path in the app: one click to retry the same drill sentence.
@@ -2579,8 +2596,13 @@ def render_practice(conn: sqlite3.Connection, job: "AssessJob | None", running: 
         time.sleep(JOB_POLL_SECONDS)
         st.rerun()
 
+    # Only the surface that produced the result renders it. Both tab bodies execute on every
+    # rerun, so rendering it in both would draw the same report twice and — because
+    # `render_result` derives its widget keys from the attempt — raise a duplicate-key error
+    # rather than merely looking odd.
     last_key = st.session_state.get("last_key")
-    if last_key:
+    owner = st.session_state.get(RESULT_OWNER_KEY)
+    if last_key and owner != SHADOW_OWNER:
         cached = _cache_get(last_key)
         if cached is not None:
             st.divider()

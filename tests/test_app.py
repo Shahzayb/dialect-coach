@@ -1692,3 +1692,56 @@ def test_an_untagged_assessment_writes_no_tag(monkeypatch: pytest.MonkeyPatch) -
     assert outcome.attempt_id is not None
     assert db.tags_for(conn, outcome.attempt_id) == set()
     conn.close()
+
+
+def test_a_shadowed_result_renders_on_exactly_one_surface(
+    run_app, shadow_synthesis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression, found live rather than in a test: `StreamlitDuplicateElementKey`.
+
+    `last_key` is a single slot and Streamlit executes EVERY tab body on every rerun, so once
+    the shadow surface could also start an assessment, both it and the Practice tab rendered
+    the same result. `render_result` derives its widget keys from the attempt, so the second
+    render did not merely look odd — it collided with the first and blew up the page.
+    """
+    app = prepare_model(open_shadow(run_app()))
+    state = app.session_state[app_module.SHADOW_KEY]
+    passage = str(state["passage"])
+
+    # Stand in for a finished shadowed read: the cache entry plus the ownership the shadow
+    # surface claims when it starts one.
+    from collections import OrderedDict
+
+    # Back offline now the model is bought: the stand-in assessment below is a fixture replay,
+    # and the audio already in session state keeps the surface rendering exactly as it was.
+    monkeypatch.setenv("OFFLINE_MODE", "true")
+
+    key = utils.attempt_hash(passage, b"take", Mode.PARAGRAPH)
+    state["key"] = key
+    app.session_state["assessments"] = OrderedDict({
+        key: app_module.CachedAttempt(
+            key=key, assessment=sa.analyse("/nonexistent.wav", passage, Mode.PARAGRAPH),
+            reference_text=passage, attempt_id=1, mode=Mode.PARAGRAPH,
+        )
+    })
+    app.session_state["last_key"] = key
+    app.session_state[app_module.RESULT_OWNER_KEY] = app_module.SHADOW_OWNER
+    app = app.run()
+
+    assert not app.exception
+    coach_buttons = [b for b in app.button if b.label.startswith("✨")]
+    assert len(coach_buttons) == 1, "the result rendered on both tabs at once"
+
+
+def test_leaving_a_shadow_session_takes_its_result_with_it(run_app, shadow_synthesis) -> None:
+    """A shadowed read's report must not reappear under the Practice tab, which did not
+    produce it."""
+    app = prepare_model(open_shadow(run_app()))
+    app.session_state["last_key"] = "some-shadowed-attempt"
+    app.session_state[app_module.RESULT_OWNER_KEY] = app_module.SHADOW_OWNER
+    app = app.run()
+    app = [b for b in app.button if "Back to Today" in b.label][0].click().run()
+
+    assert not app.exception
+    assert app.session_state["last_key"] is None
+    assert app.session_state[app_module.RESULT_OWNER_KEY] is None
