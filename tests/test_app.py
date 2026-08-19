@@ -452,6 +452,59 @@ def test_the_coaching_report_renders_without_a_key(run_app) -> None:
     assert "Practice plan" in body
 
 
+def test_a_monotone_span_produces_a_drill_that_names_it_offline(run_app) -> None:
+    """Issue #9's exit criterion, through the real render path.
+
+    Synthetic: the committed fixture is clean on Break and Intonation, so the Monotone
+    word is appended to it. No key is set — conftest clears GEMINI_API_KEY for every test
+    — so this is the offline coach and nothing else.
+    """
+    assessment = offline_assessment()
+    assessment.words.append({
+        "word": "clouds", "accuracy": 96.0, "error_type": "None",
+        "error_source": "azure", "delivery_error_types": ["Monotone"],
+        "prosody_detail": {"break_length": None, "monotone_confidence": 0.88},
+        "syllables": [], "phonemes": [],
+    })
+
+    app = seed_result(run_app(), assessment)
+
+    assert not app.exception
+    body = " ".join(m.value for m in app.markdown)
+    assert "Delivery" in body
+    assert "Flat intonation" in body, "the fault is named in words, not as 'Monotone'"
+    assert "**Drill** —" in body
+    drill = next(m.value for m in app.markdown if m.value.startswith("**Drill** —"))
+    assert "clouds" in drill, "advice that does not name the span is not actionable"
+
+
+def test_the_delivery_panel_shows_what_azure_measured(run_app) -> None:
+    """Synthetic. The panel and the coaching section read the same helper, so they cannot
+    disagree about the number — which is the reason the panel quotes one at all."""
+    assessment = offline_assessment()
+    assessment.words.append({
+        "word": "clouds", "accuracy": 96.0, "error_type": "None",
+        "error_source": "azure", "delivery_error_types": ["Monotone"],
+        "prosody_detail": {"break_length": None, "monotone_confidence": 0.88},
+        "syllables": [], "phonemes": [],
+    })
+
+    app = seed_result(run_app(), assessment)
+
+    body = " ".join(m.value for m in app.markdown)
+    assert "SyllablePitchDeltaConfidence" in body and "0.88" in body
+
+
+def test_a_clean_attempt_renders_no_delivery_drills(run_app) -> None:
+    """The captured fixture, which really is clean. `render_delivery` further down already
+    says so — saying it twice, three sections apart, is noise."""
+    app = seed_result(run_app(), offline_assessment())
+
+    assert not app.exception
+    assert not any(m.value.startswith("**Drill** —") for m in app.markdown)
+    assert any("No pausing or intonation problems" in s.value for s in app.success)
+
+
 def test_a_visible_note_says_which_coach_wrote_it(run_app) -> None:
     app = seed_result(run_app(), offline_assessment())
     captions = " ".join(c.value for c in app.caption)

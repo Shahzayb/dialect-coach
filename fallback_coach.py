@@ -407,8 +407,11 @@ def _overall_comment(compacted: dict[str, Any], groups: list[dict[str, Any]]) ->
     return " ".join(sentences)
 
 
-def _measurement(fault: dict[str, Any]) -> str:
+def measurement_note(fault: dict[str, Any]) -> str:
     """What Azure measured on this span, in Azure's own vocabulary.
+
+    Used by the coaching section and by the delivery panel further down the page, so the
+    two can never quote different numbers for the same fault.
 
     Deliberately unglossed. `BreakLength` has no unit anywhere in SDK 1.51.1 and every
     value in the committed capture is 0, so "you paused for 480 ms" would be a fabricated
@@ -442,7 +445,7 @@ def delivery_drills(compacted: dict[str, Any]) -> list[DeliveryDrill]:
             DeliveryDrill(
                 fault=fault["fault"],
                 span=span,
-                what_happened=f"{sentence}, on: {named}.{_measurement(fault)}",
+                what_happened=f"{sentence}, on: {named}.{measurement_note(fault)}",
                 drill=template.format(words=named),
             )
         )
