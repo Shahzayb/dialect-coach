@@ -615,6 +615,19 @@ speaking** rather than afterwards, and the first that measures itself.
   `app.synthesise_clip` was extracted from `buy_block_audio` so the perception block and the
   shadow model charge the meter by exactly the same rule; the batch pre-flight stays with each
   caller, which is what stops a guard approving a run whose real charge lands mid-batch.
+- **Two surfaces can start an assessment, so one of them has to own the result.** `last_key` is
+  a single session slot and Streamlit executes *every* tab body on every rerun, so once the
+  shadow surface could also start a job, the Practice tab rendered the same result underneath
+  it — and `render_result` builds its widget keys from the attempt, so the second render raised
+  `StreamlitDuplicateElementKey` rather than merely duplicating the panel. `RESULT_OWNER_KEY`
+  records which surface produced it; each renders only its own, and leaving a shadow session
+  clears the result it owned. **Found on the first real read, not by any test** — no test that
+  drives one surface at a time can reach it.
+- **A shadow row must not make the queue look non-empty.** It is a standing practice rather
+  than something the recordings promoted, so `render_today`'s empty-state check keys on
+  `practice_queue.promotable` — otherwise a database with one attempt and nothing promoted
+  reports "nothing due, they are all on the review schedule" about targets that never existed.
+  Same predicate as the `MAX_ACTIVE_TARGETS` fix, and for the same reason.
 - **Measured live on 2026-08-19.** The model clip is 975 characters and 61.775 s (the committed
   TTS baseline says 61.8 s); the echo track is 14 clips, 959 characters, and 129.15 s. Both are
   bought once per `(passage, rate)` and served from disk after that — a second preparation

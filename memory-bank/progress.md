@@ -398,14 +398,41 @@ attributable:
   offered**, which is the branch that matters: it is the one practice here that needs no history.
 - Total spend for the whole exercise: **1,934 TTS characters** of 500,000, and **no STT at all**.
 
-**What this does not prove, and it is the larger half.** *No real shadowed read has ever been
-recorded.* Everything above is the plumbing, verified against seeded rows whose gap was
-*written* to narrow because that is the shape the design predicts — seeding the failure shape
-would have demoed a broken feature, but it means the demo is an illustration and not evidence.
-Whether a real shadowed read beats a real cold one, and whether the gap really closes, needs
-weeks of real reads on headphones and is answered by nothing in the repository. Same shape as
-the benchmark's 30-day check and the perception trainer's "has been run, not used" — and this
-one additionally needs a human at a microphone, so it could not be closed here at all.
+**The first real shadowed read was done on 2026-08-19, and it found two defects the whole
+offline suite had missed.** Both came from the same root: **two surfaces can now start an
+assessment, and Streamlit executes every tab body on every rerun.**
+
+- **`StreamlitDuplicateElementKey`, on the real read.** `last_key` is a single slot, so the
+  Practice tab rendered the same result underneath the shadow surface — and `render_result`
+  derives its widget keys from the attempt, so the second render *collided with the first* and
+  blew up the page rather than merely looking odd. A `result_owner` slot now says which surface
+  produced the result; each renders only its own. The regression test reproduces the original
+  error with the guard removed, which is the only way to know a regression test works.
+- **A queue holding nothing but a shadowing passage read as a full one.** With one attempt and
+  nothing promoted, the shadow row made `targets` non-empty, so Today answered "what am I doing
+  today?" with *"nothing due, they are all on the review schedule"* and captioned the empty list
+  *"everything promoted so far has graduated"*. Both false. The empty-state check now keys on
+  `practice_queue.promotable`, the same predicate that stops a shadow row eating one of the
+  three slots.
+
+**The lesson worth keeping: a second surface that can start the same job is not a UI change, it
+is a change to who owns the single result slot.** Neither defect is reachable by any test that
+exercises one surface at a time, and both appeared on the first real use.
+
+The read itself: 66.5 s, pronunciation 84.1, accuracy 95.3, fluency 87.2, prosody 69.9, stored
+`offline = 0` and tagged `shadowed`, with the shadow target created and due again three days
+later — so `record_shadow_session` fired exactly once, as designed. Live spend for everything
+above: **66 s of 18,000 STT seconds and 6,283 of 500,000 TTS characters.**
+
+**What this still does not prove.** *There is no cold read of the benchmark passage yet*, so
+the comparison correctly renders its day-one state — "no shadowed read has a cold read of the
+same passage to sit against yet" — and the pre-registered finding above has **no data at all**.
+One shadowed read is not a trend and cannot be: the whole claim is about a gap narrowing over
+weeks. The seeded demo's gap was *written* to narrow because that is the shape the design predicts —
+seeding the failure shape would have demoed a broken feature, but it means the demo is an
+illustration and not evidence. Whether a real shadowed read beats a real cold one, and whether
+the gap really closes, needs weeks of real reads on headphones. Same shape as the benchmark's
+30-day check and the perception trainer's "has been run, not used".
 
 ## Known issues
 
