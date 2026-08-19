@@ -92,6 +92,39 @@ attempt. The database is gitignored; a committed one is a leaked one.
 The monthly usage meter is derived from that table rather than a separate counter file, so
 the two cannot drift apart.
 
+## Seeing progress over time
+
+The **Progress** tab charts pronunciation, accuracy, fluency and prosody across everything
+stored, plus the sounds and words that keep getting flagged.
+
+The headline is a **fixed benchmark passage**. Plotting scores across whatever text you
+happened to pick that day measures the text, not you — an easier paragraph scores higher and
+reads as improvement. So one passage is fixed, read on a schedule, and scored identically
+every time; everything else is drawn behind it as a faint cloud of unconnected points, for
+context only. Pick **"Benchmark — the same words each morning"** from the paragraph presets
+rather than typing it, since a read is identified by matching the text.
+
+That passage is deliberately dense: it carries the commonly substituted consonants and every
+vowel in the en-US inventory, several times each, in stressed and unreduced positions — so
+the same 80-second read also serves as the calibration recording for vowel measurement later.
+
+Two things the chart will not do. It will not join a Drill score to a Paragraph score: those
+are computed differently (a paragraph's overall scores come from a duration-weighted merge
+across utterances) and a line between them would be meaningless. And it will not plot a
+missing prosody score as zero — Azure sometimes returns none, and that is a gap in the line,
+not a collapse.
+
+Offline replays are excluded throughout: the fixture scores the same every time.
+
+To see what a populated view looks like without waiting a month, seed a throwaway database:
+
+```bash
+docker compose run --rm app python scripts/seed_progress_history.py
+```
+
+Then `DB_PATH=data/seed_demo.db make up`. It writes to `data/seed_demo.db`, refuses to touch
+your configured `DB_PATH`, and spends nothing.
+
 ## Testing
 
 ```bash

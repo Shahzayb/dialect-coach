@@ -6,13 +6,18 @@ Building the app one chunk at a time. The diagnosis is legible and audible, the 
 layer turns it into something to practise, the record-and-assess surface now behaves under
 repeated and impatient clicking, the v0.1.0 code-review findings are fixed, the scores
 and error metrics for milestone v0.3.0 (#11, #13, #10, pronunciation half of #12) are built
-and verified live, and the prosody score now comes with a drill attached (#9, v0.4.0).
+and verified live, the prosody score now comes with a drill attached (#9, v0.4.0), and the
+stored history is finally shown back over time on a fixed benchmark passage (v0.5.0).
 **Milestone v0.3.0 is closed** — #10, #11, #13 closed with comments
 pointing at what implemented them; #12 split, its content-score half (vocabulary/grammar/
 topic) retitled and moved to v0.12.0 since scripted assessment never returns it. What
 remains is Mode C (unscripted), which is also what unblocks #12's remaining half.
 
 ## Releases
+
+**v0.5.0 — built 2026-08-19, not yet tagged.** The progress view: the first feature that
+reads the SQLite history back, on a fixed benchmark passage. On the branch and verified;
+the PR, the tag, the GitHub release and closing milestone v0.5.0 are still to do.
 
 **v0.3.0 — 2026-08-19.** Score breakdown, headline mispronunciation/delivery-fault counts,
 and the per-word phoneme hover tooltip, merged via
@@ -35,7 +40,14 @@ below still open, on the user's explicit instruction (fix-after rather than fix-
 
 ## Next concrete step
 
-**Mode C (unscripted speech)** — free speech scored on vocabulary, grammar and
+**Read the benchmark passage.** The progress view ships with its headline series empty —
+that is not a defect, it is the first day. Four or five reads spread over a month are what
+make the chart worth looking at, and the first one also settles whether 196 words really
+lands inside 60-90 seconds at an actual reading pace (the attempt's own `audio_seconds`
+says). Until then the only thing on screen is the free-practice cloud, which is exactly the
+thing that cannot be read as progress.
+
+**Then Mode C (unscripted speech)** — free speech scored on vocabulary, grammar and
 topic, not just a script. Blocked on a real question, not busywork:
 `enable_content_assessment_with_topic` does not exist in SDK 1.51.1 despite the master plan
 citing it (see Dead ends below), so Mode C's content scoring needs another route found and
@@ -44,6 +56,8 @@ verified before it can be planned. `UNSCRIPTED_TWO_PASS` is defined and priced b
 
 ## Active plan
 
+`plans/2026-08-19_progress-view-benchmark.md` — complete; the 30-day check is a
+calendar item, not a merge gate (see below).
 `plans/2026-08-19_prosody-coaching-payload.md` — complete, live recording included.
 `plans/2026-08-19_record-assess-defects.md` — complete.
 `plans/2026-08-18_coaching-layer.md` — complete.
@@ -197,6 +211,41 @@ half) is out of scope — scripted assessment never returns it.
 `make test` is 352 tests, all offline with no keys and no network.
 
 Not built: Mode C (unscripted).
+
+**Progress over time, on a fixed benchmark passage (milestone v0.5.0).** The Progress tab
+charts pronunciation, accuracy, fluency and prosody across every stored attempt, plus the
+substitutions and words that keep getting flagged. The whole design turns on one decision:
+plotting scores across arbitrary self-chosen texts measures **text difficulty, not the
+speaker**, so a fixed passage is the headline series and free practice is a faint cloud of
+unconnected points behind it. The passage was chosen once for two consumers — this chart and
+the vowel-measurement calibration read a later chunk needs — and `techContext.md` holds why
+it covers both, along with the three vowels it honestly cannot guarantee.
+
+Two things worth keeping from building it:
+
+- **The coverage table earns its keep.** `BENCHMARK_COVERAGE` ships the "it covers both
+  instruments" claim as data with a test asserting every token really appears in the
+  passage, and it immediately caught one ("which") that had been edited out during drafting.
+  A prose justification would have drifted silently and nobody would ever have checked.
+- **A synthetic payload has to match the text it claims to be.** The seed script's first
+  version replayed the committed weather fixture against the benchmark reference; the Mode B
+  miscue diff duly marked two hundred words omitted on every benchmark read and "the" and
+  "i" headed the flagged-word ranking. Seeded benchmark rows now carry a payload built from
+  the passage itself, and the ranking shows what it should: /θ/ → /t/, /v/ → /w/, /ð/ → /d/,
+  /l/ → /ɹ/ — the sounds the passage was written to catch.
+
+Verified in the browser against `scripts/seed_progress_history.py`'s 30 days, on both the
+light and the dark theme: the benchmark line rises 72 → 87 across four faceted metrics and
+is plainly distinct from the grey cloud, the two free-practice modes carry different shapes
+and are joined by nothing, a seeded NULL prosody leaves a gap rather than a dip to zero, and
+both rankings label every bar. Zero spend — nothing in the chunk calls Azure or Gemini.
+`make test` is 392 tests (up from 352), all offline.
+
+**What shipping this does not prove, stated plainly: the real 30-day check is a calendar
+item, not a merge gate.** What was verified is a seeded history — the plumbing, the shapes
+and the chart. The benchmark series starts **empty** on the day this ships, and only four or
+five real reads spread over a month make it worth looking at. The first real read is also
+the only way to confirm that 196 words lands inside 60-90 seconds at an actual reading pace.
 
 ## Known issues
 
