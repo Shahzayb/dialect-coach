@@ -40,6 +40,7 @@ import db  # noqa: E402
 import perception_trainer  # noqa: E402
 import practice_queue  # noqa: E402
 import progress_view  # noqa: E402
+import shadowing  # noqa: E402
 import utils  # noqa: E402
 from utils import Mode  # noqa: E402
 
@@ -48,6 +49,17 @@ FIXTURES = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 
 # Read every seventh day, which is the cadence the passage was written for.
 BENCHMARK_EVERY_DAYS = 7
+
+# Shadowed reads sit midway between the cold ones, so every pair is a few days apart rather
+# than a few weeks — `progress_view.shadow_pairs` records that distance on the row, and a pair
+# straddling two months is weak evidence that ought to look weak.
+SHADOW_OFFSET_DAYS = 3
+
+# The gap the seeded history shows, first read to last. It closes rather than holding, because
+# a gap that never narrows is the outcome that means the practice is NOT transferring — see
+# `progress_view`'s section header. Seeding the failure shape would demo a broken feature.
+SHADOW_GAP_START = 9.0
+SHADOW_GAP_END = 2.0
 
 # The free-practice texts. Both are the reference the committed fixtures were captured
 # against, so the payloads parse without inventing miscues.
@@ -287,6 +299,33 @@ def seed(path: str, *, days: int, seed_value: int) -> int:
                 audio_sha256=f"benchmark-{day}", overall_scores=scores,
                 azure_raw=benchmark_payload(rng, {**scores}, skill), created_at=created_at,
             )
+            written += 1
+
+        # A shadowed read of the same passage, midway between the cold ones, with a gap that
+        # NARROWS as the history goes on. That is what the design predicts and what the
+        # comparison surface exists to test — seeded here so the panel can be seen working
+        # before there is any real data, exactly as the listening blocks below are.
+        #
+        # It is seeded to succeed, and that is worth saying out loud: these numbers are an
+        # illustration of the expected shape, not evidence for it. Whether a real shadowed
+        # read beats a real cold one, and whether the gap really closes, is answered by weeks
+        # of real reads and by nothing in this file.
+        if day % BENCHMARK_EVERY_DAYS == SHADOW_OFFSET_DAYS and day + 3 < days:
+            # Tighter spread than the cold read: the gap is the point of this series, and
+            # jitter wider than the gap would bury the trend it exists to show.
+            scores = _scores(rng, skill, spread=1.0)
+            gap = SHADOW_GAP_START + (SHADOW_GAP_END - SHADOW_GAP_START) * skill
+            for metric in ("fluency", "prosody"):
+                if scores[metric] is not None:
+                    scores[metric] = round(min(99.5, scores[metric] + gap), 1)
+            attempt_id = db.record_attempt(
+                conn, mode=Mode.PARAGRAPH, reference_text=progress_view.BENCHMARK_PASSAGE,
+                recognised_text=progress_view.BENCHMARK_PASSAGE, audio_seconds=88.0,
+                audio_sha256=f"shadowed-{day}", overall_scores=scores,
+                azure_raw=benchmark_payload(rng, {**scores}, skill),
+                created_at=when.replace(hour=12).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            )
+            db.tag_attempt(conn, attempt_id, shadowing.SHADOW_TAG)
             written += 1
 
         # Free practice, on most but not all days. Wider spread than the benchmark, because

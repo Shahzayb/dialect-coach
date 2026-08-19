@@ -1418,9 +1418,19 @@ def render_progress(conn: sqlite3.Connection) -> None:
     else:
         when = "today" if since == 0 else f"{since} day{'' if since == 1 else 's'} ago"
         st.caption(
-            f"Benchmark passage last read {when}. The faint points behind it are free "
+            f"Benchmark passage last read cold {when}. The faint points behind it are free "
             f"practice on other texts — shown for context, never comparable to the line or "
             f"to each other, since Drill and Paragraph scores are computed differently."
+        )
+    if any(frame["series"] == progress_view.SHADOWED_SERIES):
+        # An unexplained dashed line reads as a second trajectory, which is the one thing it
+        # must not be taken for.
+        st.caption(
+            "The dashed line is the same passage read **along with the model**. It is not the "
+            "trajectory — it is what the trajectory is measured against, and it is kept off "
+            "the solid line for the same reason an easier text is: a read somebody else "
+            "carried is not evidence about unassisted speech. The two converging is the "
+            "point; see **Shadowed against cold** below."
         )
 
     parsed = parsed_attempts(conn, fingerprint)
