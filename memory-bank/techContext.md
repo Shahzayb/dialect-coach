@@ -128,6 +128,13 @@ the existing coaching payload**, not a second model call.
 - **`report_from_raw` fills the new section in** when re-reading rows written before it
   existed (v0.1.0–v0.3.0). Absent means the coach of the day had no delivery section, not
   that the row is corrupt.
+- **Spans are cut into contiguous `runs`, and the coaching quotes the longest.** This is
+  the one thing the synthetic payload could not have taught: its spans were three words
+  long, where a real Monotone is an unbroken passage. Since a span is in reading order, its
+  head is whichever function words happened to start it — the captured bad reading turned
+  into "Say i, i, need, once, i, get three times" before this existed. Quoting is capped at
+  `MAX_QUOTED_WORDS`, and a run stops at a gap so a quote never joins words the speaker did
+  not say next to each other.
 - **`OFFLINE_FIXTURE`** names which file in `tests/fixtures/` `OFFLINE_MODE` replays,
   resolved inside that directory and refused if it escapes. It exists for one narrow
   reason: both captures are clean on Break and Intonation, so without it the delivery
@@ -135,6 +142,9 @@ the existing coaching payload**, not a second model call.
   `tests/fixtures/synthetic_delivery_faults.json` is the hand-built payload it selects, and
   it says so in a `_synthetic` key inside the file — everything else in that directory is
   verbatim Azure and must stay distinguishable from it.
+  `tests/fixtures/bad_delivery_capture.json` is verbatim: a 38.5 s reading done badly on
+  purpose, which Azure flagged `Monotone` on and nothing else. **No capture has ever
+  produced `UnexpectedBreak` or `MissingBreak`**, so those two remain synthetic-only.
 
 **Deliberately no Gemini budget guard.** `budget.py` is shaped around Azure's paid tiers; a
 free-tier Gemini key returns 429 rather than billing, which `ai_coach` already treats as

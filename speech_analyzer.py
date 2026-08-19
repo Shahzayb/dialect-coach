@@ -802,6 +802,24 @@ def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+def _runs(span: list[str], positions: list[int]) -> list[list[str]]:
+    """Cut a fault's span into stretches of consecutive words, in reading order.
+
+    Two words are in the same stretch when they sat next to each other in the recording.
+    A gap means the fault stopped and started again, which is a different thing to practise
+    — and joining the two would quote a phrase the speaker never said.
+    """
+    runs: list[list[str]] = []
+    previous: int | None = None
+    for word, position in zip(span, positions):
+        if previous is not None and position == previous + 1:
+            runs[-1].append(word)
+        else:
+            runs.append([word])
+        previous = position
+    return runs
+
+
 def delivery_faults(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """One entry per delivery fault present: the span, and what Azure measured on it.
 
@@ -817,12 +835,20 @@ def delivery_faults(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
     reports `SyllablePitchDeltaConfidence` on clean words too, so averaging across the
     whole attempt would hand every reader a monotone number whether or not anything was
     flagged.
+
+    `runs` is the same span cut into **contiguous stretches**, and it is what the coaching
+    actually names. A real Monotone comes back as a long unbroken passage — the captured
+    bad reading flagged 30 words — and the flat word list alone is unusable advice: its
+    first few entries are whichever function words happened to start the span, scattered
+    across sentences. A stretch can be quoted back as the phrase it is.
     """
     summary = delivery_summary(words)
     carriers: dict[str, list[dict[str, Any]]] = {}
-    for word in words:
+    positions: dict[str, list[int]] = {}
+    for index, word in enumerate(words):
         for fault in word.get("delivery_error_types") or []:
             carriers.setdefault(fault, []).append(word)
+            positions.setdefault(fault, []).append(index)
 
     faults: list[dict[str, Any]] = []
     for fault, span in summary.items():
@@ -834,6 +860,7 @@ def delivery_faults(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
         entry: dict[str, Any] = {
             "fault": fault,
             "words": span,
+            "runs": _runs(span, positions.get(fault, [])),
             "break_length_ms_max": None,
             "break_length_ms_mean": None,
             "monotone_confidence_mean": None,

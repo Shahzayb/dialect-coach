@@ -55,16 +55,16 @@ _DELIVERY_SENTENCES: dict[str, str] = {
 # above is what already happened, and describing a problem back at someone is not coaching.
 _DELIVERY_DRILLS: dict[str, str] = {
     "UnexpectedBreak": (
-        "Read the phrase containing {words} straight through once, without stopping "
-        "anywhere inside it. Then read it again and put the only pause at the punctuation. "
-        "Record both and listen for where the break actually landed."
+        "Read {phrase} straight through once, without stopping anywhere inside it. Then "
+        "read it again and put the only pause at the punctuation. Record both and listen "
+        "for where the break actually landed."
     ),
     "MissingBreak": (
-        "Mark the boundary at {words} with a pencil stroke. Read the sentence at half "
-        "speed putting one clear beat there, then at normal speed keeping the same beat."
+        "Mark the boundary inside {phrase} with a pencil stroke. Read it at half speed "
+        "putting one clear beat there, then at normal speed keeping the same beat."
     ),
     "Monotone": (
-        "Say {words} three times: once with the pitch rising on the last stressed "
+        "Say {phrase} three times: once with the pitch rising on the last stressed "
         "syllable, once falling, once the way you would say it to someone in the room. "
         "Record it and listen for whether the shape changed at all between the three."
     ),
@@ -73,9 +73,14 @@ _DELIVERY_DRILLS: dict[str, str] = {
 # For a fault Azure starts reporting that has no template yet. It still gets an entry —
 # a fault named on the page with no drill under it is the exact gap this chunk closes.
 _GENERIC_DELIVERY_DRILL = (
-    "Read the text containing {words} at half speed and then at normal speed, recording "
-    "both, and listen to the two back to back for what changes between them."
+    "Read {phrase} at half speed and then at normal speed, recording both, and listen to "
+    "the two back to back for what changes between them."
 )
+
+# How much of a stretch to quote back. Long enough to be the phrase the speaker actually
+# said, short enough to stay a drill: the captured bad reading flagged one unbroken
+# 18-word passage, and reciting all of it is a reading exercise rather than a pitch one.
+MAX_QUOTED_WORDS = 12
 
 # A syllable below this is worth naming as a stress problem. Same cut as a phoneme: below
 # it, Azure is reporting something the listener can hear.
@@ -428,6 +433,39 @@ def measurement_note(fault: dict[str, Any]) -> str:
     return ""
 
 
+def _phrase(fault: dict[str, Any]) -> str:
+    """The stretch worth quoting back, as the phrase it is.
+
+    The **longest** contiguous run, because that is where there is most to gain, and
+    because it is the only part of the span that can be said aloud as a unit. Naming the
+    first few words of a flat 30-word span instead produces advice like "say i, i, need,
+    once, i, get three times" — which is what the captured bad reading actually did to the
+    first version of this, and the reason `delivery_faults` reports runs at all.
+    """
+    runs = [run for run in (fault.get("runs") or []) if run]
+    if not runs:
+        span = [w for w in fault["words"] if w]
+        return f'"{" ".join(span[:MAX_QUOTED_WORDS])}"' if span else "the flagged span"
+    longest = max(runs, key=len)
+    quoted = " ".join(longest[:MAX_QUOTED_WORDS])
+    if len(longest) > MAX_QUOTED_WORDS:
+        quoted += " …"
+    return f'"{quoted}"'
+
+
+def _stretches(fault: dict[str, Any]) -> str:
+    """How many separate stretches, when it was not just the one."""
+    runs = [run for run in (fault.get("runs") or []) if run]
+    if len(runs) <= 1:
+        return ""
+    return (
+        f" It went flat again elsewhere — {len(runs)} separate stretches in all; this is "
+        f"the longest."
+        if fault["fault"] == "Monotone"
+        else f" It happened in {len(runs)} separate places; this is the longest."
+    )
+
+
 def delivery_drills(compacted: dict[str, Any]) -> list[DeliveryDrill]:
     """A drill for every delivery fault in the payload. Never fewer, never invented ones.
 
@@ -438,15 +476,18 @@ def delivery_drills(compacted: dict[str, Any]) -> list[DeliveryDrill]:
     drills: list[DeliveryDrill] = []
     for fault in compacted.get("delivery_faults") or []:
         span = [w for w in fault["words"] if w]
-        named = ", ".join(span[:6]) or "the flagged span"
+        phrase = _phrase(fault)
         sentence = _DELIVERY_SENTENCES.get(fault["fault"], f"Azure flagged {fault['fault']}")
         template = _DELIVERY_DRILLS.get(fault["fault"], _GENERIC_DELIVERY_DRILL)
         drills.append(
             DeliveryDrill(
                 fault=fault["fault"],
                 span=span,
-                what_happened=f"{sentence}, on: {named}.{measurement_note(fault)}",
-                drill=template.format(words=named),
+                what_happened=(
+                    f"{sentence}, across {phrase}.{_stretches(fault)}"
+                    f"{measurement_note(fault)}"
+                ),
+                drill=template.format(phrase=phrase),
             )
         )
     return drills

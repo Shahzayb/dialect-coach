@@ -78,7 +78,7 @@ def test_the_delivery_faults_travel_as_their_own_section() -> None:
              word("clouds", 95.0)]
     section = fc.compact(assessment(words), Mode.PARAGRAPH)["delivery_faults"]
     assert section == [{
-        "fault": "Monotone", "words": ["thursday"],
+        "fault": "Monotone", "words": ["thursday"], "runs": [["thursday"]],
         "break_length_ms_max": None, "break_length_ms_mean": None,
         "monotone_confidence_mean": 0.82,
     }]
@@ -263,6 +263,49 @@ def test_a_drill_is_something_to_do_rather_than_the_problem_restated() -> None:
     assert any(verb in drill.drill.lower() for verb in ("say", "read", "record", "mark"))
 
 
+def test_a_long_span_is_quoted_as_the_phrase_that_was_said() -> None:
+    """From the captured bad reading: a real Monotone ran 30 words across two stretches.
+
+    Naming the first few produced "Say i, i, need, once, i, get three times" — the span is
+    in reading order, so its head is whichever function words happened to start it. The
+    drill has to quote a stretch the speaker actually said, which means the longest
+    contiguous run.
+    """
+    span = "once i get back to my desk i will call the team to check on the".split()
+    words = [word("i", 90.0, delivery=["Monotone"]), word("gap", 95.0)]
+    words += [word(w, 90.0, delivery=["Monotone"]) for w in span]
+
+    drill = fc.build(assessment(words), Mode.PARAGRAPH).delivery_drills[0]
+
+    assert "once i get back to my desk" in drill.drill
+    assert not drill.drill.startswith("Say i,"), "the head of the span is not the phrase"
+    assert "2 separate stretches" in drill.what_happened
+    assert len(drill.span) == len(span) + 1, "the full span is still carried as data"
+
+
+def test_a_quoted_stretch_is_cut_off_before_it_becomes_a_reading_exercise() -> None:
+    """Synthetic. A 27-word run recited three times is not a pitch drill."""
+    words = [word(f"w{i}", 90.0, delivery=["Monotone"]) for i in range(30)]
+    drill = fc.build(assessment(words), Mode.PARAGRAPH).delivery_drills[0]
+
+    quoted = drill.drill.split('"')[1]
+    assert len(quoted.split()) <= fc.MAX_QUOTED_WORDS + 1  # + the ellipsis
+    assert "…" in quoted
+
+
+def test_two_stretches_either_side_of_a_clean_word_are_not_joined() -> None:
+    """Synthetic. Quoting across the gap would put words in the learner's mouth that they
+    never said next to each other."""
+    words = [word("stayed", 90.0, delivery=["Monotone"]),
+             word("warm", 95.0),
+             word("and", 90.0, delivery=["Monotone"]),
+             word("clear", 90.0, delivery=["Monotone"])]
+    fault = fc.compact(assessment(words), Mode.PARAGRAPH)["delivery_faults"][0]
+
+    assert fault["runs"] == [["stayed"], ["and", "clear"]]
+    assert '"and clear"' in fc.build(assessment(words), Mode.PARAGRAPH).delivery_drills[0].drill
+
+
 def test_a_fault_with_no_template_still_gets_an_entry() -> None:
     """Synthetic. If Azure starts reporting a fourth fault, it must not land drill-less."""
     words = [word("clouds", 90.0, delivery=["SomethingNew"])]
@@ -291,7 +334,9 @@ def test_every_delivery_fault_azure_reports_has_a_sentence_and_a_drill() -> None
     for fault in ("UnexpectedBreak", "MissingBreak", "Monotone"):
         assert fault in fc._DELIVERY_SENTENCES
         assert fault in fc._DELIVERY_DRILLS
-        assert "{words}" in fc._DELIVERY_DRILLS[fault], "a drill must name the actual span"
+        assert "{phrase}" in fc._DELIVERY_DRILLS[fault], (
+            "a drill must quote back the stretch that was actually said"
+        )
 
 
 def test_a_weak_stressed_syllable_is_called_out(drill: sa.Assessment) -> None:

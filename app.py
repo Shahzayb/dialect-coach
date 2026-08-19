@@ -992,6 +992,19 @@ def render_fix(fix: Any, rank: int) -> None:
             st.markdown(f"**Drill these pairs** — {pairs}")
 
 
+# How many span words to list before saying how many more there are. A real Monotone runs
+# long — the captured bad reading flagged 30 words — and a 30-word comma list is a wall
+# that buries the sentence and the drill underneath it. The stretch worth practising is
+# quoted in the drill itself, so this line only has to say roughly where and how much.
+MAX_SPAN_WORDS_SHOWN = 12
+
+
+def _span_caption(span: list[str]) -> str:
+    shown = ", ".join(span[:MAX_SPAN_WORDS_SHOWN])
+    remaining = len(span) - MAX_SPAN_WORDS_SHOWN
+    return f"{shown} … and {remaining} more" if remaining > 0 else shown
+
+
 def render_delivery_drills(report: Any) -> None:
     """The delivery faults, each with something to perform about it.
 
@@ -1010,7 +1023,7 @@ def render_delivery_drills(report: Any) -> None:
         with st.container(border=True):
             st.markdown(f"**{DELIVERY_LABELS.get(drill.fault, drill.fault)}**")
             if drill.span:
-                st.caption("In this attempt: " + ", ".join(drill.span))
+                st.caption("In this attempt: " + _span_caption(drill.span))
             if drill.what_happened:
                 st.markdown(drill.what_happened)
             if drill.drill:
