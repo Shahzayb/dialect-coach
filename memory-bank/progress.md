@@ -3,10 +3,16 @@
 ## Current focus
 
 Building the app one chunk at a time. The diagnosis is legible and audible, the coaching
-layer turns it into something to practise, and the record-and-assess surface now behaves
-under repeated and impatient clicking. What remains is Mode C (unscripted).
+layer turns it into something to practise, the record-and-assess surface now behaves under
+repeated and impatient clicking, and the v0.1.0 code-review findings are fixed. What remains
+is Mode C (unscripted).
 
 ## Releases
+
+**v0.2.0 — 2026-08-19.** Stop, reset and delete controls on the record-and-assess surface,
+merged via [PR #20](https://github.com/Shahzayb/pronunciation-analyzer/pull/20), tagged, and
+released (`gh release create v0.2.0`). Closes #4, #5, #6, #7, #8. Milestone v0.2.0 closed.
+Also fixed the 8 code-review findings left open at v0.1.0 (see below — no longer "open").
 
 **v0.1.0 — 2026-08-18.** The coaching layer, merged via
 [PR #19](https://github.com/Shahzayb/pronunciation-analyzer/pull/19), tagged, and released
