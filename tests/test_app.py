@@ -148,11 +148,12 @@ def test_a_result_renders_the_score_breakdown(run_app) -> None:
     app = seed_result(run_app(), offline_assessment())
     assert not app.exception
 
-    # Only Completeness stays a plain st.metric — Pronunciation is now a banded headline
-    # number and Accuracy/Fluency/Prosody are the "Score breakdown" bars, neither of which
-    # is an st.metric widget.
+    # Of the scores, only Completeness stays a plain st.metric — Pronunciation is now a
+    # banded headline number and Accuracy/Fluency/Prosody are the "Score breakdown" bars,
+    # neither of which is an st.metric widget. nPVI joins it from the Rhythm section: the
+    # drill fixture is two full sentences, so it clears `rhythm.MIN_PAIRS`.
     labels = [m.label for m in app.metric]
-    assert labels == ["Completeness"]
+    assert labels == ["Completeness", "nPVI"]
     assert app.metric[0].value == "85", "the fixture has completeness populated"
 
     rendered = " ".join(m.value for m in app.markdown)
@@ -977,3 +978,64 @@ def test_the_history_table_still_renders_under_the_charts(run_app) -> None:
     app.run()
     assert not app.exception
     assert any("History" in expander.label for expander in app.expander)
+
+
+# --- Rhythm ---------------------------------------------------------------------------------
+# The nPVI figure must never appear without saying what it can be compared to. These pin that,
+# because the number on its own invites exactly the comparison it cannot support.
+
+
+def test_the_rhythm_section_reports_the_fixtures_npvi(run_app) -> None:
+    app = seed_result(run_app(), offline_assessment())
+    assert not app.exception
+    npvi = [m for m in app.metric if m.label == "nPVI"]
+    assert len(npvi) == 1
+    assert npvi[0].value == "55.9"
+
+
+def test_rhythm_without_a_baseline_says_the_number_has_no_comparison(
+    run_app, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The published-band trap, named out loud rather than left to be assumed."""
+    import rhythm
+
+    monkeypatch.setattr(rhythm, "baseline", lambda *a, **k: None)
+    app = seed_result(run_app(), offline_assessment())
+    said = " ".join(c.value for c in app.caption)
+    assert "nothing to compare against yet" in said
+    assert "Published General American" in said
+    assert "capture_baseline.py" in said
+
+
+def test_rhythm_against_a_baseline_names_the_voice_and_the_direction(
+    run_app, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A synthesiser, not a native speaker — and which way a lower score points."""
+    import rhythm
+
+    monkeypatch.setattr(rhythm, "baseline", lambda *a, **k: rhythm.Baseline(
+        rhythm=rhythm.Rhythm(npvi=58.4, pairs=180, intervals=206, runs=26),
+        voice="en-US-BrianNeural", captured_at="2026-08-19T00:00:00Z",
+    ))
+    app = seed_result(run_app(), offline_assessment())
+    said = " ".join(c.value for c in app.caption)
+    assert "en-US-BrianNeural" in said
+    assert "not a native speaker" in said
+    assert "syllable-timed" in said
+
+    npvi = [m for m in app.metric if m.label == "nPVI"][0]
+    assert npvi.delta is not None and "vs baseline" in npvi.delta
+
+
+def test_too_little_speech_shows_no_rhythm_number(run_app, monkeypatch) -> None:
+    """A handful of vowels must produce a sentence, not a figure."""
+    import rhythm
+
+    assessment = offline_assessment()
+    monkeypatch.setattr(
+        rhythm, "npvi",
+        lambda *a, **k: rhythm.Rhythm(npvi=None, pairs=3, intervals=4, runs=1),
+    )
+    app = seed_result(run_app(), assessment)
+    assert not [m for m in app.metric if m.label == "nPVI"]
+    assert any("Not enough connected speech" in c.value for c in app.caption)

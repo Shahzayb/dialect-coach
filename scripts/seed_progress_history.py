@@ -15,6 +15,12 @@ Benchmark rows carry a payload built here from the benchmark passage itself — 
 fixture whose words are a different text would mark two hundred words as omitted on every
 benchmark read and bury the rankings under that noise.
 
+Phoneme timings for the benchmark rows are borrowed from the committed TTS baseline, whose
+196 words are the same passage in the same order. Invented durations would produce an
+invented nPVI, and the rhythm chart would then be drawing a random walk. Without that
+fixture the benchmark rows carry no timing and the rhythm chart is simply empty, which is
+the honest rendering of "not captured here".
+
 It writes to `data/seed_demo.db` by default and refuses to touch the configured `DB_PATH`:
 these rows never happened, and the usage meter derives from the same table.
 """
@@ -67,14 +73,19 @@ _TICKS_PER_SECOND = 10_000_000
 
 
 def _word_payload(word: str, offset: int, duration: int, accuracy: float,
-                  substitution: tuple[str, str] | None) -> dict:
+                  substitution: tuple[str, str] | None,
+                  timed: list[dict] | None = None) -> dict:
     """One word in Azure's own shape, down to the phoneme.
 
     Only the fields this project's parser reads are filled in. Note `ErrorType` and
     `Feedback` sit *inside* `PronunciationAssessment` — the flat placement in Azure's REST
     documentation is the trap this codebase already learned about the hard way.
     """
-    phonemes = []
+    # The borrowed, timed phonemes come first so the rhythm measurement sees a real word.
+    # The substitution entry is appended untimed: it exists to drive the flagged-phoneme
+    # ranking, and `rhythm` skips any phoneme without an offset, so it cannot distort the
+    # durations it sits beside.
+    phonemes = list(timed or [])
     if substitution:
         expected, produced = substitution
         phonemes.append({
@@ -103,6 +114,67 @@ def _word_payload(word: str, offset: int, duration: int, accuracy: float,
     }
 
 
+BASELINE_FIXTURE = FIXTURES / "benchmark_tts_baseline.json"
+
+# One 10 ms frame, the seam every real Azure payload carries between consecutive segments.
+_FRAME = 100_000
+
+
+def _baseline_phonemes() -> list[list[dict]] | None:
+    """Per-word phoneme symbols and durations from the committed TTS baseline.
+
+    Position-matched: the baseline is the same 196 words in the same order (asserted in
+    tests/test_progress_view.py), so word *i* here is word *i* there. Returns None when the
+    baseline has not been captured, which is a normal state — the seeded rows then carry no
+    phoneme timing and the rhythm chart renders its empty message.
+    """
+    if not BASELINE_FIXTURE.exists():
+        return None
+    try:
+        captured = json.loads(BASELINE_FIXTURE.read_text(encoding="utf-8"))
+        return [
+            [{"Phoneme": p["Phoneme"], "Duration": p["Duration"]}
+             for p in (word.get("Phonemes") or [])]
+            for payload in captured["payloads"]
+            for word in payload["NBest"][0].get("Words") or []
+        ]
+    except Exception:  # noqa: BLE001 — a demo seeder degrades, it does not crash
+        return None
+
+
+def _timed_phonemes(borrowed: list[dict], offset: int, flatten: float,
+                    rng: random.Random) -> tuple[list[dict], int]:
+    """Lay borrowed phonemes out from `offset`, pulled toward equal length by `flatten`.
+
+    `flatten` at 1.0 makes every phoneme in the word the same length — a perfectly
+    syllable-timed reading, nPVI near its floor. At 0.0 the baseline's own durations are kept.
+    This is what gives the seeded rhythm chart a trend rather than noise: the early reads are
+    flatter and the later ones closer to the reference.
+
+    Segments are laid out with the one-frame seam, so the payload has the same arithmetic the
+    parser and `rhythm.vocalic_intervals` were built against.
+    """
+    if not borrowed:
+        return [], offset
+    mean = sum(p["Duration"] for p in borrowed) / len(borrowed)
+    laid_out: list[dict] = []
+    cursor = offset
+    for phoneme in borrowed:
+        pulled = phoneme["Duration"] * (1.0 - flatten) + mean * flatten
+        jittered = pulled * rng.uniform(0.92, 1.08)
+        # Back onto the 10 ms grid, and never zero — a zero-length segment is not a thing
+        # Azure emits, and `rhythm.npvi` would drop it rather than measure it.
+        duration = max(_FRAME, int(round(jittered / _FRAME)) * _FRAME)
+        laid_out.append({
+            "Phoneme": phoneme["Phoneme"],
+            "Offset": cursor,
+            "Duration": duration,
+            "PronunciationAssessment": {"AccuracyScore": 100.0},
+        })
+        cursor += duration + _FRAME
+    return laid_out, cursor - _FRAME
+
+
 def benchmark_payload(rng: random.Random, scores: dict[str, float], skill: float) -> dict:
     """An Azure payload for one reading of the benchmark passage.
 
@@ -110,9 +182,20 @@ def benchmark_payload(rng: random.Random, scores: dict[str, float], skill: float
     rises, so the seeded flagged-word ranking thins over the month the way a real one would.
     """
     words = utils.normalise_words(progress_view.BENCHMARK_PASSAGE)
+    borrowed = _baseline_phonemes()
+    if borrowed is not None and len(borrowed) != len(words):
+        # Position matching is the whole mechanism. A baseline captured against an edited
+        # passage would hand word 40's vowels to word 39, so refuse rather than mislead.
+        borrowed = None
+
+    # Early reads are flatter — vowels closer to equal in length, which is what a
+    # syllable-timed rhythm carried into English measures as. The seeded speaker's rhythm
+    # improves toward the reference over the month, like every other seeded metric.
+    flatten = 0.45 * (1.0 - skill)
+
     payload_words = []
     offset = 0
-    for word in words:
+    for index, word in enumerate(words):
         substitution = _TROUBLE.get(word)
         if substitution:
             accuracy = min(99.0, 52.0 + 34.0 * skill + rng.uniform(-6.0, 6.0))
@@ -124,9 +207,15 @@ def benchmark_payload(rng: random.Random, scores: dict[str, float], skill: float
             # the seeded picture would say nothing about the sounds being measured.
             accuracy = (rng.uniform(84.0, 94.0) if rng.random() < 0.08
                         else rng.uniform(96.0, 100.0))
-        duration = int(_TICKS_PER_SECOND * rng.uniform(0.22, 0.42))
+        if borrowed is None:
+            timed, duration = None, int(_TICKS_PER_SECOND * rng.uniform(0.22, 0.42))
+        else:
+            # The word's own extent comes from its phonemes rather than a random draw, so the
+            # payload is internally consistent the way a real one is.
+            timed, end = _timed_phonemes(borrowed[index], offset, flatten, rng)
+            duration = (end - offset) if timed else int(_TICKS_PER_SECOND * 0.3)
         payload_words.append(_word_payload(word, offset, duration, round(accuracy, 1),
-                                           substitution))
+                                           substitution, timed))
         offset += duration + int(_TICKS_PER_SECOND * 0.04)
 
     return {

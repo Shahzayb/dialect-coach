@@ -21,3 +21,8 @@ __pycache__/
 *.db-wal
 *.db-shm
 *.sqlite3
+
+# Recordings. The rhythm baseline's WAV lives here so the passage can be re-assessed
+# without paying for synthesis again; the assessment JSON it produces IS committed, under
+# tests/fixtures/. Audio never is.
+audio/

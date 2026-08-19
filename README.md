@@ -116,6 +116,34 @@ not a collapse.
 
 Offline replays are excluded throughout: the fixture scores the same every time.
 
+### Rhythm
+
+Below the trajectory is **nPVI** — how much each vowel differs in length from the vowel after
+it. Stress-timed English varies a lot: a stressed vowel is held and the unstressed ones around
+it are crushed to schwa. Syllable-timed languages give each syllable closer to equal time, and
+carrying that into English is one of the most recognisable prosodic markers of a second-language
+accent — audible long before any individual sound is.
+
+The number is compared against **the same passage read by Azure TTS through this same
+pipeline**, not against a published General American band. That is deliberate. Published bands
+come from hand-segmented corpora reading other material, and nPVI moves with both the
+segmentation method and the text — on one unchanged recording here, four defensible ways of
+cutting the segments give 50.3, 54.8, 55.9 and 56.3. Comparing to a published band compares
+three things at once; comparing to a synthesised read of the same words through the same code
+changes one. The baseline is a fixed reference point, not a native speaker.
+
+Capture it once (about 975 TTS characters and a minute of speech-to-text, both far inside the
+free tiers):
+
+```bash
+docker compose run --rm app python scripts/capture_baseline.py
+```
+
+The assessment JSON it writes is committed; the WAV lands in the gitignored `audio/` so the
+passage can be re-assessed later without paying for synthesis again. Rhythm is measured on
+benchmark reads only, and only where there is enough connected speech — a short drill produces
+a sentence saying so rather than a number.
+
 To see what a populated view looks like without waiting a month, seed a throwaway database:
 
 ```bash

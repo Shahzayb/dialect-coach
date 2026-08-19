@@ -26,7 +26,7 @@ optional hint; it never overrides the recordings.
 - Let me hear the correct pronunciation next to my own recording
 - Train, not only diagnose — practice that carries over between sessions
 - Keep history in a local SQLite file, and show it back over time
-- Free tiers only, $0 budget, no accounts, no stored audio
+- Free tiers only, $0 budget, no accounts, audio kept on disk but never committed
 
 ## Goals
 
@@ -44,4 +44,6 @@ a binary verdict can't show that a month of practice moved anything.
 - No L1 hardcoded into the analysis
 - No gamification, no accounts
 - Nothing leaves this machine — no cloud storage, no sync, no hosted database
+- No audio leaves this machine. Recordings may be kept locally, with the path and
+  hash in the database; they are never committed and never uploaded.
 - Never spend money

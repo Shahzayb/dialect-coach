@@ -41,6 +41,14 @@ NBEST_PHONEME_COUNT = 5
 # Break.BreakLength with them. See `_prosody_detail` for how the last of those was pinned
 # down, since the SDK never names its unit.
 TICKS_PER_MS = 10_000
+TICKS_PER_SECOND = 10_000_000
+
+# Everything Azure times in this payload lands on a 10 ms grid: every Offset and every
+# Duration, at word, syllable and phoneme level, is a whole multiple of this. Verified across
+# all four committed fixtures with no exceptions, and asserted in tests/test_parsing.py
+# rather than trusted — `rhythm.vocalic_intervals` decides what counts as contiguous by
+# comparing gaps against exactly one frame.
+FRAME_TICKS = 100_000
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "tests" / "fixtures"
 FIXTURES: dict[Mode, str] = {
@@ -487,6 +495,62 @@ def _prosody_detail(word: dict[str, Any]) -> dict[str, float | None]:
     }
 
 
+def _timing(node: dict[str, Any]) -> dict[str, Any]:
+    """Where a word, syllable or phoneme sits in time. Azure sends this at all three levels.
+
+    `Offset` and `Duration` are in 100-ns ticks and are carried through unconverted, because
+    they are exact integers and every derived figure below is not. `start_s`/`end_s` are the
+    convenience floats: no consumer should have to remember the divisor.
+
+    Two things about these numbers that are not obvious and cost real work to establish:
+
+    **The offsets are ticks from the start of the AUDIO STREAM, not from the start of the
+    file.** In the committed drill fixture the whole response carries `Offset: 16900000` and
+    the first word begins at exactly that tick — 1.69 s in, with 1.69 s of something before
+    it. Nothing here depends on that, since nothing in this project slices audio yet. The
+    chunk that does must read the payload's own top-level `Offset` first rather than treating
+    a word offset as a file position.
+
+    **There is a systematic 10 ms seam between consecutive segments.** Within a word the first
+    phoneme starts exactly at the word's `Offset` and the last ends exactly at
+    `Offset + Duration` (20 of 20 words in the drill fixture), yet every consecutive phoneme
+    pair is separated by exactly one `FRAME_TICKS` gap (62 of 62; syllables likewise, 9 of 9).
+    So `sum(phoneme durations) + 10 ms x (n-1) == word duration`, and the self-consistent
+    reading is that Azure reports `Duration` as `(frames - 1) * 10 ms` — each segment's true
+    extent being one frame longer than stated.
+
+    `Duration` is nonetheless carried through **raw**. The +1-frame correction is an inference
+    from the arithmetic; the reported value is what Azure states. The choice is not free —
+    applied to `rhythm.npvi` it moves the fixture's score from 55.72 to roughly 50.3, because
+    a 10 ms shortfall costs a 40 ms vowel 25% and a 320 ms vowel 3%, so short intervals shrink
+    further and the variability index rises. That bias is one more reason a published nPVI
+    band is not a comparison this data can support. It cancels entirely against the TTS
+    baseline, which is measured through this identical code.
+    """
+    offset = node.get("Offset")
+    duration = node.get("Duration")
+    offset_ticks = int(offset) if isinstance(offset, (int, float)) else None
+    duration_ticks = int(duration) if isinstance(duration, (int, float)) else None
+    return {
+        "offset_ticks": offset_ticks,
+        "duration_ticks": duration_ticks,
+        "start_s": offset_ticks / TICKS_PER_SECOND if offset_ticks is not None else None,
+        "end_s": (
+            (offset_ticks + duration_ticks) / TICKS_PER_SECOND
+            if offset_ticks is not None and duration_ticks is not None
+            else None
+        ),
+    }
+
+
+# The timing keys as a word that was never spoken carries them. Present and None rather than
+# absent, so a consumer reading `word["start_s"]` needs no guard for one construction path and
+# not the other — the same contract `prosody_detail` already holds in `_omission`.
+NO_TIMING: dict[str, Any] = {
+    "offset_ticks": None, "duration_ticks": None, "start_s": None, "end_s": None,
+}
+
+
 def _normalise_word(word: dict[str, Any]) -> dict[str, Any]:
     accuracy = _score(word, "AccuracyScore")
     phonemes = []
@@ -504,6 +568,8 @@ def _normalise_word(word: dict[str, Any]) -> dict[str, Any]:
                 "is_mispronounced": score is not None and score < utils.PHONEME_RED,
                 # What was ACTUALLY said. Without this the report can only say a score.
                 "nbest": nbest,
+                # Where it sits in time. `rhythm.py` reads exactly this and nothing else.
+                **_timing(phoneme),
             }
         )
 
@@ -515,10 +581,15 @@ def _normalise_word(word: dict[str, Any]) -> dict[str, Any]:
         "delivery_error_types": _delivery_error_types(word),
         "prosody_detail": _prosody_detail(word),
         "syllables": [
-            {"syllable": s.get("Syllable"), "score": _score(s, "AccuracyScore")}
+            {
+                "syllable": s.get("Syllable"),
+                "score": _score(s, "AccuracyScore"),
+                **_timing(s),
+            }
             for s in word.get("Syllables") or []
         ],
         "phonemes": phonemes,
+        **_timing(word),
     }
 
 
@@ -594,6 +665,10 @@ def _omission(word: str) -> dict[str, Any]:
         "prosody_detail": {"break_length_ms": None, "monotone_confidence": None},
         "syllables": [],
         "phonemes": [],
+        # A word that was never spoken has no extent. None, never 0.0 — a zero-length word at
+        # the start of the recording is a very different claim from an absent one, and
+        # `rhythm.vocalic_intervals` walks this list in time order.
+        **NO_TIMING,
     }
 
 
@@ -648,7 +723,47 @@ def _merge_overall(
             [(_score(best, "CompletenessScore"), weight) for best, weight in zip(bests, weights)]
         )
 
+    merged.update(_snr(payloads))
     return merged
+
+
+def _snr(payloads: list[dict[str, Any]]) -> dict[str, float | None]:
+    """Signal-to-noise ratio in dB, from the payload's own top-level `SNR`.
+
+    Not a pronunciation score — a statement about whether the recording was clean enough for
+    the pronunciation scores to mean anything. Later accent work gates measurement quality on
+    it, which is the whole reason it is carried: a rhythm figure from a noisy recording is a
+    measurement of the room.
+
+    Two numbers, because continuous mode returns **one SNR per utterance, not one per
+    recording** — the seven-utterance capture in tests/fixtures/bad_delivery_capture.json
+    carries seven, spanning 20.6 to 23.2 dB:
+
+    - `snr_db` is duration-weighted through `_weighted`, the same helper every other merged
+      score goes through, so a two-second utterance does not outvote a forty-second one.
+    - `snr_db_min` is the worst utterance. Quality gating is governed by the worst segment and
+      not by the average: an otherwise clean read with one utterance recorded into a fan is
+      not a clean read, and averaging hides exactly that.
+
+    None, never 0.0, when Azure sent no SNR at all — 0 dB is signal at the noise floor, which
+    is a real and very bad measurement rather than a missing one.
+    """
+    values = [(p.get("SNR"), float(p.get("Duration") or 0.0)) for p in payloads]
+    usable = [
+        (float(snr), weight) for snr, weight in values if isinstance(snr, (int, float))
+    ]
+    if not usable:
+        return {"snr_db": None, "snr_db_min": None}
+    if len(usable) == 1:
+        # One utterance's SNR is that utterance's SNR. Short-circuited rather than routed
+        # through `_weighted`, which computes `v * w / w` and returns 25.035731999999996 for
+        # an input of 25.035732 — a float artefact that would then be asserted against the
+        # fixture, stored, and charted as though it were a measurement.
+        return {"snr_db": usable[0][0], "snr_db_min": usable[0][0]}
+    return {
+        "snr_db": _weighted(usable),
+        "snr_db_min": min(snr for snr, _ in usable),
+    }
 
 
 def normalise(
@@ -685,6 +800,9 @@ def normalise(
             # None, never 0.0 — a missing prosody score and a prosody score of zero are
             # very different things, and the UI renders the first as "—".
             "prosody": _score(best, "ProsodyScore"),
+            # One payload, so the weighting and the minimum both collapse to its own SNR.
+            # Routed through the same helper anyway, so the two branches cannot drift.
+            **_snr(payloads[:1]),
         }
     else:
         overall = _merge_overall(payloads, reference_text, words)
