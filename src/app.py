@@ -24,9 +24,10 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import streamlit as st
 
@@ -205,7 +206,8 @@ def lru_put(cache: OrderedDict[Any, Any], key: Any, value: Any, limit: int) -> N
 def _session_cache(name: str) -> OrderedDict[Any, Any]:
     if name not in st.session_state:
         st.session_state[name] = OrderedDict()
-    return st.session_state[name]
+    cache: OrderedDict[Any, Any] = st.session_state[name]
+    return cache
 
 
 @dataclass(frozen=True)
@@ -455,7 +457,11 @@ def diff_html(pairs: list[tuple[str, str]]) -> str:
 
 def weakest_phoneme(word: dict[str, Any]) -> str:
     """One-line summary of a word's worst sound, for the card header."""
-    pairs = [p for p in speech_analyzer.phoneme_pairs(word) if p[2] is not None]
+    pairs = [
+        (expected, produced, score)
+        for expected, produced, score in speech_analyzer.phoneme_pairs(word)
+        if score is not None
+    ]
     if not pairs:
         return ""
     expected, produced, score = min(pairs, key=lambda p: p[2])
@@ -618,7 +624,7 @@ def _bump(name: str) -> None:
 
 def _apply_preset(mode: Mode) -> None:
     """Load the chosen preset into the textarea. Runs before the next render."""
-    choice = st.session_state.get(PRESET_KEY)
+    choice = str(st.session_state.get(PRESET_KEY) or "")
     st.session_state[TEXT_KEY] = PRESETS[mode].get(choice, "")
 
 
@@ -894,7 +900,7 @@ def _score_bar_html(label: str, score: float | None) -> str:
     )
 
 
-def render_scores(assessment) -> None:
+def render_scores(assessment: speech_analyzer.Assessment) -> None:
     """Pronunciation headline + Completeness, then the Accuracy/Fluency/Prosody breakdown.
 
     Banding is presentation only: `overall_scores` keeps the raw floats `normalise()`
@@ -938,7 +944,7 @@ def render_scores(assessment) -> None:
     )
 
 
-def render_error_counts(assessment) -> None:
+def render_error_counts(assessment: speech_analyzer.Assessment) -> None:
     """Headline counts for #10/#12: Mispronunciations, Unexpected break, Missing break,
     Monotone. Counts only — which words carry each fault is already shown by the flagged-
     word cards (mispronunciations) and `render_delivery` below (the other three), so this
@@ -998,7 +1004,7 @@ def coaching_for(
         # handled in the same pass that rendered the button, so the button still shows as
         # enabled until the next rerun — and a second click on it would buy a second call.
         # The guard belongs where the spend is, the same rule the TTS cache follows.
-        return cached
+        return cast("tuple[Any, str]", cached)
 
     if ask_model:
         # Marked before the call, not after, and on the attempt rather than the outcome: a
@@ -1156,7 +1162,7 @@ def render_coaching(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
         st.markdown(report.practice_plan)
 
 
-def render_diff(assessment, reference_text: str) -> None:
+def render_diff(assessment: speech_analyzer.Assessment, reference_text: str) -> None:
     """What Azure heard, against what was written. The first thing worth looking at."""
     st.subheader("Script versus what Azure heard")
     if not assessment.recognised_text:
@@ -1177,7 +1183,7 @@ def render_diff(assessment, reference_text: str) -> None:
         st.markdown(f"**Heard**\n\n{assessment.recognised_text}")
 
 
-def render_colour_coded(assessment) -> None:
+def render_colour_coded(assessment: speech_analyzer.Assessment) -> None:
     st.subheader("Word by word")
     st.markdown(colour_coded_html(assessment.words), unsafe_allow_html=True)
     st.caption(
@@ -1257,7 +1263,7 @@ def render_word_card(conn: sqlite3.Connection, word: dict[str, Any], index: int)
         playback_buttons(conn, text, key_prefix=f"word-{index}", label=f"“{text}”")
 
 
-def render_delivery(assessment) -> None:
+def render_delivery(assessment: speech_analyzer.Assessment) -> None:
     """Counts, locations and measurements of UnexpectedBreak / MissingBreak / Monotone.
 
     The evidence for what the Delivery drills in the coaching section above ask for. The
@@ -1278,7 +1284,7 @@ def render_delivery(assessment) -> None:
         )
 
 
-def render_rhythm(assessment, reference_text: str) -> None:
+def render_rhythm(assessment: speech_analyzer.Assessment, reference_text: str) -> None:
     """The nPVI figure for this reading, against the TTS baseline.
 
     A separate section from `render_delivery` rather than a line inside it, because it is a
@@ -1292,7 +1298,7 @@ def render_rhythm(assessment, reference_text: str) -> None:
     st.subheader("Rhythm")
     measured = rhythm.npvi(assessment.words)
 
-    if not measured.measured:
+    if measured.npvi is None:  # i.e. not measured.measured, in a form mypy narrows
         st.caption(
             f"Not enough connected speech to measure rhythm — {measured.pairs} vowel pairs, "
             f"and this needs at least {rhythm.MIN_PAIRS}. nPVI is a statement about how "
@@ -1302,7 +1308,7 @@ def render_rhythm(assessment, reference_text: str) -> None:
         return
 
     baseline = rhythm.baseline()
-    if baseline is None or not baseline.rhythm.measured:
+    if baseline is None or baseline.rhythm.npvi is None:
         st.metric("nPVI", f"{measured.npvi:.1f}")
         st.caption(
             "**This number has nothing to compare against yet.** Published General American "
@@ -1341,7 +1347,7 @@ def render_rhythm(assessment, reference_text: str) -> None:
         )
 
 
-def render_result(conn: sqlite3.Connection, entry: CachedAttempt, source) -> None:
+def render_result(conn: sqlite3.Connection, entry: CachedAttempt, source: Any) -> None:
     assessment, reference_text = entry.assessment, entry.reference_text
     render_scores(assessment)
     render_error_counts(assessment)
@@ -1404,7 +1410,9 @@ def render_result(conn: sqlite3.Connection, entry: CachedAttempt, source) -> Non
 
 
 @st.cache_data(show_spinner=False)
-def parsed_attempts(_conn: sqlite3.Connection, fingerprint: tuple[int, int]):
+def parsed_attempts(
+    _conn: sqlite3.Connection, fingerprint: tuple[int, int]
+) -> list[progress_view.ParsedAttempt]:
     """Re-parse every stored payload, cached against `fingerprint`.
 
     Not optional. Streamlit renders *both* tab bodies on every rerun, including the 0.4 s
@@ -1523,7 +1531,7 @@ def render_perception_history(conn: sqlite3.Connection) -> None:
     )
 
 
-def render_rhythm_history(parsed) -> None:
+def render_rhythm_history(parsed: Sequence[progress_view.ParsedAttempt]) -> None:
     """Benchmark nPVI over time, against the TTS baseline.
 
     Benchmark reads only. nPVI is text-sensitive, so plotting free practice beside it would
@@ -1582,7 +1590,9 @@ BLOCK_KEY = "perception_block"
 
 
 @st.cache_data(show_spinner=False)
-def queue_candidates(_conn: sqlite3.Connection, fingerprint: tuple[int, int]):
+def queue_candidates(
+    _conn: sqlite3.Connection, fingerprint: tuple[int, int]
+) -> list[practice_queue.Candidate]:
     """What the stored attempts say is worth practising, cached on the attempts fingerprint.
 
     Reuses `parsed_attempts`, so the Today tab costs no extra re-parse: the two aggregates it
@@ -1909,7 +1919,7 @@ def render_shadow_offer(
         st.rerun()
 
 
-def render_stress_drill(conn: sqlite3.Connection, target: dict[str, Any]) -> None:
+def render_stress_drill(conn: sqlite3.Connection, target: Mapping[str, Any]) -> None:
     """A stress item's due action: a drill, not a scored block.
 
     This is the honest consequence of a real gap rather than a design preference. Azure
@@ -1938,7 +1948,7 @@ def render_stress_drill(conn: sqlite3.Connection, target: dict[str, Any]) -> Non
         playback_buttons(conn, word, key_prefix=f"stress-{index}", label=f"{word} ({voice})")
 
 
-def start_block(conn: sqlite3.Connection, target: dict[str, Any], *, review: bool) -> None:
+def start_block(conn: sqlite3.Connection, target: Mapping[str, Any], *, review: bool) -> None:
     """Plan a block, buy the audio it needs, and put it on screen.
 
     All of the audio is synthesised **up front**, as one batch, rather than a clip per trial:
@@ -2524,7 +2534,7 @@ def render_shadow_assess(
                 st.session_state["now_playing"] = None
             else:
                 wav_bytes, seconds = prepare_audio(conn, audio_bytes, Mode.PARAGRAPH)
-                if wav_bytes is not None:
+                if wav_bytes is not None and seconds is not None:
                     start_assessment(
                         conn,
                         wav_bytes,
@@ -2683,7 +2693,7 @@ def render_practice(conn: sqlite3.Connection, job: AssessJob | None, running: bo
                 st.session_state["now_playing"] = None
             else:
                 wav_bytes, seconds = prepare_audio(conn, audio_bytes, mode)
-                if wav_bytes is not None:
+                if wav_bytes is not None and seconds is not None:
                     start_assessment(conn, wav_bytes, seconds, reference_text, mode, key)
                     st.rerun()
 

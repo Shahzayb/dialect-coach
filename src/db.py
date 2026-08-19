@@ -19,7 +19,7 @@ import sqlite3
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import utils
 from shadowing import SHADOW_TAG
@@ -327,7 +327,8 @@ def recent_attempts(conn: sqlite3.Connection, limit: int = 10) -> Sequence[sqlit
 
 def get_attempt(conn: sqlite3.Connection, attempt_id: int) -> sqlite3.Row | None:
     """One full attempt row, raw JSON columns included."""
-    return conn.execute("SELECT * FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
+    row = conn.execute("SELECT * FROM attempts WHERE id = ?", (attempt_id,)).fetchone()
+    return cast("sqlite3.Row | None", row)
 
 
 # --- Readers for the progress view ----------------------------------------------------------

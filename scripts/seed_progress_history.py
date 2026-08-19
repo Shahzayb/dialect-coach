@@ -36,6 +36,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from typing import Any
+
 import db
 import perception_trainer
 import practice_queue
@@ -227,7 +229,9 @@ def _timed_phonemes(
     return laid_out, cursor - _FRAME
 
 
-def benchmark_payload(rng: random.Random, scores: dict[str, float], skill: float) -> dict:
+def benchmark_payload(
+    rng: random.Random, scores: dict[str, float | None], skill: float
+) -> dict[str, Any]:
     """An Azure payload for one reading of the benchmark passage.
 
     `skill` runs 0 (first read) to 1 (last): the troublesome words climb out of the red as it
@@ -362,8 +366,9 @@ def seed(path: str, *, days: int, seed_value: int) -> int:
             scores = _scores(rng, skill, spread=1.0)
             gap = SHADOW_GAP_START + (SHADOW_GAP_END - SHADOW_GAP_START) * skill
             for metric in ("fluency", "prosody"):
-                if scores[metric] is not None:
-                    scores[metric] = round(min(99.5, scores[metric] + gap), 1)
+                value = scores[metric]
+                if value is not None:
+                    scores[metric] = round(min(99.5, value + gap), 1)
             attempt_id = db.record_attempt(
                 conn,
                 mode=Mode.PARAGRAPH,

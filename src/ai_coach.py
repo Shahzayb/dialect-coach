@@ -171,14 +171,14 @@ def build_prompt(compacted: dict[str, Any], reference_text: str, recognised_text
 # --- The call ------------------------------------------------------------------------------
 
 
-def _client():
+def _client() -> Any:
     """Build the client. Imported lazily, like the Azure SDK, so tests never need it."""
     from google import genai
 
     return genai.Client(api_key=utils.require("GEMINI_API_KEY"))
 
 
-def _config():
+def _config() -> Any:
     from google.genai import types
 
     return types.GenerateContentConfig(
@@ -261,7 +261,7 @@ def _text_of(response: Any) -> str:
     return text
 
 
-def _call(client, prompt: str):
+def _call(client: Any, prompt: str) -> Any:
     """One request. Raises Transient/Permanent so `retry_transient` can decide."""
     try:
         return client.models.generate_content(model=model_name(), contents=prompt, config=_config())

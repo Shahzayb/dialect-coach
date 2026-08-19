@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import itertools
 import json
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,13 +21,17 @@ from utils import Mode
 
 
 @pytest.fixture
-def drill_payload(fixtures_dir) -> dict:
-    return json.loads((fixtures_dir / "sample_azure_response.json").read_text())
+def drill_payload(fixtures_dir: Path) -> dict[str, Any]:
+    payload: dict[str, Any] = json.loads((fixtures_dir / "sample_azure_response.json").read_text())
+    return payload
 
 
 @pytest.fixture
-def continuous_payloads(fixtures_dir) -> list[dict]:
-    return json.loads((fixtures_dir / "sample_azure_continuous.json").read_text())
+def continuous_payloads(fixtures_dir: Path) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = json.loads(
+        (fixtures_dir / "sample_azure_continuous.json").read_text()
+    )
+    return payloads
 
 
 @pytest.fixture
@@ -623,8 +629,11 @@ def test_a_clean_attempt_reports_no_delivery_faults() -> None:
 
 
 @pytest.fixture
-def bad_delivery_payloads(fixtures_dir) -> list[dict]:
-    return json.loads((fixtures_dir / "bad_delivery_capture.json").read_text())
+def bad_delivery_payloads(fixtures_dir: Path) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = json.loads(
+        (fixtures_dir / "bad_delivery_capture.json").read_text()
+    )
+    return payloads
 
 
 @pytest.fixture

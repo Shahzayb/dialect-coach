@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from datetime import UTC, datetime
 
 import pytest
@@ -16,14 +17,14 @@ WHEN = datetime(2026, 8, 18, tzinfo=UTC)
 
 
 @pytest.fixture
-def conn() -> sqlite3.Connection:
+def conn() -> Iterator[sqlite3.Connection]:
     connection = db.connect(":memory:")
     yield connection
     connection.close()
 
 
 @pytest.fixture(autouse=True)
-def clean_exhausted_flag() -> None:
+def clean_exhausted_flag() -> Iterator[None]:
     budget.reset_exhausted_flag()
     yield
     budget.reset_exhausted_flag()

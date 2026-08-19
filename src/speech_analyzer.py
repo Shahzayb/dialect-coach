@@ -22,7 +22,7 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -118,7 +118,7 @@ class Assessment:
 # --- Configuration -------------------------------------------------------------------------
 
 
-def _speech_config():
+def _speech_config() -> Any:
     import azure.cognitiveservices.speech as speechsdk
 
     config = speechsdk.SpeechConfig(
@@ -147,7 +147,7 @@ def assessment_config_json(reference_text: str, mode: Mode) -> str:
     )
 
 
-def _pron_config(reference_text: str, mode: Mode):
+def _pron_config(reference_text: str, mode: Mode) -> Any:
     import azure.cognitiveservices.speech as speechsdk
 
     return speechsdk.PronunciationAssessmentConfig(
@@ -162,7 +162,7 @@ DEFAULT_BAD_REQUEST_HINT = "Check the reference text and the audio format."
 
 
 def classify_cancellation(
-    details, *, bad_request_hint: str = DEFAULT_BAD_REQUEST_HINT
+    details: Any, *, bad_request_hint: str = DEFAULT_BAD_REQUEST_HINT
 ) -> Exception:
     """Turn an Azure cancellation into a retryable or a terminal error, with a real message.
 
@@ -218,7 +218,7 @@ def is_quota_exhausted(error: BaseException) -> bool:
     return isinstance(error, QuotaExhausted)
 
 
-def _raw_json(result) -> dict[str, Any]:
+def _raw_json(result: Any) -> dict[str, Any]:
     import azure.cognitiveservices.speech as speechsdk
 
     payload = result.properties.get(speechsdk.PropertyId.SpeechServiceResponse_JsonResult)
@@ -226,7 +226,8 @@ def _raw_json(result) -> dict[str, Any]:
         raise AssessmentError(
             "Azure returned a result with no JSON body, so there is nothing to assess."
         )
-    return json.loads(payload)
+    body: dict[str, Any] = json.loads(payload)
+    return body
 
 
 # --- Recognition ------------------------------------------------------------------------------
@@ -281,20 +282,20 @@ def _assess_continuous(
     failure: list[Exception] = []
     done = threading.Event()
 
-    def on_recognized(evt) -> None:
+    def on_recognized(evt: Any) -> None:
         if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
             try:
                 payloads.append(_raw_json(evt.result))
             except Exception as exc:  # noqa: BLE001 — a malformed utterance must not kill the session
                 logger.warning("Skipped an unparseable utterance: %s", utils.redact(str(exc)))
 
-    def on_canceled(evt) -> None:
+    def on_canceled(evt: Any) -> None:
         # EndOfStream is the normal way a file-backed session finishes, not a failure.
         if evt.reason != speechsdk.CancellationReason.EndOfStream:
             failure.append(classify_cancellation(evt))
         done.set()
 
-    def on_stopped(_evt) -> None:
+    def on_stopped(_evt: Any) -> None:
         done.set()
 
     recognizer.recognized.connect(on_recognized)
@@ -678,7 +679,7 @@ def _omission(word: str) -> dict[str, Any]:
     }
 
 
-def _weighted(pairs: list[tuple[float, float]]) -> float | None:
+def _weighted(pairs: Sequence[tuple[float | None, float]]) -> float | None:
     """Duration-weighted mean of (score, weight). Falls back to a plain mean if unweighted."""
     scored = [(value, weight) for value, weight in pairs if value is not None]
     if not scored:
@@ -987,9 +988,9 @@ def delivery_faults(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
         if fault in _BREAK_FAULTS and breaks:
             entry["break_length_ms_max"] = round(max(breaks), 1)
-            entry["break_length_ms_mean"] = round(_mean(breaks), 1)
+            entry["break_length_ms_mean"] = round(sum(breaks) / len(breaks), 1)
         if fault == "Monotone" and pitches:
-            entry["monotone_confidence_mean"] = round(_mean(pitches), 3)
+            entry["monotone_confidence_mean"] = round(sum(pitches) / len(pitches), 3)
         faults.append(entry)
 
     def rank(entry: dict[str, Any]) -> tuple[int, int, str]:

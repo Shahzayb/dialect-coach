@@ -113,7 +113,7 @@ BASELINE_CAPTURE_MARKER = "[tts rhythm baseline capture]"
 
 def is_baseline_capture(reference_text: str | None) -> bool:
     """Whether a stored attempt is the TTS baseline capture rather than a spoken reading."""
-    return bool(reference_text) and reference_text.startswith(BASELINE_CAPTURE_MARKER)
+    return reference_text is not None and reference_text.startswith(BASELINE_CAPTURE_MARKER)
 
 
 @dataclass(frozen=True)

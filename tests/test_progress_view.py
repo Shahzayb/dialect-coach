@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+import pandas as pd
 import pytest
 
 import db
@@ -32,15 +35,15 @@ FIXTURE_REFERENCE = (
 
 
 @pytest.fixture
-def conn() -> sqlite3.Connection:
+def conn() -> Iterator[sqlite3.Connection]:
     connection = db.connect(":memory:")
     yield connection
     connection.close()
 
 
-def add(connection: sqlite3.Connection, **overrides) -> int:
+def add(connection: sqlite3.Connection, **overrides: Any) -> int:
     """One attempt, mirroring `test_db.add` so chronology and scores are controllable."""
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "mode": Mode.DRILL,
         "reference_text": FIXTURE_REFERENCE,
         "recognised_text": FIXTURE_REFERENCE,
@@ -257,8 +260,9 @@ def test_the_series_is_ordered_by_time_not_by_insertion(conn: sqlite3.Connection
 # as a comment, because a later encoding change could reintroduce it silently.
 
 
-def spec_layers(frame) -> list[dict]:
-    return pv.score_chart(frame).to_dict()["spec"]["layer"]
+def spec_layers(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    layers: list[dict[str, Any]] = pv.score_chart(frame).to_dict()["spec"]["layer"]
+    return layers
 
 
 def test_free_practice_is_never_drawn_as_a_line() -> None:

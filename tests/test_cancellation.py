@@ -279,5 +279,6 @@ def test_a_worker_failure_is_returned_not_rendered(tmp_path, monkeypatch) -> Non
         conn, b"RIFFfake", 5.0, REFERENCE, Mode.DRILL, threading.Event()
     )
 
+    assert outcome.error is not None
     icon, message = outcome.error
     assert icon and "no speech" in message.lower()

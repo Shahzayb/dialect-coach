@@ -622,6 +622,7 @@ def test_the_report_is_attached_to_the_attempt_row_it_describes(run_app, tmp_pat
     seed_result(run_app(), offline_assessment(), attempt_id=attempt_id)
 
     row = db.get_attempt(conn, attempt_id)
+    assert row is not None
     assert row["coach_source"] == fallback_coach.SOURCE_FALLBACK
     assert row["gemini_raw_json"], "the report itself is stored on the offline path"
 
@@ -679,7 +680,9 @@ def test_clicking_the_button_swaps_the_models_report_in(run_app, monkeypatch, tm
     assert not app.exception
     assert any("second opinion from the model" in m.value for m in app.markdown)
     assert any(ai_coach.model_name() in c.value for c in app.caption)
-    assert db.get_attempt(conn, attempt_id)["coach_source"] == fallback_coach.SOURCE_GEMINI
+    row = db.get_attempt(conn, attempt_id)
+    assert row is not None
+    assert row["coach_source"] == fallback_coach.SOURCE_GEMINI
 
 
 def test_a_second_click_cannot_spend_another_call(run_app, monkeypatch, tmp_path) -> None:

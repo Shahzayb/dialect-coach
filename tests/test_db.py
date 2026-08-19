@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 
@@ -22,14 +24,14 @@ SCORES = {
 
 
 @pytest.fixture
-def conn() -> sqlite3.Connection:
+def conn() -> Iterator[sqlite3.Connection]:
     connection = db.connect(":memory:")
     yield connection
     connection.close()
 
 
-def add(connection: sqlite3.Connection, **overrides) -> int:
-    kwargs = {
+def add(connection: sqlite3.Connection, **overrides: Any) -> int:
+    kwargs: dict[str, Any] = {
         "mode": Mode.DRILL,
         "reference_text": "the thin man",
         "recognised_text": "the tin man",
@@ -65,12 +67,14 @@ def test_connect_creates_the_parent_directory(tmp_path) -> None:
 def test_azure_response_is_stored_verbatim(conn: sqlite3.Connection) -> None:
     attempt_id = add(conn)
     row = db.get_attempt(conn, attempt_id)
+    assert row is not None
     assert json.loads(row["azure_raw_json"]) == AZURE_PAYLOAD
 
 
 def test_gemini_columns_start_null(conn: sqlite3.Connection) -> None:
     # They exist from schema v1 so the coaching chunk is an UPDATE, not a migration.
     row = db.get_attempt(conn, add(conn))
+    assert row is not None
     assert row["gemini_raw_json"] is None
     assert row["coach_source"] is None
 
@@ -81,6 +85,7 @@ def test_attach_coaching_fills_the_second_response(conn: sqlite3.Connection) -> 
         conn, attempt_id, gemini_raw={"overall_comment": "ok"}, coach_source="gemini"
     )
     row = db.get_attempt(conn, attempt_id)
+    assert row is not None
     assert json.loads(row["gemini_raw_json"]) == {"overall_comment": "ok"}
     assert row["coach_source"] == "gemini"
 
@@ -95,6 +100,7 @@ def test_no_audio_column_exists(conn: sqlite3.Connection) -> None:
 def test_scores_round_trip_and_missing_prosody_stays_null(conn: sqlite3.Connection) -> None:
     scores = dict(SCORES, prosody=None)
     row = db.get_attempt(conn, add(conn, overall_scores=scores))
+    assert row is not None
     assert row["pron_score"] == 82.0
     assert row["prosody"] is None, "absent prosody must not be coerced to 0.0"
 

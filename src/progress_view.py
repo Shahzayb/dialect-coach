@@ -208,7 +208,7 @@ def is_benchmark(text: str | None) -> bool:
     return bool(text) and benchmark_key(text) == _BENCHMARK_KEY
 
 
-def spoken_attempts(rows: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+def spoken_attempts(rows: Iterable[utils.RowLike]) -> list[utils.RowLike]:
     """Every stored attempt that is somebody actually speaking.
 
     Filters out the TTS rhythm baseline capture. That row is a real, really-billed assessment
@@ -223,7 +223,7 @@ def spoken_attempts(rows: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]
     return [row for row in rows if not rhythm.is_baseline_capture(row["reference_text"])]
 
 
-def is_shadowed(row: Mapping[str, Any]) -> bool:
+def is_shadowed(row: utils.RowLike) -> bool:
     """Whether this attempt was read along with a synthesised model rather than cold.
 
     Tolerant of a row that has no such key, in the same spirit as
@@ -238,7 +238,7 @@ def is_shadowed(row: Mapping[str, Any]) -> bool:
         return False
 
 
-def cold_attempts(rows: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+def cold_attempts(rows: Iterable[utils.RowLike]) -> list[utils.RowLike]:
     """Every attempt that is somebody reading the text cold — no model in their ear.
 
     **The correctness crux of the shadowing chunk.** `is_benchmark` identifies a benchmark
@@ -333,7 +333,7 @@ def _label(reference_text: str | None, benchmark: bool) -> str:
     return text if len(text) <= _LABEL_CHARS else text[: _LABEL_CHARS - 1] + "…"
 
 
-def score_frame(rows: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
+def score_frame(rows: Iterable[utils.RowLike]) -> pd.DataFrame:
     """Long-form scores over time: one row per (attempt × metric).
 
     A NULL score produces **no row at all** — never a zero. `prosody` is NULL, not 0.0, when
@@ -505,7 +505,7 @@ def rhythm_frame(parsed: Sequence[ParsedAttempt]) -> pd.DataFrame:
         if when is None:
             continue
         measured = rhythm.npvi(attempt.words)
-        if not measured.measured:
+        if measured.npvi is None:  # i.e. not measured.measured, in a form mypy narrows
             continue
         records.append(
             {
@@ -568,7 +568,7 @@ def rhythm_chart(frame: pd.DataFrame, baseline: float | None = None) -> alt.Char
 
 
 def days_since_benchmark(
-    rows: Iterable[Mapping[str, Any]], *, now: datetime | None = None
+    rows: Iterable[utils.RowLike], *, now: datetime | None = None
 ) -> int | None:
     """Whole days since the benchmark passage was last read **cold**, or None if it never has.
 
@@ -631,8 +631,8 @@ SHADOW_COLUMNS: tuple[str, ...] = (
 
 
 def _pair_partner(
-    shadowed_when: datetime, cold: Sequence[tuple[datetime, Mapping[str, Any]]]
-) -> tuple[datetime, Mapping[str, Any]] | None:
+    shadowed_when: datetime, cold: Sequence[tuple[datetime, utils.RowLike]]
+) -> tuple[datetime, utils.RowLike] | None:
     """The cold read nearest in time to a shadowed one. Ties go to the earlier read.
 
     Nearest either side, not the most recent one before it. Requiring precedence would throw
@@ -647,7 +647,7 @@ def _pair_partner(
     return min(cold, key=lambda item: (abs(item[0] - shadowed_when), item[0]))
 
 
-def shadow_pairs(rows: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
+def shadow_pairs(rows: Iterable[utils.RowLike]) -> pd.DataFrame:
     """Each shadowed read set against the nearest cold read of the same passage.
 
     Long form, one row per (pair x metric), the same shape `score_frame` uses. A metric
@@ -655,8 +655,8 @@ def shadow_pairs(rows: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
     computed against a blank.
     """
     everything = spoken_attempts(rows)
-    by_passage: dict[str, list[tuple[datetime, Mapping[str, Any]]]] = {}
-    shadowed: list[tuple[datetime, Mapping[str, Any]]] = []
+    by_passage: dict[str, list[tuple[datetime, utils.RowLike]]] = {}
+    shadowed: list[tuple[datetime, utils.RowLike]] = []
 
     for row in everything:
         when = _parse_when(row["created_at"])
@@ -703,7 +703,7 @@ def shadow_pairs(rows: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame.from_records(records)[list(SHADOW_COLUMNS)]
 
 
-def unpaired_passages(rows: Iterable[Mapping[str, Any]]) -> list[str]:
+def unpaired_passages(rows: Iterable[utils.RowLike]) -> list[str]:
     """Passages shadowed but never read cold, so their comparison has nothing to stand on."""
     everything = spoken_attempts(rows)
     cold_keys = {
@@ -828,7 +828,7 @@ class ParsedAttempt:
     shadowed: bool = False
 
 
-def parse_attempts(rows: Iterable[Mapping[str, Any]]) -> list[ParsedAttempt]:
+def parse_attempts(rows: Iterable[utils.RowLike]) -> list[ParsedAttempt]:
     """Re-parse stored payloads through the same normaliser the live path uses.
 
     Two shapes arrive: a drill stores a JSON **object** and a paragraph a JSON **array** of
@@ -893,7 +893,7 @@ def _tally(per_attempt: Sequence[tuple[bool, Sequence[str]]]) -> list[dict[str, 
             attempts[name] = attempts.get(name, 0) + 1
             if benchmark:
                 benchmark_attempts[name] = benchmark_attempts.get(name, 0) + 1
-    rows = [
+    rows: list[dict[str, Any]] = [
         {
             "attempts": count,
             "benchmark_attempts": benchmark_attempts.get(name, 0),

@@ -8,6 +8,7 @@ sometimes improves on the offline one, and the app cannot depend on it.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import pytest
 
@@ -81,7 +82,7 @@ def answer(**overrides) -> str:
 class FakeResponse:
     def __init__(self, text: str) -> None:
         self.text = text
-        self.candidates = []
+        self.candidates: list[Any] = []
         self.prompt_feedback = None
 
     def model_dump(self, **kwargs):

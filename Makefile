@@ -1,4 +1,4 @@
-.PHONY: setup up down test lint format
+.PHONY: setup up down test lint format typecheck check
 
 setup:
 	python3 scripts/setup.py
@@ -24,3 +24,9 @@ lint:
 format:
 	docker compose run --rm app ruff format .
 	docker compose run --rm app ruff check --fix .
+
+typecheck:
+	docker compose run --rm app mypy
+
+# Everything CI runs, in the order CI runs it. A green `make check` is a green CI run.
+check: lint typecheck test

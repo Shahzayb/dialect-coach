@@ -175,7 +175,7 @@ def _substitutions(word: dict[str, Any]) -> list[dict[str, Any]]:
     at 100: the aligner smeared one produced sound across two targets, and reporting it as
     two separate substitutions would spend two of the three fix slots on one event.
     """
-    found = []
+    found: list[dict[str, Any]] = []
     pairs = speech_analyzer.phoneme_pairs(word)
     for index, (expected, produced, score) in enumerate(pairs):
         if not expected or not produced or score is None:
@@ -183,7 +183,7 @@ def _substitutions(word: dict[str, Any]) -> list[dict[str, Any]]:
         if score >= utils.PHONEME_RED:
             continue
         previous = pairs[index - 1][0] if index else None
-        entry = {
+        entry: dict[str, Any] = {
             "expected": expected,
             "produced": produced,
             "score": round(score, 1),
@@ -563,11 +563,11 @@ def _practice_plan(compacted: dict[str, Any], fixes: list[PriorityFix]) -> str:
     steps = []
     for index, (fix, allotted) in enumerate(zip(fixes, minutes), start=1):
         pairs = ", ".join(f"{pair.a}/{pair.b}" for pair in fix.minimal_pairs[:3])
-        words = ", ".join(fix.affected_words[:3])
+        affected = ", ".join(fix.affected_words[:3])
         drill = (
-            f"say the pairs {pairs} slowly, then {words} from this attempt"
+            f"say the pairs {pairs} slowly, then {affected} from this attempt"
             if pairs
-            else f"say {words} slowly, holding the /{fix.expected_phoneme}/ each time"
+            else f"say {affected} slowly, holding the /{fix.expected_phoneme}/ each time"
         )
         steps.append(
             f"{index}. {allotted} minute{'s' if allotted > 1 else ''} on "

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import itertools
 import random
+from typing import Any
 
 import pytest
 
@@ -21,8 +22,13 @@ EXPECTED, PRODUCED = "θ", "s"
 ITEM = "/θ/ → /s/"
 
 
-def build(**kwargs):
-    defaults = {"item": ITEM, "expected": EXPECTED, "produced": PRODUCED, "rng": random.Random(7)}
+def build(**kwargs: Any) -> pt.Block:
+    defaults: dict[str, Any] = {
+        "item": ITEM,
+        "expected": EXPECTED,
+        "produced": PRODUCED,
+        "rng": random.Random(7),
+    }
     defaults.update(kwargs)
     return pt.build_block(**defaults)
 

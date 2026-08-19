@@ -15,13 +15,24 @@ import re
 import time
 from collections.abc import Callable, Iterable
 from enum import Enum
-from typing import TypeVar
+from typing import Any, Protocol
 
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar("T")
+
+class RowLike(Protocol):
+    """A database row as its readers actually use one: subscript by column name.
+
+    `sqlite3.Row` and `dict` both satisfy this and neither is a subtype of the other.
+    A Row is not a `Mapping` — it has no `.get`, and it raises `IndexError` where a dict
+    raises `KeyError`, which is why `progress_view.is_shadowed` catches both. Readers that
+    only subscript should say only that, rather than claiming `Mapping[str, Any]` and being
+    handed a `sqlite3.Row` anyway.
+    """
+
+    def __getitem__(self, key: str, /) -> Any: ...
 
 
 class Mode(str, Enum):
@@ -218,7 +229,7 @@ def _from_streamlit_secrets(name: str) -> str | None:
     try:
         import streamlit as st
 
-        value = st.secrets[name]  # type: ignore[index]
+        value = st.secrets[name]
     except Exception:  # noqa: BLE001 — no Streamlit, no secrets file, no key: all mean None
         return None
     return str(value) if value else None

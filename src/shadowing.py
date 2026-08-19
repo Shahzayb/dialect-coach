@@ -98,7 +98,7 @@ _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 MIN_PHRASE_CHARS = 12
 
 
-def phrases(text: str) -> list[str]:
+def phrases(text: str | None) -> list[str]:
     """Split a passage into the phrases the echo track plays one at a time.
 
     Paragraph breaks are collapsed first: a blank line is a visual convenience in the passage
