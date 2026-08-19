@@ -25,8 +25,30 @@ surface itself, so that outcome is a finding rather than something explained awa
 pointing at what implemented them; #12 split, its content-score half (vocabulary/grammar/
 topic) retitled and moved to v0.12.0 since scripted assessment never returns it. What
 remains is Mode C (unscripted), which is also what unblocks #12's remaining half.
+**The tooling is now enforced rather than intended (v0.9.0)** — source under `src/`, ruff and
+mypy clean, and CI running lint, types and the offline suite on every push and pull request.
+Not a feature; deliberately placed here, after the feature work and **before** the audio
+measurement chunks, so the strictness lands on finished code and is switched on before the
+newest and most numerically delicate code in the project gets written.
 
 ## Releases
+
+**v0.9.0 — 2026-08-20.** The tooling chunk: source moved under `src/` (#17), ruff format and
+lint (#15), mypy (#18), and GitHub Actions (#16), as one chunk because all four touch the same
+9,582 lines. The `src/` layout is **bare-root**, so no import statement changed. **mypy is
+strict on every module under `src/`, `app.py` included** — the plan budgeted for leaving the UI
+layer loose, but with the dependencies installed it cost ten signature annotations. The
+controlling constraint was that **a CI run must be structurally unable to spend quota**, and it
+is, in four independent layers: the workflow names no repository secret, a CI checkout has no
+`.env`, `conftest` clears the credentials and forces `OFFLINE_MODE`, and a new `no_network`
+fixture refuses any non-loopback socket. `release.yml` is a separate workflow so `ci.yml` keeps
+`permissions: contents: read`, and this release is its own first run — published by the tag
+push, not by hand. No Python version matrix, contrary to #16, because the project pins 3.12
+deliberately and has never been run on 3.11; said on the issue rather than left implied.
+641 tests, up from 637 by exactly the four that guard the socket guard, and the formatting
+commit's count is identical to the commit before it. Merged via
+[PR #29](https://github.com/Shahzayb/dialect-coach/pull/29). Milestone v0.9.0 closed with all
+four issues.
 
 **v0.8.0 — 2026-08-19.** Shadowing: practise against a synthesised model in real time, then
 assess that read as an ordinary Mode B attempt — a flow wrapped around the existing path, with
