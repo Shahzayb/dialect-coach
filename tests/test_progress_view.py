@@ -1,0 +1,403 @@
+"""The progress view: the benchmark passage, the frames, and the chart specs.
+
+Pure — `progress_view` never imports Streamlit, so what the user sees is testable directly
+rather than through a headless app run. The wiring into the page is covered in
+`test_app.py` instead.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+import db
+import progress_view as pv
+import speech_analyzer as sa
+import utils
+from utils import Mode
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+# The reference the committed fixtures were captured against. Pairing a payload with a
+# different reference text makes the Mode B miscue diff mark the whole passage omitted.
+FIXTURE_REFERENCE = (
+    "The weather this month has been rather unpredictable. Thursday brought Thunder and "
+    "thick clouds, while Wednesday stayed warm and clear."
+)
+
+
+@pytest.fixture
+def conn() -> sqlite3.Connection:
+    connection = db.connect(":memory:")
+    yield connection
+    connection.close()
+
+
+def add(connection: sqlite3.Connection, **overrides) -> int:
+    """One attempt, mirroring `test_db.add` so chronology and scores are controllable."""
+    kwargs = dict(
+        mode=Mode.DRILL, reference_text=FIXTURE_REFERENCE,
+        recognised_text=FIXTURE_REFERENCE, audio_seconds=12.0, audio_sha256="abc123",
+        overall_scores={"pron_score": 82.0, "accuracy": 85.0, "fluency": 90.0,
+                        "completeness": 100.0, "prosody": 78.0},
+        azure_raw={"RecognitionStatus": "Success", "NBest": [{"PronunciationAssessment": {}}]},
+    )
+    kwargs.update(overrides)
+    return db.record_attempt(connection, **kwargs)
+
+
+def rows(*records: dict) -> list[dict]:
+    """Score rows in the shape `attempt_series` returns, with sane defaults."""
+    out = []
+    for index, record in enumerate(records, start=1):
+        base = {"id": index, "created_at": f"2026-07-{index:02d}T08:00:00Z",
+                "mode": "paragraph", "reference_text": pv.BENCHMARK_PASSAGE,
+                "pron_score": 80.0, "accuracy": 85.0, "fluency": 78.0, "prosody": 70.0}
+        base.update(record)
+        out.append(base)
+    return out
+
+
+# --- The benchmark passage ------------------------------------------------------------------
+# The passage is frozen: the series is identified by matching it, so editing a word starts a
+# new series. These tests are the guard on that, and on the coverage claim in the plan file.
+
+
+def test_every_token_the_coverage_table_claims_is_really_in_the_passage() -> None:
+    """The justification cannot drift away from the text it justifies.
+
+    `BENCHMARK_COVERAGE` is the passage's whole reason for existing — the claim that one
+    read serves both the trajectory chart and a later vowel-measurement instrument. A token
+    listed there but absent from the passage would make that claim quietly false.
+    """
+    present = set(utils.normalise_words(pv.BENCHMARK_PASSAGE))
+    missing = {
+        symbol: [token for token in tokens if token not in present]
+        for symbol, tokens in pv.BENCHMARK_COVERAGE.items()
+    }
+    assert {k: v for k, v in missing.items() if v} == {}
+
+
+def test_the_passage_covers_the_consonants_and_the_whole_vowel_inventory() -> None:
+    """Both instruments, in one read. The vowel list is `phoneme_reference`'s own."""
+    covered = set(pv.BENCHMARK_COVERAGE)
+    consonants = {"θ", "ð", "v", "w", "t", "d", "ʃ", "s", "z", "dʒ",
+                  "l (dark, coda)", "l (clear, onset)", "final clusters"}
+    vowels = {"æ", "ɛ", "ɪ", "i", "ɑ", "ʌ", "ɝ", "ə", "ʊ", "u", "ɔ", "ɚ",
+              "eɪ", "aɪ", "oʊ", "aʊ", "ɔɪ", "ɑɹ", "ɔɹ", "ɛɹ", "ɪɹ", "ʊɹ"}
+    assert consonants <= covered
+    assert vowels <= covered
+    # FACE and GOAT are called out in the brief specifically; they are not scraping by.
+    assert len(pv.BENCHMARK_COVERAGE["eɪ"]) >= 5
+    assert len(pv.BENCHMARK_COVERAGE["oʊ"]) >= 5
+
+
+def test_the_passage_is_one_minute_and_a_half_of_reading() -> None:
+    """Long enough for the vowel tokens, short enough to stay a single sitting."""
+    assert 170 <= len(utils.normalise_words(pv.BENCHMARK_PASSAGE)) <= 210
+
+
+def test_the_passage_carries_nothing_that_breaks_word_alignment() -> None:
+    """No digits (Azure normalises "33" and "thirty-three" differently) and no hyphens."""
+    assert not any(character.isdigit() for character in pv.BENCHMARK_PASSAGE)
+    assert "-" not in pv.BENCHMARK_PASSAGE
+
+
+def test_a_benchmark_read_is_recognised_however_it_was_typed() -> None:
+    assert pv.is_benchmark(pv.BENCHMARK_PASSAGE)
+    assert pv.is_benchmark("  " + pv.BENCHMARK_PASSAGE.upper() + "  ")
+    assert pv.is_benchmark(pv.BENCHMARK_PASSAGE.replace("\n\n", " "))
+
+
+def test_anything_else_is_free_practice() -> None:
+    assert not pv.is_benchmark("These three brothers thought the weather was worth it.")
+    assert not pv.is_benchmark(None)
+    assert not pv.is_benchmark("")
+    # One word short is not the passage. The series would silently split otherwise.
+    assert not pv.is_benchmark(pv.BENCHMARK_PASSAGE.replace("Each morning ", "", 1))
+
+
+# --- The score frame ------------------------------------------------------------------------
+
+
+def test_a_missing_prosody_score_is_a_gap_and_never_a_zero() -> None:
+    """NULL prosody and a prosody of 0.0 are very different things.
+
+    Azure returns no prosody score on some attempts and `db` stores NULL, never 0.0. Plotting
+    that as zero would draw a collapse the speaker never had.
+    """
+    frame = pv.score_frame(rows({"prosody": None}))
+    assert "Prosody" not in set(frame["metric"])
+    assert len(frame) == 3
+    assert 0.0 not in set(frame["value"])
+
+
+def test_a_prosody_of_zero_is_still_plotted() -> None:
+    """The other half of the same rule: a real zero is data, not a missing value."""
+    frame = pv.score_frame(rows({"prosody": 0.0}))
+    assert list(frame[frame["metric"] == "Prosody"]["value"]) == [0.0]
+
+
+def test_the_benchmark_and_free_practice_are_different_series() -> None:
+    frame = pv.score_frame(rows(
+        {"reference_text": pv.BENCHMARK_PASSAGE},
+        {"reference_text": "Something I made up this morning.", "mode": "drill"},
+    ))
+    assert set(frame[frame["attempt_id"] == 1]["series"]) == {pv.BENCHMARK_SERIES}
+    assert set(frame[frame["attempt_id"] == 2]["series"]) == {pv.FREE_SERIES}
+
+
+def test_the_two_modes_are_labelled_apart() -> None:
+    """Mode A and Mode B numbers are not comparable, so they never carry one label."""
+    frame = pv.score_frame(rows({"mode": "drill"}, {"mode": "paragraph"}))
+    assert set(frame["mode"]) == {"Drill (Mode A)", "Paragraph (Mode B)"}
+
+
+def test_the_tooltip_names_the_benchmark_and_truncates_a_free_text() -> None:
+    frame = pv.score_frame(rows(
+        {"reference_text": pv.BENCHMARK_PASSAGE},
+        {"reference_text": "A free practice paragraph that runs on well past the label cut."},
+    ))
+    assert set(frame[frame["attempt_id"] == 1]["label"]) == {pv.BENCHMARK_TITLE}
+    label = list(frame[frame["attempt_id"] == 2]["label"])[0]
+    assert label.endswith("…") and len(label) < 60
+
+
+def test_an_unparseable_timestamp_drops_the_attempt_rather_than_the_page() -> None:
+    frame = pv.score_frame(rows({"created_at": "not a timestamp"}))
+    assert frame.empty
+
+
+def test_an_empty_history_still_has_the_columns() -> None:
+    """`score_chart` is handed this frame, so it must be shaped even when it is empty."""
+    frame = pv.score_frame([])
+    assert frame.empty
+    assert list(frame.columns) == list(pv.FRAME_COLUMNS)
+
+
+def test_offline_replays_never_reach_the_frame(conn: sqlite3.Connection) -> None:
+    """A fixture replay scores the same every time; thirty identical points is not progress."""
+    add(conn, audio_sha256="real", created_at="2026-07-01T08:00:00Z")
+    add(conn, audio_sha256="replay", offline=True, created_at="2026-07-02T08:00:00Z")
+    assert len(db.attempt_series(conn)) == 1
+    assert len(db.attempt_payloads(conn)) == 1
+
+
+def test_the_series_is_ordered_by_time_not_by_insertion(conn: sqlite3.Connection) -> None:
+    """`record_attempt` takes an explicit `created_at`, so id order is not time order."""
+    add(conn, audio_sha256="b", created_at="2026-07-09T08:00:00Z")
+    add(conn, audio_sha256="a", created_at="2026-07-02T08:00:00Z")
+    assert [r["created_at"] for r in db.attempt_series(conn)] == [
+        "2026-07-02T08:00:00Z", "2026-07-09T08:00:00Z",
+    ]
+
+
+# --- The chart spec -------------------------------------------------------------------------
+# Mode A and Mode B must not share a line. Asserted against the spec itself rather than left
+# as a comment, because a later encoding change could reintroduce it silently.
+
+
+def spec_layers(frame) -> list[dict]:
+    return pv.score_chart(frame).to_dict()["spec"]["layer"]
+
+
+def test_only_the_benchmark_is_drawn_as_a_line() -> None:
+    marks = [layer["mark"]["type"] for layer in spec_layers(pv.score_frame(rows({})))]
+    assert marks.count("line") == 1
+    assert "point" in marks
+
+
+def test_no_line_layer_encodes_the_mode() -> None:
+    """The structural half of the rule: a line that grouped by mode could join A to B."""
+    for layer in spec_layers(pv.score_frame(rows({}))):
+        if layer["mark"]["type"] == "line":
+            assert "mode" not in json.dumps(layer["encoding"])
+
+
+def test_free_practice_is_points_shaped_by_mode() -> None:
+    for layer in spec_layers(pv.score_frame(rows({}))):
+        if layer["mark"]["type"] == "point":
+            assert layer["encoding"]["shape"]["field"] == "mode"
+            break
+    else:
+        pytest.fail("no point layer in the chart")
+
+
+def test_the_score_axis_is_pinned_to_the_full_range() -> None:
+    """An auto-scaled axis magnifies noise into a trend — the exact failure being guarded."""
+    for layer in spec_layers(pv.score_frame(rows({}))):
+        assert layer["encoding"]["y"]["scale"]["domain"] == [0, 100]
+
+
+def test_the_four_metrics_are_faceted_apart() -> None:
+    chart = pv.score_chart(pv.score_frame(rows({}))).to_dict()
+    assert chart["facet"]["row"]["field"] == "metric"
+    assert set(pv.METRIC_ORDER) == {"Pronunciation", "Accuracy", "Fluency", "Prosody"}
+
+
+def test_an_empty_history_still_produces_a_chart() -> None:
+    """The empty state is a message in `app.py`, but building the spec must not raise."""
+    assert pv.score_chart(pv.score_frame([])).to_dict()
+
+
+# --- Days since the benchmark ---------------------------------------------------------------
+
+
+def test_days_since_the_benchmark_counts_only_benchmark_reads() -> None:
+    now = datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
+    history = rows(
+        {"created_at": "2026-07-10T08:00:00Z", "reference_text": pv.BENCHMARK_PASSAGE},
+        {"created_at": "2026-07-19T08:00:00Z", "reference_text": "free practice text"},
+    )
+    assert pv.days_since_benchmark(history, now=now) == 10
+
+
+def test_days_since_the_benchmark_is_none_when_it_has_never_been_read() -> None:
+    assert pv.days_since_benchmark(rows({"reference_text": "free practice"})) is None
+
+
+# --- Re-parsing the stored payloads ---------------------------------------------------------
+
+
+def test_both_stored_shapes_re_parse(conn: sqlite3.Connection) -> None:
+    """A drill stores a JSON object, a paragraph a JSON array. Both have to come back."""
+    drill = json.loads((FIXTURES / "sample_azure_response.json").read_text())
+    paragraph = json.loads((FIXTURES / "sample_azure_continuous.json").read_text())
+    add(conn, mode=Mode.DRILL, azure_raw=drill, audio_sha256="d",
+        created_at="2026-07-01T08:00:00Z")
+    add(conn, mode=Mode.PARAGRAPH, azure_raw=paragraph, audio_sha256="p",
+        created_at="2026-07-02T08:00:00Z")
+
+    parsed = pv.parse_attempts(db.attempt_payloads(conn))
+    assert [p.mode for p in parsed] == [Mode.DRILL, Mode.PARAGRAPH]
+    assert all(p.words for p in parsed)
+    assert not any(p.benchmark for p in parsed)
+
+
+def test_a_corrupt_payload_is_skipped_rather_than_blanking_the_view(
+    conn: sqlite3.Connection,
+) -> None:
+    """One unreadable blob on disk must cost its own row, not the whole view."""
+    drill = json.loads((FIXTURES / "sample_azure_response.json").read_text())
+    bad = add(conn, audio_sha256="bad", created_at="2026-07-01T08:00:00Z")
+    add(conn, azure_raw=drill, audio_sha256="good", created_at="2026-07-02T08:00:00Z")
+    # Truncated on the way to disk — the one shape `record_attempt` cannot produce itself.
+    conn.execute("UPDATE attempts SET azure_raw_json = ? WHERE id = ?",
+                 ('{"NBest": [{"Words": [', bad))
+
+    parsed = pv.parse_attempts(db.attempt_payloads(conn))
+    assert [p.attempt_id for p in parsed] == [2]
+
+
+def test_a_benchmark_read_is_marked_as_one_when_it_is_re_parsed(
+    conn: sqlite3.Connection,
+) -> None:
+    drill = json.loads((FIXTURES / "sample_azure_response.json").read_text())
+    add(conn, reference_text=pv.BENCHMARK_PASSAGE, azure_raw=drill)
+    assert pv.parse_attempts(db.attempt_payloads(conn))[0].benchmark
+
+
+# --- What keeps going wrong -----------------------------------------------------------------
+# Against the real captured payload rather than a hand-built one, per the standing preference:
+# the Azure response differs from its documentation in ways that fail silently.
+
+
+@pytest.fixture
+def real_drill(conn: sqlite3.Connection) -> list[pv.ParsedAttempt]:
+    payload = json.loads((FIXTURES / "sample_azure_response.json").read_text())
+    add(conn, mode=Mode.DRILL, azure_raw=payload)
+    return pv.parse_attempts(db.attempt_payloads(conn))
+
+
+def test_the_flagship_substitution_surfaces_from_the_real_capture(real_drill) -> None:
+    """`/θ/ → /s/` on "thursday" is the fixture's headline fault everywhere else in the app."""
+    frame = pv.flagged_phonemes(real_drill)
+    assert "/θ/ → /s/" in set(frame["label"])
+    row = frame[frame["label"] == "/θ/ → /s/"].iloc[0]
+    assert row["expected"] == "θ" and row["produced"] == "s"
+
+
+def test_the_words_the_app_flags_are_the_words_that_are_counted(real_drill) -> None:
+    """One predicate for both, so this view cannot disagree with the word cards."""
+    expected = {str(w["word"]).lower() for w in real_drill[0].words if sa.is_flagged(w)}
+    assert set(pv.flagged_words(real_drill)["word"]) == expected
+
+
+def test_a_weak_phoneme_with_no_alternate_is_kept_as_its_own_bucket() -> None:
+    """What final-cluster simplification looks like: weakened, not swapped for something."""
+    attempt = pv.ParsedAttempt(
+        attempt_id=1, created_at="2026-07-01T08:00:00Z", mode=Mode.DRILL,
+        reference_text="asked", benchmark=False,
+        words=[{"word": "asked", "accuracy": 55.0, "error_type": "Mispronunciation",
+                "delivery_error_types": [], "syllables": [],
+                "phonemes": [{"phoneme": "t", "score": 30.0, "nbest": []}]}],
+    )
+    frame = pv.flagged_phonemes([attempt])
+    assert list(frame["label"]) == [f"/t/ → {pv.UNCLEAR}"]
+
+
+def test_a_weak_phoneme_in_an_unflagged_word_is_not_counted() -> None:
+    """The ranking follows `is_flagged`; a clean word's phoneme scores are not faults."""
+    attempt = pv.ParsedAttempt(
+        attempt_id=1, created_at="2026-07-01T08:00:00Z", mode=Mode.DRILL,
+        reference_text="fine", benchmark=False,
+        words=[{"word": "fine", "accuracy": 100.0, "error_type": "None",
+                "delivery_error_types": [], "syllables": [],
+                "phonemes": [{"phoneme": "f", "score": 10.0, "nbest": []}]}],
+    )
+    assert pv.flagged_phonemes([attempt]).empty
+
+
+def flagged(word: str, phoneme: str, produced: str) -> dict:
+    return {"word": word, "accuracy": 50.0, "error_type": "Mispronunciation",
+            "delivery_error_types": [], "syllables": [],
+            "phonemes": [{"phoneme": phoneme, "score": 40.0,
+                          "nbest": [{"phoneme": produced, "score": 95.0}]}]}
+
+
+def attempt(index: int, words: list[dict], *, benchmark: bool = False) -> pv.ParsedAttempt:
+    return pv.ParsedAttempt(
+        attempt_id=index, created_at=f"2026-07-{index:02d}T08:00:00Z", mode=Mode.DRILL,
+        reference_text=pv.BENCHMARK_PASSAGE if benchmark else "free", benchmark=benchmark,
+        words=words,
+    )
+
+
+def test_recurring_across_attempts_outranks_repeating_within_one() -> None:
+    """"Flagged most often" is a question about sessions, not about token counts.
+
+    Otherwise one long paragraph that repeats a word would head the list ahead of a fault
+    that has come back every single time.
+    """
+    parsed = [
+        attempt(1, [flagged("thin", "θ", "t")]),
+        attempt(2, [flagged("thin", "θ", "t")]),
+        attempt(3, [flagged("very", "v", "w"), flagged("vowel", "v", "w"),
+                    flagged("value", "v", "w")]),
+    ]
+    frame = pv.flagged_phonemes(parsed)
+    assert list(frame["label"])[0] == "/θ/ → /t/"
+    assert list(frame[frame["label"] == "/θ/ → /t/"]["attempts"]) == [2]
+    assert list(frame[frame["label"] == "/v/ → /w/"]["tokens"]) == [3]
+
+
+def test_the_benchmark_share_is_carried_alongside_the_total() -> None:
+    """On the fixed passage the count is comparable read to read; on free text it is not."""
+    parsed = [
+        attempt(1, [flagged("thin", "θ", "t")], benchmark=True),
+        attempt(2, [flagged("thin", "θ", "t")]),
+    ]
+    row = pv.flagged_phonemes(parsed).iloc[0]
+    assert row["attempts"] == 2 and row["benchmark_attempts"] == 1
+    assert pv.flagged_words(parsed).iloc[0]["benchmark_attempts"] == 1
+
+
+def test_the_rankings_survive_an_empty_history() -> None:
+    assert pv.flagged_phonemes([]).empty
+    assert pv.flagged_words([]).empty
+    assert pv.phoneme_chart(pv.flagged_phonemes([])).to_dict()
+    assert pv.word_chart(pv.flagged_words([])).to_dict()

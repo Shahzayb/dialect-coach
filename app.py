@@ -1323,7 +1323,7 @@ def render_progress(conn: sqlite3.Connection) -> None:
         return
 
     frame = progress_view.score_frame(rows)
-    st.altair_chart(progress_view.score_chart(frame), use_container_width=True)
+    st.altair_chart(progress_view.score_chart(frame), width="stretch")
 
     since = progress_view.days_since_benchmark(rows)
     if since is None:
@@ -1350,12 +1350,12 @@ def render_progress(conn: sqlite3.Connection) -> None:
     left, right = st.columns(2)
     with left:
         if len(phonemes):
-            st.altair_chart(progress_view.phoneme_chart(phonemes), use_container_width=True)
+            st.altair_chart(progress_view.phoneme_chart(phonemes), width="stretch")
         else:
             st.caption("No sound has been flagged yet.")
     with right:
         if len(words):
-            st.altair_chart(progress_view.word_chart(words), use_container_width=True)
+            st.altair_chart(progress_view.word_chart(words), width="stretch")
         else:
             st.caption("No word has been flagged yet.")
 
