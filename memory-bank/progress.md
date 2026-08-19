@@ -10,6 +10,11 @@ and verified live, the prosody score now comes with a drill attached (#9, v0.4.0
 stored history is finally shown back over time on a fixed benchmark passage (v0.5.0). Azure's
 timing data now survives the parser and turns into a rhythm measurement, nPVI, against a
 same-pipeline TTS baseline (v0.6.0) — the de-risking step for every later accent measurement.
+**The app now trains rather than only diagnosing (v0.7.0)**: a perception trainer built on
+High Variability Phonetic Training, and a practice queue that persists a small target set so
+opening the app answers "what am I doing today?" instead of showing a blank textarea. That
+closes the gap the brief opened with — every earlier chunk explained the problem better, and
+this is the first one that does something about it.
 **Milestone v0.3.0 is closed** — #10, #11, #13 closed with comments
 pointing at what implemented them; #12 split, its content-score half (vocabulary/grammar/
 topic) retitled and moved to v0.12.0 since scripted assessment never returns it. What
@@ -17,11 +22,18 @@ remains is Mode C (unscripted), which is also what unblocks #12's remaining half
 
 ## Releases
 
-**v0.6.0 — built 2026-08-19, not yet tagged.** Azure's `Offset`/`Duration` (word, syllable and
-phoneme) and the top-level `SNR` carried through the parser, plus nPVI over vocalic intervals in
-a new `rhythm.py`, measured against a captured Azure TTS baseline of the benchmark passage. On
-the branch and verified; the PR, the tag, the GitHub release and closing milestone v0.6.0 are
-still to do.
+**v0.7.0 — 2026-08-19.** The perception trainer and the practice queue: forced-choice
+minimal-pair identification across six en-US voices, and a persisted target set of at most
+three items promoted from the user's own flagged history. A new **Today** tab is the app's
+entry point. Merged via [PR #26](https://github.com/Shahzayb/dialect-coach/pull/26), tagged,
+and released (`gh release create v0.7.0`). Milestone v0.7.0 closed; it carried no issues —
+this chunk came from the brief rather than from the tracker, so the release closes none.
+
+**v0.6.0 — 2026-08-19.** Azure's `Offset`/`Duration` (word, syllable and phoneme) and the
+top-level `SNR` carried through the parser, plus nPVI over vocalic intervals in a new
+`rhythm.py`, measured against a captured Azure TTS baseline of the benchmark passage. Merged
+via [PR #25](https://github.com/Shahzayb/dialect-coach/pull/25), tagged, and released
+(`gh release create v0.6.0`).
 
 **v0.5.0 — 2026-08-19.** The progress view: the first feature that reads the SQLite history
 back, on a fixed benchmark passage. Merged via
@@ -57,9 +69,19 @@ says; the TTS baseline took 61.8 s, and a human reads it slower). Until then the
 on screen is the free-practice cloud, which is exactly the thing that cannot be read as
 progress.
 
-Two charts now depend on it rather than one: the rhythm chart plots benchmark reads only,
-because nPVI moves with the text as much as with the speaker. The first read is also the
-first number that can be set against the TTS baseline's 58.45.
+Three things now depend on it rather than one. The rhythm chart plots benchmark reads only,
+because nPVI moves with the text as much as with the speaker, and the first read is the first
+number that can be set against the TTS baseline's 58.45. **The practice queue is the third,
+and it is the one that changes what a read is for**: targets are promoted from sounds flagged
+across separate attempts, so until there are real attempts the queue has nothing to schedule
+and the Today tab correctly offers nothing. Reading the passage is now what starts the whole
+loop, not only what fills a chart.
+
+**Then do some blocks.** The trainer has been run, not used. The graduation rule (90% across
+two completed blocks) has never fired on real listening, the spaced-review schedule has never
+come round, and whether a perception gain shows up in the Azure scores is the question the
+whole chunk is a bet on. Same shape as the benchmark's 30-day check: only weeks of real use
+answer it, and neither is a merge gate.
 
 **Then Mode C (unscripted speech)** — free speech scored on vocabulary, grammar and
 topic, not just a script. Blocked on a real question, not busywork:
