@@ -218,6 +218,11 @@ def compact(assessment: Any, mode: Mode) -> dict[str, Any]:
         "flagged_words": words,
         "omitted_words": [w["word"] for w in words if w["error_type"] == "Omission"],
         "delivery": speech_analyzer.delivery_summary(assessment.words),
+        # Its own section, and the reason it is separate from "delivery" above: this one
+        # carries what Azure *measured* where each fault happened, which is what turns a
+        # prosody score into something with a span attached. Three entries at most, so the
+        # payload stays the fraction of the raw response that `compact` exists to be.
+        "delivery_faults": speech_analyzer.delivery_faults(assessment.words),
         # The only pairs a report is allowed to discuss. `ai_coach` validates against this.
         "observed_pairs": observed,
     }

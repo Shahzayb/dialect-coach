@@ -38,13 +38,16 @@ def phoneme(symbol: str, score: float, *nbest: tuple[str, float]) -> dict:
 
 
 def word(text: str, accuracy=None, error_type="None", phonemes=None, syllables=None,
-         delivery=None) -> dict:
+         delivery=None, break_length=None, monotone_confidence=None) -> dict:
     return {
         "word": text,
         "accuracy": accuracy,
         "error_type": error_type,
         "error_source": "azure",
         "delivery_error_types": delivery or [],
+        "prosody_detail": {
+            "break_length": break_length, "monotone_confidence": monotone_confidence,
+        },
         "syllables": syllables or [],
         "phonemes": phonemes or [],
     }
@@ -62,6 +65,28 @@ def test_the_payload_sent_on_is_a_fraction_of_the_raw_response(drill: sa.Assessm
     compacted = len(json.dumps(fc.compact(drill, Mode.DRILL)))
     raw = len(json.dumps(drill.raw))
     assert compacted < raw / 10, f"{compacted} vs {raw}"
+
+
+def test_the_delivery_faults_travel_as_their_own_section() -> None:
+    """Synthetic: the captured payload has no fault, so there would be nothing to send.
+
+    A separate top-level key rather than more fields on `flagged_words`, because a fault
+    is a property of a span and not of a word — and because it is what the model is asked
+    to answer separately from the substitutions.
+    """
+    words = [word("thursday", 88.0, delivery=["Monotone"], monotone_confidence=0.82),
+             word("clouds", 95.0)]
+    section = fc.compact(assessment(words), Mode.PARAGRAPH)["delivery_faults"]
+    assert section == [{
+        "fault": "Monotone", "words": ["thursday"],
+        "break_length_max": None, "break_length_mean": None,
+        "monotone_confidence_mean": 0.82,
+    }]
+
+
+def test_a_clean_attempt_sends_an_empty_delivery_section(drill: sa.Assessment) -> None:
+    """The captured payload, which really is clean on Break and Intonation."""
+    assert fc.compact(drill, Mode.DRILL)["delivery_faults"] == []
 
 
 def test_only_flagged_words_survive_compaction(drill: sa.Assessment) -> None:
