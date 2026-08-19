@@ -255,3 +255,74 @@ def test_on_attempt_is_optional() -> None:
     import inspect
 
     assert inspect.signature(tts.synthesise).parameters["on_attempt"].default is None
+
+
+# --- The disk cache ----------------------------------------------------------------------
+# It holds synthesised audio only. The no-stored-audio rule covers the user's recordings and
+# nothing here ever writes one; a neural voice reading "think" carries no personal data.
+
+
+def test_the_key_changes_with_every_part_of_the_identity() -> None:
+    base = tts.cache_key("en-US-AvaNeural", "think")
+    assert base != tts.cache_key("en-US-BrianNeural", "think")
+    assert base != tts.cache_key("en-US-AvaNeural", "sink")
+    assert base != tts.cache_key("en-US-AvaNeural", "think", "-35%")
+
+
+def test_the_key_is_stable_across_calls() -> None:
+    assert tts.cache_key("v", "think") == tts.cache_key("v", "think")
+
+
+def test_the_key_does_not_collide_on_a_shifted_separator() -> None:
+    """Concatenating without a separator would make ("ab","c") and ("a","bc") one clip."""
+    assert tts.cache_key("ab", "c") != tts.cache_key("a", "bc")
+
+
+def test_a_miss_is_none_rather_than_an_error(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TTS_CACHE_DIR", str(tmp_path))
+    assert tts.cached_audio("en-US-AvaNeural", "think") is None
+
+
+def test_a_stored_clip_reads_back(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TTS_CACHE_DIR", str(tmp_path))
+    tts.store_audio("en-US-AvaNeural", "think", b"RIFFfake")
+    assert tts.cached_audio("en-US-AvaNeural", "think") == b"RIFFfake"
+
+
+def test_a_different_rate_is_a_different_entry(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("TTS_CACHE_DIR", str(tmp_path))
+    tts.store_audio("v", "think", b"normal")
+    tts.store_audio("v", "think", b"slow", rate=tts.SLOW_RATE)
+    assert tts.cached_audio("v", "think") == b"normal"
+    assert tts.cached_audio("v", "think", rate=tts.SLOW_RATE) == b"slow"
+
+
+def test_the_cache_creates_its_directory(tmp_path, monkeypatch) -> None:
+    nested = tmp_path / "data" / "tts_cache"
+    monkeypatch.setenv("TTS_CACHE_DIR", str(nested))
+    tts.store_audio("v", "think", b"bytes")
+    assert nested.is_dir()
+    assert tts.cached_audio("v", "think") == b"bytes"
+
+
+def test_an_interrupted_write_leaves_no_partial_hit(tmp_path, monkeypatch) -> None:
+    """A truncated WAV that reads as a valid hit would be worse than no cache at all."""
+    monkeypatch.setenv("TTS_CACHE_DIR", str(tmp_path))
+    tts.store_audio("v", "think", b"bytes")
+    assert not list(tmp_path.glob("*.part"))
+
+
+def test_an_unwritable_cache_is_a_warning_not_a_failure(tmp_path, monkeypatch) -> None:
+    """Failing to cache costs quota next time; it must never break playback."""
+    monkeypatch.setenv("TTS_CACHE_DIR", str(tmp_path / "file"))
+    (tmp_path / "file").write_text("not a directory")
+    tts.store_audio("v", "think", b"bytes")   # no raise
+    assert tts.cached_audio("v", "think") is None
+
+
+def test_a_word_is_billed_as_plain_text_not_as_ssml() -> None:
+    """The meter charges the payload actually sent, and SSML bills its full markup."""
+    plain = tts.payload_for("thursday", slow=False, voice="en-US-AvaNeural")
+    wrapped = tts.payload_for("thursday", slow=True, voice="en-US-AvaNeural")
+    assert len(plain) == 8
+    assert len(wrapped) > 100

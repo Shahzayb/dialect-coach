@@ -217,8 +217,7 @@ def build_block(
     rng.shuffle(pool)
     pool.sort(key=lambda entry: (entry[3] != "", entry[3]))
 
-    chosen = pool[: min(wanted, len(pool))]
-    ordered = _spread(chosen, rng)
+    ordered = _interleave(pool, voice_list, min(wanted, len(pool)), rng)
 
     planned: list[Trial] = []
     for word, other, voice, last in ordered:
@@ -237,42 +236,61 @@ def build_block(
     )
 
 
-def _spread(
-    chosen: Sequence[tuple[str, str, str, str]], rng: random.Random
+def _interleave(
+    pool: Sequence[tuple[str, str, str, str]],
+    voices: Sequence[str],
+    wanted: int,
+    rng: random.Random,
 ) -> list[tuple[str, str, str, str]]:
-    """Order the block so consecutive trials change voice, and change pair where they can.
+    """Deal the pool out one voice at a time, in rotation, taking the best of each.
 
-    Variability that arrives in blocks is not variability: five trials of one voice followed
-    by five of the next is closer to four single-talker blocks than to a mixed one. Greedy and
-    deliberately best-effort — with a small pool the constraint sometimes cannot be met, and
-    the fallback is to take whatever is left rather than to fail a block over presentation
-    order.
+    Selecting the twenty best stimuli and *then* trying to order them does not work: the
+    selection can hand back eight of one voice, and no ordering of eight-in-twenty avoids a
+    consecutive repeat. Dealing round-robin instead makes the rotation a property of the
+    selection, so every voice gets within one trial of an equal share and no two neighbouring
+    trials share a talker — which is the point. Variability that arrives in clumps is not
+    variability: five trials of one voice followed by five of the next is closer to four
+    single-talker blocks than to a mixed one.
+
+    Within a voice the order is already novelty-first, so the round-robin never trades away
+    the preference for stimuli that have not been heard.
     """
-    remaining = list(chosen)
-    rng.shuffle(remaining)
+    queues: dict[str, list[tuple[str, str, str, str]]] = {voice: [] for voice in voices}
+    for entry in pool:
+        queues[entry[2]].append(entry)
+
+    rotation = list(voices)
+    rng.shuffle(rotation)
     ordered: list[tuple[str, str, str, str]] = []
-    last_voice: str | None = None
     last_pair: frozenset[str] | None = None
 
-    while remaining:
-        pick = None
-        for relax in (False, True):
-            for index, entry in enumerate(remaining):
-                word, other, voice, _ = entry
-                if voice == last_voice:
-                    continue
-                if not relax and frozenset({word, other}) == last_pair:
-                    continue
-                pick = index
+    while len(ordered) < wanted:
+        progressed = False
+        for voice in rotation:
+            if len(ordered) >= wanted:
                 break
-            if pick is not None:
-                break
-        if pick is None:  # every candidate repeats the last voice: take the first one
-            pick = 0
-        entry = remaining.pop(pick)
-        ordered.append(entry)
-        last_voice = entry[2]
-        last_pair = frozenset({entry[0], entry[1]})
+            queue = queues[voice]
+            if not queue:
+                continue
+            # Take the best entry that does not repeat the previous trial's pair — but only
+            # from among the entries that are equally good on novelty. Searching the whole
+            # queue would let a cosmetic preference about presentation order quietly hand
+            # back a stimulus already heard while an unheard one waited, and novelty is the
+            # thing graduation is claimed on. With a small pool the constraint sometimes
+            # cannot be met at all, and failing a block over presentation order would be the
+            # wrong trade, so it falls back to the head.
+            tier = queue[0][3]
+            index = next(
+                (i for i, entry in enumerate(queue)
+                 if entry[3] == tier and frozenset({entry[0], entry[1]}) != last_pair),
+                0,
+            )
+            entry = queue.pop(index)
+            ordered.append(entry)
+            last_pair = frozenset({entry[0], entry[1]})
+            progressed = True
+        if not progressed:  # every queue is empty
+            break
 
     return ordered
 

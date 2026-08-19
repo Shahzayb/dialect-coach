@@ -22,8 +22,10 @@ import logging
 import sqlite3
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 import streamlit as st
@@ -33,6 +35,9 @@ import audio_utils
 import budget
 import db
 import fallback_coach
+import perception_trainer
+import phoneme_reference
+import practice_queue
 import progress_view
 import rhythm
 import speech_analyzer
@@ -1428,6 +1433,35 @@ def render_progress(conn: sqlite3.Connection) -> None:
     )
 
     render_rhythm_history(parsed)
+    render_perception_history(conn)
+
+
+def render_perception_history(conn: sqlite3.Connection) -> None:
+    """Per-contrast identification accuracy over time, against the chance floor.
+
+    The rule is the whole point of the chart. A two-alternative forced choice scores 50% by
+    guessing, so a rising line that never clears the dashed one is not improvement — and an
+    accuracy plotted against a zero baseline would look like it was.
+    """
+    st.subheader("Hearing the contrast")
+    with _DB_LOCK:
+        trials = [dict(row) for row in db.all_trials(conn)]
+
+    frame = progress_view.perception_frame(trials)
+    if not len(frame):
+        st.caption(
+            "No listening block answered yet. Blocks are scheduled on the **Today** tab, "
+            "against the sounds your own recordings keep getting flagged on."
+        )
+        return
+
+    st.altair_chart(progress_view.perception_chart(frame), width="stretch")
+    st.caption(
+        "The dashed line is the chance floor — what guessing scores on a two-way choice. "
+        "Read every point against it, not against zero: a block at 55% is a coin toss with "
+        "a good day, not a contrast you can hear. Each point is one block; a spaced review "
+        "is a shorter block, which is why its point rests on fewer trials."
+    )
 
 
 def render_rhythm_history(parsed) -> None:
@@ -1473,6 +1507,556 @@ def render_rhythm_history(parsed) -> None:
             f"segments are cut — so the distance to a published band would mean less than "
             f"the distance to this line."
         )
+
+
+# --- Today: the practice queue and the perception trainer -------------------------------------
+# The single entry point. Opening the app should answer "what am I doing today?" rather than
+# present a blank textarea — thirty sessions that each start from nothing are thirty first
+# sessions. The textarea is still there, one tab click away.
+#
+# Streamlit executes EVERY tab body on every rerun, the 0.4 s assessment polls included, so
+# everything expensive here is cached on a fingerprint exactly the way the progress view's
+# re-parse is.
+
+
+BLOCK_KEY = "perception_block"
+
+
+@st.cache_data(show_spinner=False)
+def queue_candidates(_conn: sqlite3.Connection, fingerprint: tuple[int, int]):
+    """What the stored attempts say is worth practising, cached on the attempts fingerprint.
+
+    Reuses `parsed_attempts`, so the Today tab costs no extra re-parse: the two aggregates it
+    needs are the same ones the Progress tab draws, which is what stops the queue and the
+    chart from disagreeing about what recurs.
+    """
+    parsed = parsed_attempts(_conn, fingerprint)
+    phonemes = progress_view.flagged_phonemes(parsed)
+    syllables = progress_view.weak_syllables(parsed)
+    return practice_queue.candidates(
+        phonemes.to_dict("records"), syllables.to_dict("records")
+    )
+
+
+def sync_queue(conn: sqlite3.Connection) -> list[Any]:
+    """Promote new targets if there is room, and return the current list.
+
+    Promotion runs on every render rather than on a button, because the queue is meant to
+    reflect the recordings — a target that the evidence now supports should not wait for the
+    user to ask for it. Nothing is invented: `promote` can only choose from `candidates`,
+    which can only come from stored attempts.
+    """
+    with _DB_LOCK:
+        fingerprint = db.attempt_fingerprint(conn)
+        existing = [dict(row) for row in db.targets(conn)]
+
+    found = queue_candidates(conn, fingerprint)
+    fresh = practice_queue.promote(existing, found)
+    if fresh:
+        with _DB_LOCK:
+            for candidate in fresh:
+                db.upsert_target(
+                    conn, item=candidate.item, kind=candidate.kind,
+                    evidence={**candidate.evidence, "why": candidate.why},
+                )
+        logger.info("Promoted %d new practice target(s)", len(fresh))
+
+    with _DB_LOCK:
+        return [dict(row) for row in db.targets(conn)]
+
+
+def _accuracy_line(summaries: list[Any]) -> str:
+    """Accuracy so far, NEVER without its chance floor beside it.
+
+    Built in one place precisely so the anchor cannot be dropped from one of the several
+    spots accuracy appears in. "62%" against an unstated 50% floor is noise dressed as
+    progress.
+    """
+    completed = [b for b in summaries if b.total]
+    if not completed:
+        return "No block answered yet."
+    latest = completed[-1]
+    trend = " → ".join(f"{b.accuracy:.0%}" for b in completed[-4:])
+    return (
+        f"**{trend}** — last block {latest.correct}/{latest.total}. "
+        f"{perception_trainer.chance_caption(latest.alternatives)}"
+    )
+
+
+def render_target_card(conn: sqlite3.Connection, target: dict[str, Any],
+                       still_flagged: set[str]) -> None:
+    """One queue item: what it is, why it is here, and what takes it off.
+
+    Both halves are required by the brief and both are rendered from real values rather than
+    described in prose — the evidence is the counts it was promoted on, and the rule is
+    `practice_queue.graduation_rule`, which carries the actual thresholds.
+    """
+    kind = str(target["kind"])
+    evidence = practice_queue.evidence_of(target)
+    label = practice_queue.KIND_LABELS.get(kind, kind)
+
+    with _DB_LOCK:
+        trials = [dict(row) for row in db.trials_for(conn, str(target["item"]))]
+    summaries = practice_queue.summarise_blocks(trials)
+
+    if kind == practice_queue.STRESS:
+        decision = practice_queue.grade(
+            target, summaries, still_flagged=str(target["item"]) in still_flagged
+        )
+    else:
+        decision = practice_queue.grade(target, summaries)
+
+    header = f"**{target['item']}** · {label}"
+    if str(target["state"]) == practice_queue.GRADUATED:
+        header += " · ✅ graduated"
+    st.markdown(header)
+
+    if kind != practice_queue.STRESS:
+        st.caption(_accuracy_line(summaries))
+
+    with st.expander("Why is this here, and what takes it off?"):
+        st.markdown(f"**Why it is here.** {evidence.get('why') or 'No evidence recorded.'}")
+        st.markdown(f"**What takes it off.** {practice_queue.graduation_rule(kind)}")
+        st.markdown(f"**Where it stands.** {decision.reason}")
+        if str(target["state"]) == practice_queue.GRADUATED:
+            st.caption(practice_queue.review_horizon(
+                int(target.get("reviews_passed") or 0)))
+        added = str(target.get("added") or "")
+        due_at = str(target.get("next_due") or "")
+        st.caption(f"Added {added or 'unknown'} · next due {due_at or 'unscheduled'}")
+
+
+def apply_decisions(conn: sqlite3.Connection, targets: list[dict[str, Any]],
+                    still_flagged: set[str], *, now: datetime) -> None:
+    """Write the scheduling consequences of what the evidence now says.
+
+    Separate from rendering so the page never shows one verdict while the database holds
+    another, and so a graduation is persisted the moment it is earned rather than the next
+    time someone happens to open the right expander.
+    """
+    for target in targets:
+        kind = str(target["kind"])
+        with _DB_LOCK:
+            trials = [dict(row) for row in db.trials_for(conn, str(target["item"]))]
+        summaries = practice_queue.summarise_blocks(trials)
+        if kind == practice_queue.STRESS:
+            decision = practice_queue.grade(
+                target, summaries, still_flagged=str(target["item"]) in still_flagged
+            )
+        else:
+            decision = practice_queue.grade(target, summaries)
+
+        if decision.state == str(target["state"]) and not decision.regressed:
+            continue
+        with _DB_LOCK:
+            db.update_target(
+                conn, int(target["id"]),
+                state=decision.state,
+                next_due=practice_queue.next_due(decision, now=now, kind=kind),
+                reviews_passed=decision.reviews_passed,
+            )
+        target["state"] = decision.state
+        logger.info("Target %s → %s", target["item"], decision.state)
+
+
+def render_today(conn: sqlite3.Connection) -> None:
+    """The Today tab: the one due thing, then the target set and its rules."""
+    st.subheader("Today")
+
+    if st.session_state.get(BLOCK_KEY):
+        render_block(conn)
+        return
+
+    targets = sync_queue(conn)
+    with _DB_LOCK:
+        fingerprint = db.attempt_fingerprint(conn)
+    found = queue_candidates(conn, fingerprint)
+    still_flagged = {c.item for c in found if c.kind == practice_queue.STRESS}
+
+    now = datetime.now(timezone.utc)
+    apply_decisions(conn, targets, still_flagged, now=now)
+
+    if not targets:
+        if fingerprint[1] == 0:
+            st.info(
+                "Nothing to practise yet, and that is the honest answer rather than a "
+                "placeholder. Targets are promoted from your own assessed attempts — the "
+                "sounds Azure actually flagged — so the queue has nothing to schedule until "
+                "there is at least one. Record something on the **Practice** tab.",
+                icon="🌱",
+            )
+        else:
+            st.info(
+                f"Nothing has recurred often enough to promote yet. A sound has to be "
+                f"flagged in {utils.RECUR_ATTEMPTS} separate attempts before it becomes a "
+                f"target — one bad reading is not a pattern. Keep practising on the "
+                f"**Practice** tab.",
+                icon="🌱",
+            )
+        return
+
+    ready = practice_queue.due(targets, now=now)
+    trainable = [t for t in ready if str(t["kind"]) != practice_queue.STRESS]
+    drills = [t for t in ready if str(t["kind"]) == practice_queue.STRESS]
+
+    if trainable:
+        target = trainable[0]
+        review = str(target["state"]) == practice_queue.GRADUATED
+        trials = (utils.PERCEPTION_REVIEW_TRIALS if review
+                  else utils.PERCEPTION_BLOCK_TRIALS)
+        st.markdown(
+            f"### {'Spaced review' if review else 'Listening block'}: {target['item']}\n"
+            f"{trials} trials. You hear one word and choose which of the pair it was, in "
+            f"{len(perception_trainer.VOICES)} different voices."
+        )
+        st.caption(
+            "Different voices on purpose: hearing a contrast from several talkers is what "
+            "makes it carry over to new words and new speakers, rather than teaching you "
+            "one synthesiser."
+        )
+        if st.button("▶ Start the block", type="primary",
+                     disabled=utils.offline_mode(), key="start-block"):
+            start_block(conn, target, review=review)
+        if utils.offline_mode():
+            st.caption(
+                "Disabled under OFFLINE_MODE: a block is live synthesis by definition and "
+                "there is no fixture to replay for audio."
+            )
+    elif drills:
+        render_stress_drill(conn, drills[0])
+    else:
+        st.success(
+            "Nothing due today. The targets below are all either waiting on their next "
+            "spaced review or already worked through.",
+            icon="✅",
+        )
+
+    st.divider()
+    active = [t for t in targets if str(t["state"]) == practice_queue.ACTIVE]
+    graduated = [t for t in targets if str(t["state"]) == practice_queue.GRADUATED]
+
+    st.markdown(f"#### Working on ({len(active)} of {utils.MAX_ACTIVE_TARGETS})")
+    st.caption(
+        "Three at most, because a target set you cannot hold in your head while speaking is "
+        "not a target set. Every one of them came from a sound your own recordings kept "
+        "getting flagged on — nothing here is chosen for you from a list of what speakers of "
+        "some language get wrong."
+    )
+    if not active:
+        st.caption("Nothing active — everything promoted so far has graduated.")
+    for target in active:
+        render_target_card(conn, target, still_flagged)
+
+    if graduated:
+        st.markdown("#### Graduated, and still checked")
+        st.caption(
+            "A graduated contrast that is never re-tested is an unverified claim, so each "
+            "one comes back at widening intervals rather than disappearing."
+        )
+        for target in graduated:
+            render_target_card(conn, target, still_flagged)
+
+
+def render_stress_drill(conn: sqlite3.Connection, target: dict[str, Any]) -> None:
+    """A stress item's due action: a drill, not a scored block.
+
+    This is the honest consequence of a real gap rather than a design preference. Azure
+    returns per-syllable accuracy but **no stress marks** — checked against the committed
+    fixtures, where `unpredictable` comes back as five scored syllables and nothing else — so
+    there is no way to ask "which syllable was stressed?" and know the right answer without a
+    pronouncing dictionary or another recording, and a recording is speech-recognition spend
+    that this feature does not make.
+    """
+    evidence = practice_queue.evidence_of(target)
+    word = str(target["item"])
+    syllable = evidence.get("syllable") or ""
+
+    st.markdown(f"### Stress drill: {word}")
+    if syllable:
+        st.markdown(
+            f"The syllable /{syllable}/ keeps scoring well below the rest of the word, which "
+            f"is what a misplaced stress looks like in the data."
+        )
+    st.markdown(
+        f"Say **{word}** three times, clapping once on the stressed syllable. Then say it "
+        f"inside a sentence, keeping the same beat. Listen first — the voices below read it "
+        f"differently from each other, and the stress is the thing they agree on."
+    )
+    for index, voice in enumerate(perception_trainer.VOICES):
+        playback_buttons(conn, word, key_prefix=f"stress-{index}", label=f"{word} ({voice})")
+
+
+def start_block(conn: sqlite3.Connection, target: dict[str, Any], *, review: bool) -> None:
+    """Plan a block, buy the audio it needs, and put it on screen.
+
+    All of the audio is synthesised **up front**, as one batch, rather than a clip per trial:
+    a stall between trials is the thing most likely to make a daily habit stop being daily,
+    and one batch means one visible charge instead of twenty small ones.
+    """
+    evidence = practice_queue.evidence_of(target)
+    expected = str(evidence.get("expected") or "")
+    produced = str(evidence.get("produced") or "")
+    if not expected or not produced:
+        st.error(
+            f"This target has no stored substitution to build a block from, so there is "
+            f"nothing to play. It was promoted before the evidence was recorded.",
+            icon="🧩",
+        )
+        return
+
+    with _DB_LOCK:
+        heard = db.heard_stimuli(conn, str(target["item"]))
+    try:
+        block = perception_trainer.build_block(
+            item=str(target["item"]), expected=expected, produced=produced,
+            heard=heard, review=review,
+        )
+    except perception_trainer.BlockError as exc:
+        st.error(str(exc), icon="🚫")
+        return
+
+    audio, failure = buy_block_audio(conn, block)
+    if failure is not None:
+        icon, message = failure
+        st.error(message, icon=icon)
+        return
+
+    st.session_state[BLOCK_KEY] = {
+        "block": block,
+        "target_id": int(target["id"]),
+        "audio": audio,
+        "index": 0,
+        "answers": [],
+        "revealed": False,
+        "block_id": uuid.uuid4().hex,
+    }
+    st.rerun()
+
+
+def buy_block_audio(
+    conn: sqlite3.Connection, block: Any
+) -> tuple[dict[tuple[str, str], bytes], tuple[str, str] | None]:
+    """Fetch every clip the block needs, from disk where possible and Azure otherwise.
+
+    **The disk lookup happens before the pre-flight and before the meter**, which is the same
+    ordering `play()` depends on and for the same reason: Streamlit re-runs this script on
+    every interaction, so pricing a call ahead of the cache check would climb the meter while
+    nothing was synthesised.
+
+    Plain text at the normal rate, never SSML. The meter charges the payload actually sent and
+    SSML bills its full markup — one eight-character word wrapped in SSML measured 167
+    characters against the word's own 8.
+    """
+    audio: dict[tuple[str, str], bytes] = {}
+    missing: list[tuple[str, str]] = []
+
+    for text, voice in perception_trainer.stimuli(block):
+        stored = tts.cached_audio(voice, text)
+        if stored is not None:
+            audio[(text, voice)] = stored
+        else:
+            missing.append((text, voice))
+
+    if not missing:
+        logger.info("Block audio served entirely from the disk cache; nothing charged.")
+        return audio, None
+
+    characters = sum(len(text) for text, _ in missing)
+    try:
+        budget.preflight_tts(conn, characters * utils.MAX_SYNTHESIS_ATTEMPTS)
+    except budget.BudgetError as exc:
+        return audio, ("💸", str(exc))
+
+    progress = st.progress(0.0, text=f"Preparing {len(missing)} clips…")
+    for done, (text, voice) in enumerate(missing, start=1):
+        attempts_made = 0
+
+        def note_attempt(attempt: int) -> None:
+            nonlocal attempts_made
+            attempts_made = attempt
+
+        try:
+            result = tts.synthesise(text, voice=voice, on_attempt=note_attempt)
+        except utils.ConfigError as exc:
+            progress.empty()
+            return audio, ("🔑", str(exc))
+        except (utils.PermanentError, utils.TransientError, tts.SynthesisError,
+                speech_analyzer.AssessmentError) as exc:
+            if speech_analyzer.is_quota_exhausted(exc):
+                budget.mark_quota_exhausted()
+            if attempts_made:
+                # Reached Azure and failed: the text was still sent and may be charged.
+                db.record_tts_usage(conn, characters=len(text) * attempts_made, voice=voice)
+            progress.empty()
+            logger.error("Block synthesis failed on %r in %s", text, voice, exc_info=True)
+            return audio, ("🔇", utils.redact(str(exc)))
+
+        db.record_tts_usage(
+            conn, characters=result.characters * max(result.attempts, 1), voice=result.voice,
+        )
+        tts.store_audio(voice, text, result.audio)
+        audio[(text, voice)] = result.audio
+        progress.progress(done / len(missing), text=f"Preparing {len(missing)} clips…")
+
+    progress.empty()
+    logger.info("Block audio: %d clips from cache, %d synthesised (%d characters)",
+                len(audio) - len(missing), len(missing), characters)
+    return audio, None
+
+
+def render_block(conn: sqlite3.Connection) -> None:
+    """Run one block: play, choose, score, reveal, next."""
+    state = st.session_state[BLOCK_KEY]
+    block = state["block"]
+    index = int(state["index"])
+    total = len(block.trials)
+
+    st.markdown(f"### {'Spaced review' if block.review else 'Listening block'}: {block.item}")
+
+    if index >= total:
+        finish_block(conn)
+        return
+
+    trial = block.trials[index]
+    st.progress((index) / total, text=f"Trial {index + 1} of {total}")
+
+    audio = state["audio"].get((trial.word, trial.voice))
+    if audio:
+        # Keyed on the trial so Streamlit builds a fresh element each time; re-using one
+        # would leave the previous clip in place and autoplay would not fire again.
+        st.audio(audio, format="audio/wav", autoplay=not state["revealed"])
+
+    if not state["revealed"]:
+        st.markdown("**Which word was that?**")
+        columns = st.columns(len(trial.alternatives))
+        for column, option in zip(columns, trial.alternatives):
+            with column:
+                if st.button(option, key=f"choice-{index}-{option}", width="stretch"):
+                    answer_trial(conn, option)
+                    st.rerun()
+        if st.button("🔁 Play it again", key=f"replay-{index}"):
+            st.rerun()
+    else:
+        correct = state["answers"][-1]
+        if correct:
+            st.success(f"Yes — that was **{trial.word}**.", icon="✅")
+        else:
+            st.error(f"That was **{trial.word}**, not **{trial.other}**.", icon="❌")
+
+        note = phoneme_reference.why_it_matters(block.expected, block.produced)
+        if note:
+            st.caption(note)
+
+        left, right = st.columns(2)
+        other_audio = state["audio"].get((trial.other, trial.voice))
+        with left:
+            st.caption(f"Heard: {trial.word}")
+            if audio:
+                st.audio(audio, format="audio/wav")
+        with right:
+            st.caption(f"The other one: {trial.other}")
+            if other_audio:
+                st.audio(other_audio, format="audio/wav")
+
+        if st.button("Next →", type="primary", key=f"next-{index}"):
+            state["index"] = index + 1
+            state["revealed"] = False
+            st.rerun()
+
+    if st.button("Stop the block", key=f"abandon-{index}"):
+        st.session_state[BLOCK_KEY] = None
+        st.rerun()
+    st.caption(
+        "Stopping keeps the answers you have already given — they are stored as you give "
+        "them — but a part-finished block does not count toward graduating the contrast."
+    )
+
+
+def answer_trial(conn: sqlite3.Connection, chosen: str) -> None:
+    """Record one answer, as it is given.
+
+    Written per trial rather than at the end of the block, so an abandoned block keeps its
+    evidence. Whether it earns a *verdict* is a separate question, decided by
+    `practice_queue` from the trial count — the evidence is kept either way.
+    """
+    state = st.session_state[BLOCK_KEY]
+    block = state["block"]
+    trial = block.trials[int(state["index"])]
+    correct = chosen == trial.word
+
+    state["answers"].append(correct)
+    state["revealed"] = True
+
+    with _DB_LOCK:
+        db.record_trial(
+            conn,
+            block_id=str(state["block_id"]),
+            target_id=int(state["target_id"]),
+            item=block.item,
+            word=trial.word,
+            voice=trial.voice,
+            novel=trial.novel,
+            alternatives=len(trial.alternatives),
+            answered=chosen,
+            correct=correct,
+            review=bool(block.review),
+        )
+
+
+def finish_block(conn: sqlite3.Connection) -> None:
+    """The end of a block: the score, always with its chance floor, then the verdict."""
+    state = st.session_state[BLOCK_KEY]
+    block = state["block"]
+    result = perception_trainer.score(
+        state["answers"], alternatives=block.alternatives,
+        novel=block.novel_count, planned=len(block.trials),
+    )
+
+    st.metric("This block", f"{result.accuracy:.0%}",
+              delta=f"{(result.accuracy - result.chance) * 100:+.0f} pts vs guessing")
+    st.caption(
+        f"{result.correct} of {result.total} right. "
+        f"{perception_trainer.chance_caption(result.alternatives)}"
+    )
+    if not result.above_chance:
+        st.warning(
+            "At or below the chance floor, which means this block says nothing yet about "
+            "whether you can hear the contrast — it is what guessing looks like.",
+            icon="🎲",
+        )
+    st.caption(
+        f"{result.novel} of {result.total} trials used a word-and-voice combination you had "
+        f"never heard before ({result.novel_fraction:.0%}). Graduation counts blocks made "
+        f"mostly of those, because getting familiar clips right is a memory result, not a "
+        f"hearing one."
+    )
+
+    now = datetime.now(timezone.utc)
+    with _DB_LOCK:
+        db.update_target(conn, int(state["target_id"]), last_seen=db.utc_now_iso())
+        target = next(
+            (dict(row) for row in db.targets(conn)
+             if int(row["id"]) == int(state["target_id"])), None
+        )
+        trials = [dict(row) for row in db.trials_for(conn, block.item)]
+
+    if target is not None:
+        decision = practice_queue.grade(
+            target, practice_queue.summarise_blocks(trials)
+        )
+        st.info(decision.reason, icon="🎯")
+        if decision.state != str(target["state"]) or decision.regressed:
+            with _DB_LOCK:
+                db.update_target(
+                    conn, int(target["id"]), state=decision.state,
+                    next_due=practice_queue.next_due(
+                        decision, now=now, kind=str(target["kind"])),
+                    reviews_passed=decision.reviews_passed,
+                )
+
+    if st.button("Done", type="primary", key="finish-block"):
+        st.session_state[BLOCK_KEY] = None
+        st.rerun()
 
 
 def render_practice(conn: sqlite3.Connection, job: "AssessJob | None", running: bool) -> None:
@@ -1603,11 +2187,18 @@ def render() -> None:
     job: AssessJob | None = st.session_state.get("assess_job")
     running = job is not None
 
-    # Two tabs, not two pages: `AppTest.from_file` addresses one script and the bare
+    # Three tabs, not three pages: `AppTest.from_file` addresses one script and the bare
     # `render()` below is the entry point, so `st.navigation`/`pages/` would cost more than
-    # it buys. Note Streamlit executes BOTH tab bodies on every rerun — which is why the
-    # progress view's re-parse is cached rather than recomputed on each of the 0.4 s polls.
-    practice_tab, progress_tab = st.tabs(["Practice", "Progress"])
+    # it buys. Note Streamlit executes EVERY tab body on every rerun — which is why both the
+    # progress view's re-parse and the queue's candidate ranking are cached rather than
+    # recomputed on each of the 0.4 s polls.
+    #
+    # `Today` is first deliberately. Opening the app should answer "what am I doing today?"
+    # rather than present a blank textarea; the textarea is one click away, which is where a
+    # thing you reach for on purpose belongs.
+    today_tab, practice_tab, progress_tab = st.tabs(["Today", "Practice", "Progress"])
+    with today_tab:
+        render_today(conn)
     with practice_tab:
         render_practice(conn, job, running)
     with progress_tab:

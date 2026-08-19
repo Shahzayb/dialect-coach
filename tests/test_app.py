@@ -922,10 +922,13 @@ def seed_attempts(app: AppTest, count: int = 3, *, benchmark: bool = False) -> N
     conn.close()
 
 
-def test_the_page_has_a_practice_tab_and_a_progress_tab(run_app) -> None:
+def test_the_page_has_a_today_a_practice_and_a_progress_tab(run_app) -> None:
+    """Today is first: opening the app should answer "what am I doing today?" rather than
+    present a blank textarea. The textarea is one click away, which is where a thing you
+    reach for on purpose belongs."""
     app = run_app()
     assert not app.exception
-    assert len(app.tabs) == 2
+    assert len(app.tabs) == 3
 
 
 def test_the_progress_tab_says_so_when_there_is_no_history(run_app) -> None:
@@ -1039,3 +1042,129 @@ def test_too_little_speech_shows_no_rhythm_number(run_app, monkeypatch) -> None:
     app = seed_result(run_app(), assessment)
     assert not [m for m in app.metric if m.label == "nPVI"]
     assert any("Not enough connected speech" in c.value for c in app.caption)
+
+
+# --- The Today tab ----------------------------------------------------------
+# The one thing a browser cannot easily prove and a test can: with nothing recorded, the queue
+# offers nothing rather than seeding a plausible-looking target from somewhere.
+#
+# Seeded through the REAL path — two attempts carrying the committed Azure capture — rather
+# than by stubbing the aggregate. AppTest executes app.py as its own module object, so a
+# monkeypatch on the imported `app` here would not reach the running script anyway, and the
+# real path is what needs proving: promotion has to come out of stored attempts.
+
+
+def seed_flagged_history(times: int = 2) -> None:
+    """Record `times` attempts of the captured drill, whose headline fault is /θ/ → /s/."""
+    import json
+
+    payload = json.loads((ROOT / "tests" / "fixtures" /
+                          "sample_azure_response.json").read_text())
+    conn = db.connect()
+    for index in range(times):
+        db.record_attempt(
+            conn, mode=Mode.DRILL, reference_text=REFERENCE,
+            recognised_text=REFERENCE, audio_seconds=12.8,
+            audio_sha256=f"seed-{index}", overall_scores={"pron_score": 83.0},
+            azure_raw=payload, offline=False,
+            created_at=f"2026-08-{10 + index:02d}T00:00:00Z",
+        )
+    conn.close()
+
+
+def test_with_no_history_the_queue_offers_nothing_rather_than_guessing(run_app) -> None:
+    """The cold-start contract. No first language, no default list, no invented target."""
+    app = run_app()
+    assert not app.exception
+    text = " ".join(info.value for info in app.info)
+    assert "promoted from your own assessed attempts" in text
+
+
+def test_one_attempt_is_not_a_pattern(run_app) -> None:
+    """A sound has to recur before it becomes a target — one bad reading is not evidence."""
+    seed_flagged_history(times=1)
+    app = run_app()
+    assert not app.exception
+    conn = db.connect()
+    assert db.targets(conn) == []
+    assert any("recurred often enough" in info.value for info in app.info)
+
+
+def test_a_recurring_substitution_is_promoted_from_the_stored_attempts(run_app) -> None:
+    """Every target has to trace back to a sound the recordings actually flagged."""
+    import practice_queue
+    import progress_view
+
+    seed_flagged_history()
+    app = run_app()
+    assert not app.exception
+
+    conn = db.connect()
+    rows = db.targets(conn)
+    assert rows, "the capture's recurring faults should reach the queue"
+
+    parsed = progress_view.parse_attempts(db.attempt_payloads(conn))
+    offered = {
+        (c.item, c.kind) for c in practice_queue.candidates(
+            progress_view.flagged_phonemes(parsed).to_dict("records"),
+            progress_view.weak_syllables(parsed).to_dict("records"),
+        )
+    }
+    for row in rows:
+        assert (row["item"], row["kind"]) in offered, (
+            f"{row['item']} is on the list without evidence behind it"
+        )
+
+    markdown = " ".join(block.value for block in app.markdown)
+    assert rows[0]["item"] in markdown
+
+
+def test_the_three_slots_go_to_three_different_kinds(run_app) -> None:
+    """Three consonant contrasts would crowd out a vowel gap flagged just as often, and
+    sounds and rhythm are different problems."""
+    seed_flagged_history()
+    run_app()
+    conn = db.connect()
+    kinds = {row["kind"] for row in db.targets(conn)}
+    assert kinds == {"contrast", "vowel", "stress"}
+
+
+def test_a_promoted_target_survives_a_restart(run_app) -> None:
+    """The queue's whole promise: thirty days of use is not thirty first sessions."""
+    seed_flagged_history()
+    run_app()
+
+    import streamlit as st
+
+    st.cache_resource.clear()          # a fresh process would have no connection either
+    conn = db.connect()
+    rows = db.targets(conn)
+    assert rows and rows[0]["state"] == "active"
+    assert rows[0]["next_due"], "a target with no due date is not scheduled"
+
+
+def test_the_block_cannot_be_started_offline(run_app) -> None:
+    """A block is live synthesis by definition; OFFLINE_MODE keeps its absolute meaning."""
+    seed_flagged_history()
+    app = run_app()
+    starts = [button for button in app.button if "Start the block" in button.label]
+    assert starts, "the due block should be offered"
+    assert all(button.disabled for button in starts)
+
+
+def test_the_evidence_and_the_rule_are_both_on_screen(run_app) -> None:
+    """The brief requires promotion and graduation to be visible, not implicit."""
+    seed_flagged_history()
+    app = run_app()
+    rendered = " ".join(block.value for block in app.markdown)
+    assert "flagged in 2 separate attempts" in rendered   # the evidence, with numbers
+    assert "90%" in rendered                              # the rule
+    assert "50%" in rendered                              # and the chance floor beside it
+
+
+def test_the_target_set_is_capped_at_three(run_app) -> None:
+    """A target set you cannot hold in your head while speaking is not a target set."""
+    seed_flagged_history(times=3)
+    run_app()
+    conn = db.connect()
+    assert len(db.targets(conn)) <= utils.MAX_ACTIVE_TARGETS
