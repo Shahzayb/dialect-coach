@@ -6,9 +6,10 @@ Building the app one chunk at a time. The diagnosis is legible and audible, the 
 layer turns it into something to practise, the record-and-assess surface now behaves under
 repeated and impatient clicking, the v0.1.0 code-review findings are fixed, and the scores
 and error metrics for milestone v0.3.0 (#11, #13, #10, pronunciation half of #12) are built
-and verified live. Still open on v0.3.0: the GitHub bookkeeping (split #12's content half to
-v0.12.0, close/re-scope #10, close the milestone) — deliberately left for the user to
-confirm before it's done, not yet actioned. What remains beyond that is Mode C (unscripted).
+and verified live. **Milestone v0.3.0 is closed** — #10, #11, #13 closed with comments
+pointing at what implemented them; #12 split, its content-score half (vocabulary/grammar/
+topic) retitled and moved to v0.12.0 since scripted assessment never returns it. What
+remains is Mode C (unscripted), which is also what unblocks #12's remaining half.
 
 ## Releases
 
