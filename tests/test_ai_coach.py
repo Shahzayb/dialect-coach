@@ -54,6 +54,7 @@ def answer(**overrides) -> str:
             "articulation": "Tongue tip to the top teeth, blow air past it.",
             "minimal_pairs": [{"a": "think", "b": "sink"}],
         }],
+        "delivery_drills": [],
         "stress_and_rhythm": {"issues": ["The first syllable is weak."], "drill": "Clap the stress."},
         "practice_plan": "One minute on think/sink, then read the line again.",
     }

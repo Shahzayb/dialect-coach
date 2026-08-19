@@ -226,18 +226,72 @@ def test_a_clean_attempt_says_so_rather_than_inventing_a_problem() -> None:
 # --- Stress, rhythm and clusters ------------------------------------------------------------------
 
 
-def test_delivery_faults_become_issues_naming_the_words() -> None:
-    """Synthetic: the captured recording came back clean on Break and Intonation."""
-    words = [word("thursday", 88.0, delivery=["UnexpectedBreak"]),
-             word("clouds", 90.0, delivery=["Monotone"])]
+def test_every_delivery_fault_gets_its_own_drill_naming_the_span() -> None:
+    """Synthetic: the captured recording came back clean on Break and Intonation.
+
+    This is issue #9's exit criterion as a unit test — a fault in the data produces advice
+    that names the span, with no key and no network anywhere near it.
+    """
+    words = [word("thursday", 88.0, delivery=["UnexpectedBreak"], break_length=900.0),
+             word("clouds", 90.0, delivery=["Monotone"], monotone_confidence=0.81)]
+    drills = fc.build(assessment(words), Mode.PARAGRAPH).delivery_drills
+
+    assert [d.fault for d in drills] == ["UnexpectedBreak", "Monotone"]
+    paused, flat = drills
+    assert paused.span == ["thursday"]
+    assert "paused" in paused.what_happened.lower() and "thursday" in paused.what_happened
+    assert "BreakLength 900" in paused.what_happened
+    assert "thursday" in paused.drill
+    assert flat.span == ["clouds"]
+    assert "flat" in flat.what_happened.lower() and "clouds" in flat.what_happened
+    assert "SyllablePitchDeltaConfidence" in flat.what_happened and "0.81" in flat.what_happened
+    assert "clouds" in flat.drill
+
+
+def test_the_delivery_sentences_no_longer_double_up_in_stress_and_rhythm() -> None:
+    """Synthetic. They moved into their own section; saying it twice reads as padding."""
+    words = [word("thursday", 88.0, delivery=["UnexpectedBreak"])]
     issues = fc.build(assessment(words), Mode.PARAGRAPH).stress_and_rhythm.issues
-    assert any("paused" in issue.lower() and "thursday" in issue for issue in issues)
-    assert any("flat" in issue.lower() and "clouds" in issue for issue in issues)
+    assert not any("paused" in issue.lower() for issue in issues)
 
 
-def test_every_delivery_fault_azure_reports_has_a_sentence() -> None:
+def test_a_drill_is_something_to_do_rather_than_the_problem_restated() -> None:
+    """Synthetic. The whole point of #9: "Prosody 76.4" already describes the problem."""
+    words = [word("clouds", 90.0, delivery=["Monotone"])]
+    drill = fc.build(assessment(words), Mode.PARAGRAPH).delivery_drills[0]
+    assert drill.drill != drill.what_happened
+    assert any(verb in drill.drill.lower() for verb in ("say", "read", "record", "mark"))
+
+
+def test_a_fault_with_no_template_still_gets_an_entry() -> None:
+    """Synthetic. If Azure starts reporting a fourth fault, it must not land drill-less."""
+    words = [word("clouds", 90.0, delivery=["SomethingNew"])]
+    drills = fc.build(assessment(words), Mode.PARAGRAPH).delivery_drills
+    assert len(drills) == 1
+    assert drills[0].fault == "SomethingNew"
+    assert "clouds" in drills[0].drill and drills[0].drill.strip()
+
+
+def test_a_clean_attempt_gets_no_delivery_drills(drill: sa.Assessment) -> None:
+    """The captured payload. No fault, so nothing to perform — not a reassuring sentence."""
+    assert fc.build(drill, Mode.DRILL).delivery_drills == []
+
+
+def test_the_delivery_drills_are_the_same_bytes_on_a_second_build() -> None:
+    """Synthetic. Nothing in this coach is allowed to be non-deterministic."""
+    words = [word("thursday", 88.0, delivery=["UnexpectedBreak"]),
+             word("clouds", 90.0, delivery=["Monotone"]),
+             word("thunder", 90.0, delivery=["MissingBreak"])]
+    first = fc.build(assessment(words), Mode.PARAGRAPH).model_dump()
+    second = fc.build(assessment(words), Mode.PARAGRAPH).model_dump()
+    assert first == second
+
+
+def test_every_delivery_fault_azure_reports_has_a_sentence_and_a_drill() -> None:
     for fault in ("UnexpectedBreak", "MissingBreak", "Monotone"):
         assert fault in fc._DELIVERY_SENTENCES
+        assert fault in fc._DELIVERY_DRILLS
+        assert "{words}" in fc._DELIVERY_DRILLS[fault], "a drill must name the actual span"
 
 
 def test_a_weak_stressed_syllable_is_called_out(drill: sa.Assessment) -> None:
