@@ -232,7 +232,8 @@ def test_quota_exhaustion_is_a_type_not_a_marker_string() -> None:
 
 
 def word(text: str, accuracy=None, error_type="None", error_source="azure",
-         delivery=None, phonemes=None, syllables=None) -> dict:
+         delivery=None, phonemes=None, syllables=None,
+         break_length=None, monotone_confidence=None) -> dict:
     """One normalised word, hand-built. The captured fixtures carry no delivery faults."""
     return {
         "word": text,
@@ -240,6 +241,9 @@ def word(text: str, accuracy=None, error_type="None", error_source="azure",
         "error_type": error_type,
         "error_source": error_source,
         "delivery_error_types": delivery or [],
+        "prosody_detail": {
+            "break_length": break_length, "monotone_confidence": monotone_confidence,
+        },
         "syllables": syllables or [],
         "phonemes": phonemes or [],
     }
@@ -302,6 +306,106 @@ def test_delivery_faults_are_aggregated_with_the_words_involved() -> None:
 
 def test_a_clean_attempt_has_no_delivery_entries() -> None:
     assert sa.delivery_summary([word("the", 99.0)]) == {}
+
+
+# --- The measurements beside the faults ------------------------------------------------------
+
+
+def test_the_prosody_measurements_are_read_off_the_captured_payload(
+    drill_payload: dict, reference: str
+) -> None:
+    """Proven, not constructed: these two numbers are in the committed capture.
+
+    Every `BreakLength` in it is 0 and every `SyllablePitchDeltaConfidence` is 0.17783079,
+    on words Azure flagged with nothing. That is the whole reason the parser keeps the
+    values regardless of whether a fault was reported, and the reason no unit is claimed
+    for the break length anywhere.
+    """
+    _, _, words = sa.normalise([drill_payload], reference, Mode.DRILL)
+    detail = words[1]["prosody_detail"]
+    assert detail["break_length"] == 0.0
+    assert detail["monotone_confidence"] == pytest.approx(0.17783079)
+    assert all(w["delivery_error_types"] == [] for w in words), (
+        "the capture is clean on Break and Intonation — if this fails the fixture changed"
+    )
+
+
+def test_a_word_with_no_feedback_block_measures_nothing(reference: str) -> None:
+    """Absent is None, never 0.0 — a break of zero and no break reported are not the same."""
+    payload = {
+        "Duration": 10_000_000,
+        "DisplayText": "weather",
+        "NBest": [{
+            "Display": "weather",
+            "PronunciationAssessment": {"AccuracyScore": 80.0, "PronScore": 80.0},
+            "Words": [{
+                "Word": "weather",
+                "PronunciationAssessment": {"AccuracyScore": 70.0, "ErrorType": "None"},
+            }],
+        }],
+    }
+    _, _, words = sa.normalise([payload], reference, Mode.DRILL)
+    assert words[0]["prosody_detail"] == {"break_length": None, "monotone_confidence": None}
+
+
+def test_an_omitted_word_carries_the_key_with_nothing_in_it(reference: str) -> None:
+    """It was never spoken, so there is nothing to measure — but the key is still there."""
+    omitted = sa._omission("thursday")
+    assert omitted["prosody_detail"] == {"break_length": None, "monotone_confidence": None}
+
+
+def test_delivery_faults_carry_the_span_and_its_measurements() -> None:
+    """Synthetic: the captured recording came back clean, so this shape is hand-built."""
+    words = [
+        word("the", 90.0, delivery=["UnexpectedBreak"], break_length=1200.0),
+        word("weather", 88.0, delivery=["UnexpectedBreak"], break_length=800.0),
+        word("today", 95.0, delivery=["Monotone"], monotone_confidence=0.9),
+    ]
+    faults = sa.delivery_faults(words)
+
+    assert [f["fault"] for f in faults] == ["UnexpectedBreak", "Monotone"]
+    unexpected, monotone = faults
+    assert unexpected["words"] == ["the", "weather"]
+    assert unexpected["break_length_max"] == 1200.0
+    assert unexpected["break_length_mean"] == 1000.0
+    assert unexpected["monotone_confidence_mean"] is None, (
+        "BreakLength is reported on the Break block; a pitch number there would be noise"
+    )
+    assert monotone["words"] == ["today"]
+    assert monotone["monotone_confidence_mean"] == 0.9
+    assert monotone["break_length_max"] is None
+
+
+def test_the_monotone_average_ignores_words_that_were_not_flagged() -> None:
+    """Synthetic. Azure reports a pitch confidence on clean words too — the captured
+    fixture reports 0.178 on every one of them. Averaging across the attempt rather than
+    across the span would hand every reader a monotone number for a clean reading."""
+    words = [
+        word("the", 99.0, monotone_confidence=0.1),
+        word("weather", 88.0, delivery=["Monotone"], monotone_confidence=0.9),
+    ]
+    faults = sa.delivery_faults(words)
+    assert len(faults) == 1
+    assert faults[0]["monotone_confidence_mean"] == 0.9
+
+
+def test_delivery_faults_are_ordered_by_span_then_by_precedence() -> None:
+    """Synthetic. Deterministic order matters: this list is rendered straight onto a page."""
+    words = [
+        word("the", 90.0, delivery=["Monotone"]),
+        word("weather", 88.0, delivery=["Monotone"]),
+        word("today", 95.0, delivery=["MissingBreak"]),
+        word("is", 95.0, delivery=["UnexpectedBreak"]),
+    ]
+    faults = [f["fault"] for f in sa.delivery_faults(words)]
+    assert faults == ["Monotone", "UnexpectedBreak", "MissingBreak"], (
+        "two words beats one; between two one-word spans the precedence decides"
+    )
+    assert faults == [f["fault"] for f in sa.delivery_faults(words)]
+
+
+def test_a_clean_attempt_reports_no_delivery_faults() -> None:
+    assert sa.delivery_faults([word("the", 99.0, monotone_confidence=0.2)]) == []
 
 
 def test_mispronounced_words_reads_the_errortype_not_the_accuracy() -> None:

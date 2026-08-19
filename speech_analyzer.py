@@ -429,6 +429,34 @@ def _delivery_error_types(word: dict[str, Any]) -> list[str]:
     return list(dict.fromkeys(found))
 
 
+def _prosody_detail(word: dict[str, Any]) -> dict[str, float | None]:
+    """The numbers Azure reports beside the delivery faults, from the same block.
+
+    `_delivery_error_types` above says *which* fault; this says what was measured where it
+    happened: `Break.BreakLength`, and `Intonation.Monotone.SyllablePitchDeltaConfidence`.
+
+    Kept even when the word carries no fault, because Azure sends them regardless — the
+    committed fixture reports a pitch-delta confidence of 0.178 on words whose
+    `Intonation.ErrorTypes` is empty. Filtering that down to the words that were actually
+    flagged is `delivery_faults`' job, not the parser's.
+
+    **No unit is asserted for `break_length`.** Every value in the committed fixture is 0,
+    and the installed SDK 1.51.1 does not mention the field at all — not in its Python
+    layer and not in the strings of its native libraries (checked, not assumed). So the
+    number is carried and shown under Azure's own field name and nothing here claims it is
+    milliseconds or ticks.
+    """
+    scores = _scores(word)
+    prosody = ((scores.get("Feedback") or word.get("Feedback") or {}).get("Prosody") or {})
+    break_length = (prosody.get("Break") or {}).get("BreakLength")
+    monotone = ((prosody.get("Intonation") or {}).get("Monotone") or {})
+    confidence = monotone.get("SyllablePitchDeltaConfidence")
+    return {
+        "break_length": float(break_length) if isinstance(break_length, (int, float)) else None,
+        "monotone_confidence": float(confidence) if isinstance(confidence, (int, float)) else None,
+    }
+
+
 def _normalise_word(word: dict[str, Any]) -> dict[str, Any]:
     accuracy = _score(word, "AccuracyScore")
     phonemes = []
@@ -455,6 +483,7 @@ def _normalise_word(word: dict[str, Any]) -> dict[str, Any]:
         "error_type": _scores(word).get("ErrorType") or "None",
         "error_source": "azure",
         "delivery_error_types": _delivery_error_types(word),
+        "prosody_detail": _prosody_detail(word),
         "syllables": [
             {"syllable": s.get("Syllable"), "score": _score(s, "AccuracyScore")}
             for s in word.get("Syllables") or []
@@ -530,6 +559,9 @@ def _omission(word: str) -> dict[str, Any]:
         "error_type": "Omission",
         "error_source": "local_diff",
         "delivery_error_types": [],
+        # Present and empty rather than absent: every normalised word has the key, so no
+        # consumer needs a guard for one construction path and not the other.
+        "prosody_detail": {"break_length": None, "monotone_confidence": None},
         "syllables": [],
         "phonemes": [],
     }
@@ -720,4 +752,77 @@ def delivery_summary(words: list[dict[str, Any]]) -> dict[str, list[str]]:
         for fault in word.get("delivery_error_types") or []:
             summary.setdefault(fault, []).append(str(word.get("word") or ""))
     return summary
+
+
+# Which delivery fault to put in front of which, when two damaged the same number of words.
+# A pause dropped into the middle of a phrase breaks the phrase a listener is assembling;
+# two phrases run together makes them assemble the wrong one; a flat phrase is still
+# understood. Ordering by the *measurements* instead would be the obvious thing and is
+# deliberately not done — see `_prosody_detail` on why no meaning is attached to their
+# magnitude.
+FAULT_PRECEDENCE: tuple[str, ...] = ("UnexpectedBreak", "MissingBreak", "Monotone")
+
+# Which measurement belongs to which fault. `BreakLength` is reported on the Break block,
+# so it says nothing about a Monotone span, and quoting it there would be noise dressed as
+# evidence.
+_BREAK_FAULTS = frozenset({"UnexpectedBreak", "MissingBreak"})
+
+
+def _mean(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def delivery_faults(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One entry per delivery fault present: the span, and what Azure measured on it.
+
+    `delivery_summary` answers "which words"; this answers "which words, and what was
+    measured there", which is the form the coaching payload needs — a fault the coach can
+    only name is a fault the learner can only be told about.
+
+    Ordered by how many words the fault damaged, then by `FAULT_PRECEDENCE`. A total
+    order, because a report that reshuffles between two runs on identical input is not
+    deterministic, and this one is rendered straight onto the page.
+
+    The measurements are averaged over **the words carrying that fault only**. Azure
+    reports `SyllablePitchDeltaConfidence` on clean words too, so averaging across the
+    whole attempt would hand every reader a monotone number whether or not anything was
+    flagged.
+    """
+    summary = delivery_summary(words)
+    carriers: dict[str, list[dict[str, Any]]] = {}
+    for word in words:
+        for fault in word.get("delivery_error_types") or []:
+            carriers.setdefault(fault, []).append(word)
+
+    faults: list[dict[str, Any]] = []
+    for fault, span in summary.items():
+        detail = [(w.get("prosody_detail") or {}) for w in carriers.get(fault, [])]
+        breaks = [d["break_length"] for d in detail if d.get("break_length") is not None]
+        pitches = [
+            d["monotone_confidence"] for d in detail if d.get("monotone_confidence") is not None
+        ]
+        entry: dict[str, Any] = {
+            "fault": fault,
+            "words": span,
+            "break_length_max": None,
+            "break_length_mean": None,
+            "monotone_confidence_mean": None,
+        }
+        if fault in _BREAK_FAULTS and breaks:
+            entry["break_length_max"] = round(max(breaks), 1)
+            entry["break_length_mean"] = round(_mean(breaks), 1)
+        if fault == "Monotone" and pitches:
+            entry["monotone_confidence_mean"] = round(_mean(pitches), 3)
+        faults.append(entry)
+
+    def rank(entry: dict[str, Any]) -> tuple[int, int, str]:
+        fault = entry["fault"]
+        precedence = (
+            FAULT_PRECEDENCE.index(fault) if fault in FAULT_PRECEDENCE else len(FAULT_PRECEDENCE)
+        )
+        # The name is the last term so an unrecognised fault Azure adds later still sorts
+        # somewhere fixed rather than wherever the dict happened to put it.
+        return (-len(entry["words"]), precedence, fault)
+
+    return sorted(faults, key=rank)
 
