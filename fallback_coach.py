@@ -151,6 +151,11 @@ def _substitutions(word: dict[str, Any]) -> list[dict[str, Any]]:
                 found[-1] = entry
             else:
                 found[-1]["_index"] = index
+                # The merged entry now stands at `index`, so it inherits that position's
+                # final-cluster status. Without this the kept entry keeps the flag it had
+                # one phoneme earlier, where it could not have been word-final, and the
+                # swallowed-cluster note never fires.
+                found[-1]["final_cluster"] = entry["final_cluster"]
             continue
         found.append(entry)
 
@@ -407,7 +412,12 @@ def _practice_plan(compacted: dict[str, Any], fixes: list[PriorityFix]) -> str:
             "while recording yourself. Compare the two recordings rather than the scores."
         )
 
-    minutes = {1: (4,), 2: (2, 2), 3: (2, 1, 1)}[len(fixes)]
+    # Four minutes split over the fixes, biggest share first, leaving the fifth minute for
+    # the read-through below. Computed rather than tabulated: a lookup keyed on the number
+    # of fixes is a KeyError waiting for the day MAX_PRIORITY_FIXES changes.
+    # Floored at one minute so a large MAX_PRIORITY_FIXES cannot produce a "0 minutes" step.
+    base, extra = divmod(4, len(fixes))
+    minutes = tuple(max(1, base + (1 if i < extra else 0)) for i in range(len(fixes)))
     steps = []
     for index, (fix, allotted) in enumerate(zip(fixes, minutes), start=1):
         pairs = ", ".join(f"{pair.a}/{pair.b}" for pair in fix.minimal_pairs[:3])
@@ -426,6 +436,38 @@ def _practice_plan(compacted: dict[str, Any], fixes: list[PriorityFix]) -> str:
         f"speed, recording it, and listening back for the same sounds."
     )
     return "Five minutes, in this order:\n" + "\n".join(steps)
+
+
+def emergency_report(reason: str) -> CoachingReport:
+    """A valid report for when building the real one raised.
+
+    Constructed from literals only — no Azure data, no reference table, no branching — so
+    this cannot itself be the thing that fails. It exists because "the coach always returns
+    a report" has to hold even when the coach has a bug in it: the scores, the diff and the
+    word cards below are all still correct and worth reading, and losing them to a
+    traceback because one paragraph of advice could not be assembled is the worse outcome.
+    """
+    logger.error("Falling back to the emergency report: %s", reason)
+    return CoachingReport(
+        overall_comment=(
+            "The coaching report could not be built for this attempt. Your scores, the "
+            "script-versus-heard diff and the word-by-word breakdown below are unaffected "
+            "— read those instead."
+        ),
+        priority_fixes=[],
+        stress_and_rhythm=StressAndRhythm(
+            issues=[],
+            drill=(
+                "Read the text once at half speed and once at normal speed, keeping the "
+                "pauses in the same places both times."
+            ),
+        ),
+        practice_plan=(
+            "Five minutes: two minutes reading the text at half speed, one minute on the "
+            "words marked red below, then two minutes reading it at normal speed while "
+            "recording yourself. Compare the two recordings rather than the scores."
+        ),
+    )
 
 
 def build(assessment: Any, mode: Mode) -> CoachingReport:
