@@ -1,0 +1,64 @@
+# Lint, types and the offline test suite, on every push and pull request.
+#
+# THE CONSTRAINT THIS FILE EXISTS UNDER: a CI run must never be able to spend money. Azure
+# STT/TTS minutes and Gemini free-tier calls are not refundable, and a workflow that could
+# reach them would be a standing risk on every commit. That is guaranteed structurally, by
+# four independent layers, any one of which would be enough on its own:
+#
+#   1. This file names no repository secret anywhere — deliberately not even in a comment, so
+#      that `grep -n 'secrets\.' .github/workflows/ci.yml` returning nothing is a real check
+#      and not one this file defeats by describing itself. An unreferenced secret is never
+#      injected into the job environment, so there is nothing here to leak or misuse. The
+#      trigger is `pull_request`, never `pull_request_target` — a fork's pull request could
+#      not reach repository secrets even if one were added later.
+#   2. A CI checkout has no `.env`; it is gitignored and never committed. compose.yaml
+#      declares `env_file: {path: .env, required: false}`, so the container starts with no
+#      AZURE_SPEECH_KEY, no AZURE_SPEECH_REGION and no GEMINI_API_KEY.
+#   3. tests/conftest.py deletes those three variables and forces OFFLINE_MODE=true for every
+#      test, whatever the environment says.
+#   4. tests/conftest.py's `no_network` fixture refuses any non-loopback socket connection.
+#
+# The jobs run inside the project's own image rather than on the runner directly, so CI and
+# `make check` are the same commands against the same pinned dependencies — and the apt list
+# the Azure SDK's native libraries need stays in the Dockerfile, in one place.
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# No job may write anything. Releases are a separate workflow with its own permissions.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: lint, types, offline suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker compose build
+
+      - name: Formatting
+        run: docker compose run --rm app ruff format --check .
+
+      - name: Lint
+        run: docker compose run --rm app ruff check .
+
+      - name: Types
+        run: docker compose run --rm app mypy
+
+      # OFFLINE_MODE is passed on the command rather than as a workflow-level `env:`, because
+      # `docker compose run` does not forward the host environment into the container — a
+      # workflow-level variable would look like a guard and be decorative. conftest forces it
+      # regardless; this makes the intent visible at the point it takes effect.
+      - name: Offline test suite
+        run: docker compose run --rm -e OFFLINE_MODE=true app python -m pytest -q
