@@ -4,8 +4,11 @@
 
 Building the app one chunk at a time. The diagnosis is legible and audible, the coaching
 layer turns it into something to practise, the record-and-assess surface now behaves under
-repeated and impatient clicking, and the v0.1.0 code-review findings are fixed. What remains
-is Mode C (unscripted).
+repeated and impatient clicking, the v0.1.0 code-review findings are fixed, and the scores
+and error metrics for milestone v0.3.0 (#11, #13, #10, pronunciation half of #12) are built
+and verified live. Still open on v0.3.0: the GitHub bookkeeping (split #12's content half to
+v0.12.0, close/re-scope #10, close the milestone) — deliberately left for the user to
+confirm before it's done, not yet actioned. What remains beyond that is Mode C (unscripted).
 
 ## Releases
 
@@ -120,7 +123,19 @@ offline replay returns too fast for a human to click Stop during it, so those ar
 `AppTest` against a job whose thread is held open, and by a fake recognizer whose events fire
 under the test's control. No sleeps, no races, no cost.
 
-`make test` is 293 tests, all offline with no keys and no network.
+**The scores and error metrics (milestone v0.3.0, #11/#13/#10/#12-pronunciation)** are
+banded and surfaced. `render_scores` shows a colour-banded Pronunciation headline plus
+Completeness, then a "Score breakdown" section (Accuracy/Fluency/Prosody as banded bars) —
+banded against Azure's own 0-59/60-79/80-89/90-100 convention (`utils.AzureBand`), not the
+word/phoneme heuristics. `render_error_counts` adds a headline count row (Mispronunciations,
+Unexpected break, Missing break, Monotone) right under it — counts only, since
+`render_delivery` and the flagged-word cards already give the per-word detail. Hovering a
+word in the "Word by word" running text now shows a real tooltip (`word_tooltip_html`) with
+the word's score, then its phoneme symbols and their scores as two aligned rows, replacing
+the old single-line `title=` attribute. Content score (vocabulary/grammar/topic, #12's other
+half) is out of scope — scripted assessment never returns it.
+
+`make test` is 311 tests, all offline with no keys and no network.
 
 Not built: Mode C (unscripted).
 

@@ -697,6 +697,16 @@ def phoneme_pairs(
     return pairs
 
 
+def mispronounced_words(words: list[dict[str, Any]]) -> list[str]:
+    """Words Azure flagged `ErrorType: Mispronunciation`, in reading order.
+
+    A separate count from `is_flagged`/`delivery_summary`: those cover every reason a word
+    might be worth a card (low accuracy, omission, a delivery fault), while this is the one
+    specific miscue kind the headline "Mispronunciations" count in #10/#12 asks for.
+    """
+    return [str(w.get("word") or "") for w in words if w.get("error_type") == "Mispronunciation"]
+
+
 def delivery_summary(words: list[dict[str, Any]]) -> dict[str, list[str]]:
     """Which words carry each delivery fault, in reading order.
 

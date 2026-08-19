@@ -76,6 +76,39 @@ def phoneme_band(score: float | None) -> Band:
     return score_band(score, PHONEME_RED, PHONEME_AMBER)
 
 
+# --- Azure's own score interpretation -----------------------------------------------------
+# Unlike WORD_RED/WORD_AMBER/PHONEME_RED/PHONEME_AMBER above — which are heuristics this
+# project chose — these four cut points (0-59 / 60-79 / 80-89 / 90-100) are Azure's own
+# published convention for pron/accuracy/fluency/prosody scores. Do not merge the two ideas:
+# this band applies only to those four scores, never to a word or phoneme accuracy score.
+AZURE_LOW_CUT = 60.0
+AZURE_FAIR_CUT = 80.0
+AZURE_GOOD_CUT = 90.0
+
+
+class AzureBand(str, Enum):
+    """Azure's own qualitative band for a pron/accuracy/fluency/prosody score."""
+
+    LOW = "low"              # 0-59
+    FAIR = "fair"             # 60-79
+    GOOD = "good"             # 80-89
+    EXCELLENT = "excellent"   # 90-100
+    NONE = "none"             # no score to band — never render as LOW
+
+
+def azure_score_band(score: float | None) -> AzureBand:
+    """Band a pron/accuracy/fluency/prosody score against Azure's own cut points."""
+    if score is None:
+        return AzureBand.NONE
+    if score < AZURE_LOW_CUT:
+        return AzureBand.LOW
+    if score < AZURE_FAIR_CUT:
+        return AzureBand.FAIR
+    if score < AZURE_GOOD_CUT:
+        return AzureBand.GOOD
+    return AzureBand.EXCELLENT
+
+
 # How many times a paid call may be sent before giving up. Named here because the budget
 # guard has to price the worst case (every attempt reaches the provider and is charged),
 # not the lucky case, and the guard and the retry loop must not drift apart.

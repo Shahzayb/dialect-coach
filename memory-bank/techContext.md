@@ -320,3 +320,11 @@ the project, and nothing in the app may assume a host. Practical consequences:
 - **The colour-coded block is built from the aligned word list, not the reference string**,
   because that is what carries the scores — so punctuation and capitalisation are not
   reproduced there. The verbatim text stays visible in the diff panel above it.
+- **Streamlit 1.61.1 exposes no CSS custom properties for its theme anywhere in the DOM.**
+  Checked live: `getComputedStyle(el).getPropertyValue('--text-color')` (and
+  `--secondary-background-color`) return `""` on `body`, `.stApp`, and every
+  `[data-testid]` container tried. A `var(--secondary-background-color, #fallback)` in
+  injected HTML therefore always resolves to the fallback — verified, not assumed, after the
+  per-word phoneme tooltip (`word_tooltip_html`/`colour_coded_html`, #13) needed an opaque
+  background and the obvious "read the live theme" approach silently never engaged. It uses
+  one fixed light card instead, checked to read on both the light and dark theme.
