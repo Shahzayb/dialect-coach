@@ -45,7 +45,8 @@ Three modules, landed 2026-08-18, built in this order deliberately:
   GenAI SDK's schema conversion stays clean) — kept on this side rather than in `ai_coach`
   so the free path never imports the Google SDK. `compact()` reduces a fixture-sized Azure
   response (~39 kB) to ~2 kB of evidence — only flagged words, their substitutions, weak
-  syllables, delivery faults, and the distinct `observed_pairs` — and is shared with
+  syllables, the delivery faults with their measurements as their own section, and the
+  distinct `observed_pairs` — and is shared with
   `ai_coach`, so both coaches read exactly the same facts. Ranking (`_groups`) is worth
   remembering: adjacent phonemes claiming the *same* produced sound are collapsed to the
   worse of the run (Azure's aligner smears one produced sound across two targets — the
@@ -77,6 +78,63 @@ Three modules, landed 2026-08-18, built in this order deliberately:
   fresh call. `OFFLINE_MODE` is refused inside `coach()` itself, before any client is
   built — even an injected one — the same absolute contract `tts.synthesise` enforces on
   its own rather than trusting the caller.
+
+### Delivery coaching — making the prosody score actionable
+
+Landed 2026-08-19 (#9, milestone v0.4.0). Prosody was scored and displayed but could not
+be practised; this turns it into a span plus something to perform, and it is a **section of
+the existing coaching payload**, not a second model call.
+
+- **Where the data is.** Delivery faults are not `ErrorType` values — that field carries
+  only None/Mispronunciation/Omission/Insertion. They live in each word's
+  `PronunciationAssessment.Feedback.Prosody`, under `Break.ErrorTypes` and
+  `Intonation.ErrorTypes`. Beside them sit the measurements
+  `Break.BreakLength` and `Intonation.Monotone.SyllablePitchDeltaConfidence`, which
+  `speech_analyzer._prosody_detail` now reads into every normalised word.
+- **`BreakLength` is in 100-ns ticks, and that was derived, not looked up.** SDK 1.51.1
+  never mentions the field — not in its Python layer, not in the strings of its native
+  libraries. The committed capture holds 0, 200000 and 2000000 in a 9.79-second utterance,
+  so milliseconds would make the largest a 2000-second pause; the tick divisor gives 200 ms
+  and also gives the word `Duration`s in the same payload their sane 0.27–0.41 s. The
+  parser exposes `break_length_ms`, so the coach can say "about 420 ms" rather than quoting
+  a raw field. **An earlier reading of the fixture that said every `BreakLength` is 0 was
+  wrong** and is contradicted by the file; two commit messages on the branch still repeat
+  it.
+- **Azure reports the measurements whether or not it flagged anything.** "thursday" in the
+  capture carries a 200 ms break with `Break.ErrorTypes: ["None"]` — an ordinary pause at a
+  sentence boundary — and the pitch-delta confidence is the same 0.17783079 on every word
+  of the recording. So `speech_analyzer.delivery_faults` averages **only over the words
+  carrying that fault**; averaging across the attempt would give every clean reading a
+  monotone number.
+- **The measurements are deliberately not a sort key.** Faults are ordered by span size and
+  then by `FAULT_PRECEDENCE` (`UnexpectedBreak`, `MissingBreak`, `Monotone`). A longer pause
+  is not automatically the worse fault, and the pitch confidence is constant across the
+  capture, so it would order nothing.
+- **The report shape.** `CoachingReport` gains `delivery_drills: list[DeliveryDrill]`
+  (fault, span, `what_happened`, `drill`), and the delivery sentences moved *out* of
+  `stress_and_rhythm`, which keeps misplaced syllable stress and the overall score. The two
+  render inches apart, so saying it in both read as padding.
+- **The templates live in `fallback_coach`, not the prompt** (`_DELIVERY_DRILLS`,
+  `measurement_note`). That is what makes the feature work with no key at all — the
+  complaint in #9 was a score with nothing to do about it, and a prompt-only answer would
+  have left the keyless path exactly there. `measurement_note` is also what `app.render_delivery`
+  uses, so the coaching section and the evidence panel cannot quote different numbers.
+- **The model is checked differently here than on the fixes.** `ai_coach._checked_drills`
+  drops a drill for a fault Azure never reported, rewrites the span from the payload, and
+  **backfills from the templates** for any reported fault the model skipped or left blank —
+  rather than rejecting the whole report the way an invented *fix* does. An invented fix
+  means the answer is about the wrong recording; a missing drill costs nothing to replace.
+  The result is that "a fault in the data always produces advice" holds on both paths.
+- **`report_from_raw` fills the new section in** when re-reading rows written before it
+  existed (v0.1.0–v0.3.0). Absent means the coach of the day had no delivery section, not
+  that the row is corrupt.
+- **`OFFLINE_FIXTURE`** names which file in `tests/fixtures/` `OFFLINE_MODE` replays,
+  resolved inside that directory and refused if it escapes. It exists for one narrow
+  reason: both captures are clean on Break and Intonation, so without it the delivery
+  coaching could be seen in the test suite and nowhere else.
+  `tests/fixtures/synthetic_delivery_faults.json` is the hand-built payload it selects, and
+  it says so in a `_synthetic` key inside the file — everything else in that directory is
+  verbatim Azure and must stay distinguishable from it.
 
 **Deliberately no Gemini budget guard.** `budget.py` is shaped around Azure's paid tiers; a
 free-tier Gemini key returns 429 rather than billing, which `ai_coach` already treats as

@@ -3,6 +3,15 @@
 Issue #9 ("Optimize the features for `Prosody` too. Currently there's no way to improve it
 or get feedback"), milestone v0.4.0.
 
+> **Corrected during implementation.** The "unit trap" section below is wrong on its facts:
+> `BreakLength` is **not** 0 throughout the committed capture. It takes 0, 200000 and
+> 2000000, and in a 9.79-second utterance only 100-ns ticks — the unit of every other time
+> in that payload — is self-consistent, so 2000000 is 200 ms. The parser exposes
+> `break_length_ms` and the coach says "about 420 ms" rather than quoting a raw field. The
+> *discipline* the section argues for still held; it was applied to
+> `SyllablePitchDeltaConfidence`, which is left as Azure's own unglossed 0-1 number. See
+> `memory-bank/techContext.md`.
+
 ## Context
 
 Prosody is scored and it is shown — `render_scores` puts it in the breakdown as a banded

@@ -4,9 +4,10 @@
 
 Building the app one chunk at a time. The diagnosis is legible and audible, the coaching
 layer turns it into something to practise, the record-and-assess surface now behaves under
-repeated and impatient clicking, the v0.1.0 code-review findings are fixed, and the scores
+repeated and impatient clicking, the v0.1.0 code-review findings are fixed, the scores
 and error metrics for milestone v0.3.0 (#11, #13, #10, pronunciation half of #12) are built
-and verified live. **Milestone v0.3.0 is closed** — #10, #11, #13 closed with comments
+and verified live, and the prosody score now comes with a drill attached (#9, v0.4.0).
+**Milestone v0.3.0 is closed** — #10, #11, #13 closed with comments
 pointing at what implemented them; #12 split, its content-score half (vocabulary/grammar/
 topic) retitled and moved to v0.12.0 since scripted assessment never returns it. What
 remains is Mode C (unscripted), which is also what unblocks #12's remaining half.
@@ -43,6 +44,8 @@ verified before it can be planned. `UNSCRIPTED_TWO_PASS` is defined and priced b
 
 ## Active plan
 
+`plans/2026-08-19_prosody-coaching-payload.md` — code complete; one live recording read
+badly on purpose is still outstanding.
 `plans/2026-08-19_record-assess-defects.md` — complete.
 `plans/2026-08-18_coaching-layer.md` — complete.
 `plans/2026-08-18_legible-audible-diagnosis.md` — complete.
@@ -114,6 +117,27 @@ so the on-screen button still shows as enabled until the *next* rerun — a seco
 before then would have bought a second call. Fixed by moving the spend guard into
 `coaching_for` itself (`already_asked`), not left on the button's `disabled` flag alone.
 
+**The prosody score is actionable (milestone v0.4.0, #9).** Delivery faults —
+`UnexpectedBreak`, `MissingBreak`, `Monotone`, which live under `Feedback.Prosody` and not
+in `ErrorType` — travel to the coach as their own payload section, carrying the span of
+words each one damaged plus what Azure measured there. The report answers with a
+`Delivery` block: the fault in words, the span, what happened, and a drill to perform.
+`fallback_coach` writes those drills from templates, so the feature works with no API key —
+which is the whole point, since "Prosody 76.4" with nothing to do about it was the
+complaint. `ai_coach` asks the model for the same section and backfills from the templates
+for any fault it skips, so a fault in the data always produces advice on both paths.
+
+Verified offline in the browser on 2026-08-19, with no `GEMINI_API_KEY` and
+`OFFLINE_FIXTURE=synthetic_delivery_faults.json`: prosody 54, and a Delivery block naming
+the Monotone span ("stayed, warm, clear") with a drill for it, an UnexpectedBreak span
+("unpredictable, thursday", longest about 420 ms) and a MissingBreak span ("clouds,
+while"). The delivery panel further down quoted the same spans and the same numbers,
+because both read `fallback_coach.measurement_note`.
+
+**`BreakLength` is in 100-ns ticks.** Derived from the committed capture, not from docs —
+SDK 1.51.1 never mentions the field anywhere. See `techContext.md`; an earlier reading that
+called every value 0 was wrong.
+
 **The record-and-assess surface** survives being used impatiently. `Assess` is disabled
 while a request is in flight and a `Stop` button appears beside it for the duration; a
 `↺ Reset` clears the recording, the upload, the text, the preset and the on-screen result;
@@ -143,7 +167,7 @@ the word's score, then its phoneme symbols and their scores as two aligned rows,
 the old single-line `title=` attribute. Content score (vocabulary/grammar/topic, #12's other
 half) is out of scope — scripted assessment never returns it.
 
-`make test` is 311 tests, all offline with no keys and no network.
+`make test` is 345 tests, all offline with no keys and no network.
 
 Not built: Mode C (unscripted).
 
@@ -190,8 +214,12 @@ itself now re-reads both stored shapes, so wiring it up is all that is left). `a
   recording came back as a single utterance in continuous mode, so the real multi-utterance
   path has never run against live data. A longer paragraph recording would close this.
 - The captured recording contains no `UnexpectedBreak` / `MissingBreak` / `Monotone`, so
-  delivery-fault aggregation is covered by a hand-built payload marked synthetic, not by a
-  captured one.
+  delivery-fault aggregation **and the whole delivery-coaching chunk** are covered by a
+  hand-built payload marked synthetic, not by a captured one. Since v0.4.0 that payload is
+  committed as `tests/fixtures/synthetic_delivery_faults.json` and `OFFLINE_FIXTURE`
+  selects it, so the feature can at least be *seen* in the running app. Closing the gap
+  properly needs one live recording read badly on purpose — agreed with the user, not yet
+  taken.
 - The reference text sent to TTS is the *script*, not what was heard, so whole-text
   playback always renders the intended reading. That is the point, but it means a
   paragraph's playback does not line up word-for-word with a recording that omitted words.
