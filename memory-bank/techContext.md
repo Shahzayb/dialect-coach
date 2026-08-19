@@ -2,6 +2,14 @@
 
 ## Architecture
 
+**Every source module lives in `src/`, as flat modules — not a package.** The imports are
+plain (`import utils`), and each runner is told where `src/` is by exactly one mechanism:
+Streamlit takes the entry script's own directory (`streamlit run src/app.py`), pytest takes
+`pythonpath = src` in `pytest.ini`, `scripts/` keep a two-line `sys.path` shim, mypy takes
+`mypy_path`, and ruff takes `src = ["src"]` so isort classifies them as first-party. The
+repo root is deliberately no longer a source root; `tests/` and `scripts/` sit beside `src/`,
+not under it.
+
 A single-page Streamlit app. `app.py` holds UI only and makes no API calls; it orchestrates
 `speech_analyzer` (Azure STT), `tts` (Azure neural TTS), `audio_utils`, `budget`, `db`,
 `utils`, and the coaching layer — `phoneme_reference`, `fallback_coach`, `ai_coach`.
@@ -259,7 +267,80 @@ change or the image has no pytest.
 
 `tests/fixtures/` holds two verbatim Azure responses captured once from a real recording,
 which is what lets parsing, colouring, and coaching be developed without spending quota.
-No lint or type-check setup yet.
+
+### Formatting, linting and types
+
+`make lint` (ruff format --check + ruff check), `make typecheck` (mypy), `make check` (both
+plus `make test`). All three run in the container against the pinned binaries in
+`requirements.txt`, which is the same thing CI runs — a green `make check` is a green CI run.
+
+Both tools are configured in `pyproject.toml`, and **every rule choice there carries its
+reason in a comment beside it**. The ones worth knowing without opening the file:
+
+- **`line-length = 100`, not ruff's default 88.** The prose comments here are hand-wrapped
+  near 96: 2,035 lines exceed 88 and only 23 exceed 100.
+- **`include = ["*.py", "*.pyi"]`.** Ruff also formats Python fenced inside Markdown, which
+  rewrote the code blocks in five `plans/` files on the first run. Those are records of what
+  was intended at the time, not source, and reformatting them falsifies them.
+- **`BLE` is selected because the codebase already wrote for it.** Twelve `except Exception`
+  handlers carried a `# noqa: BLE001` and a sentence saying why that one is deliberate. With
+  BLE unselected, `RUF100` deletes all twelve explanations as dead noqa. Ruff flags only four
+  of the twelve sites, so five keep the noqa and seven keep the sentence as a plain comment.
+- **`ANN` is not selected** — annotations are mypy's job, and mypy says something truer about
+  them. Nor are `T20` (scripts print legitimately), `ARG` (Streamlit callbacks), `TRY`, `N`
+  (`N818` would rename `TierNotAcknowledged`, a public API change), `PTH`, or `D`.
+- **mypy is strict on every module under `src/`, `app.py` included.** The plan budgeted for
+  leaving the UI layer loose; with the dependencies installed it cost ten signature
+  annotations. `tests/` and `scripts/` are checked but not strict — at global strictness they
+  raise 284 findings, almost all of them annotating a test that takes a pytest fixture.
+- **`utils.RowLike`** is a Protocol saying what a row reader actually needs: subscript by
+  column name. `sqlite3.Row` is not a `Mapping` — no `.get`, and it raises `IndexError` where
+  a dict raises `KeyError`, which is why `progress_view.is_shadowed` already caught both.
+  Readers that were annotated `Mapping[str, Any]` were being handed a `Row` anyway.
+- **The Azure and Google SDK boundaries are annotated `Any` explicitly.** Neither ships type
+  information, so `Any` is the whole truth there, and saying it is what lets everything
+  around them be strict.
+- **`warn_return_any` is off for `progress_view` alone.** Altair's builders compose into a
+  `LayerChart | FacetChart` union whose chained methods mypy widens to `Any`; it fires on the
+  six chart builders and nothing else. Altair itself is *not* in the missing-stubs ignore
+  list — it ships `py.typed`. `azure.*`, `pydub.*` and `pandas.*` are.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` on every push and pull request: build the image, then
+`ruff format --check`, `ruff check`, `mypy`, `pytest`. It runs inside the project's own image
+rather than on the runner, so CI and `make check` are the same commands against the same
+pinned dependencies, and the apt list the Azure SDK's native libraries need stays in the
+Dockerfile in one place instead of being duplicated in YAML.
+
+**A CI run is structurally unable to spend money — four independent layers, any one of which
+would be enough on its own:**
+
+1. `ci.yml` names no repository secret anywhere, deliberately not even in a comment, so that
+   `grep -n 'secrets\.' .github/workflows/ci.yml` returning nothing is a real check rather
+   than one the file defeats by describing itself. The trigger is `pull_request`, never
+   `pull_request_target`, so a fork's PR could not reach repository secrets even if one were
+   added later.
+2. A CI checkout has no `.env` — it is gitignored — and `compose.yaml` declares it
+   `required: false`, so the container starts with none of the three credentials.
+3. `tests/conftest.py` deletes those three and forces `OFFLINE_MODE` for every test.
+4. `tests/conftest.py`'s `no_network` fixture patches `socket.socket.connect` to raise on any
+   non-loopback address. This is the layer below `OFFLINE_MODE`: the flag is a decision some
+   future path could forget to make, and a socket that refuses is not a decision. Loopback
+   stays open on purpose — a guard that cries wolf gets switched off.
+   `tests/test_offline_guard.py` asserts the guard fires, because a monkeypatch that stops
+   being applied leaves no trace in a passing run.
+
+`permissions: contents: read` at the workflow level. `.github/workflows/release.yml` is a
+separate file for exactly that reason: publishing needs `contents: write`, and merging them
+would hand every push a permission only a tag push needs. It is the one place a secret is
+referenced, and `GITHUB_TOKEN` is Actions' own repository token — it cannot authenticate to
+Azure or Google, so it cannot spend the quota this project guards.
+
+**There is no Python version matrix, and that is a decision.** #16 asked for 3.11 + 3.12.
+`.python-version`, the Dockerfile and `requirements.txt` all pin 3.12 deliberately (`pydub`
+needs the stdlib `audioop`, removed in 3.13) and nothing here has ever been run on 3.11. A
+matrix would assert support that does not exist.
 
 **Do not verify row counts by opening the database from a second process.** SQLite's WAL
 needs shared-memory coordination that the macOS bind mount does not provide across

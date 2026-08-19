@@ -159,13 +159,32 @@ your configured `DB_PATH`, and spends nothing.
 make test
 ```
 
-Runs offline with no API keys and no network — the suite forces `OFFLINE_MODE` and clears
-the credentials, so it can never turn into a billable call. It works against
-`tests/fixtures/`, two verbatim Azure responses captured once from a real recording. That
-is what lets the parsing, scoring, and colouring layers be developed without spending any
-of the monthly allowance.
+Runs offline with no API keys and no network — the suite forces `OFFLINE_MODE`, clears the
+credentials, and refuses any non-loopback socket connection outright, so it can never turn
+into a billable call. It works against `tests/fixtures/`, two verbatim Azure responses
+captured once from a real recording. That is what lets the parsing, scoring, and colouring
+layers be developed without spending any of the monthly allowance.
 
 Rebuild first (`docker compose build`) if `requirements.txt` changed.
+
+## Checks
+
+```bash
+make check
+```
+
+Formatting, linting, types and the test suite — `make lint`, `make typecheck` and `make test`
+individually. All of them run in the container against the pinned tools in
+`requirements.txt`, which is exactly what CI runs, so a green `make check` is a green CI run.
+`make format` applies the formatter and the safe lint fixes.
+
+Ruff and mypy are configured in `pyproject.toml`, where every rule choice carries the reason
+it was made. mypy is strict on every module under `src/`.
+
+CI runs on every push and pull request and **cannot reach the network or spend quota**: the
+workflow references no secrets, a CI checkout has no `.env`, the suite clears the credentials,
+and the socket guard refuses the connection. Releases are a separate workflow, triggered by a
+`v*` tag, so CI itself stays read-only.
 
 ## Cost
 
