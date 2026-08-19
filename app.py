@@ -451,11 +451,11 @@ def playback_buttons(
     left, right, _ = st.columns([1, 1, 3])
     with left:
         if st.button("🔊 Hear it", key=f"{key_prefix}-normal", disabled=offline,
-                     use_container_width=True):
+                     width="stretch"):
             failure = play(conn, text, slow=False, label=label, source=key_prefix)
     with right:
         if st.button("🐢 Slowly", key=f"{key_prefix}-slow", disabled=offline,
-                     use_container_width=True):
+                     width="stretch"):
             failure = play(conn, text, slow=True, label=label, source=key_prefix)
 
     # Rendered here, outside the columns, so a long message gets the full width instead of
@@ -1122,11 +1122,11 @@ def render() -> None:
     with left:
         assess_clicked = st.button(
             "Assess", type="primary", disabled=running or source is None,
-            use_container_width=True,
+            width="stretch",
         )
     with middle:
         stop_clicked = (
-            st.button("🛑 Stop", use_container_width=True) if running else False
+            st.button("🛑 Stop", width="stretch") if running else False
         )
     with right:
         st.button("↺ Reset", on_click=_reset_form, disabled=running)
@@ -1186,7 +1186,7 @@ def render() -> None:
                     }
                     for r in recent
                 ],
-                hide_index=True, use_container_width=True,
+                hide_index=True, width="stretch",
             )
 
 
