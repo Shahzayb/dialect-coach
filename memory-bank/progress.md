@@ -134,6 +134,13 @@ the Monotone span ("stayed, warm, clear") with a drill for it, an UnexpectedBrea
 while"). The delivery panel further down quoted the same spans and the same numbers,
 because both read `fallback_coach.measurement_note`.
 
+The model path was verified with **one free-tier Gemini call** the same day, through
+`scripts/coach_test.py` with `OFFLINE_FIXTURE=synthetic_delivery_faults.json` — no Azure
+quota, since the script replays a fixture. `gemini-3.6-flash` returned all three faults
+drilled with the spans Azure reported, nothing invented, 3298 tokens in and 742 out, and
+the stored payload re-parsed. Nothing had to be backfilled on that run, so the backfill
+path itself is covered by tests rather than by observation.
+
 **`BreakLength` is in 100-ns ticks.** Derived from the committed capture, not from docs —
 SDK 1.51.1 never mentions the field anywhere. See `techContext.md`; an earlier reading that
 called every value 0 was wrong.
