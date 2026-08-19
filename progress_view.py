@@ -26,6 +26,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import altair as alt
 import pandas as pd
 
+import rhythm
 import speech_analyzer
 import utils
 from utils import Mode
@@ -157,6 +158,21 @@ def is_benchmark(text: str | None) -> bool:
     return bool(text) and benchmark_key(text) == _BENCHMARK_KEY
 
 
+def spoken_attempts(rows: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """Every stored attempt that is somebody actually speaking.
+
+    Filters out the TTS rhythm baseline capture. That row is a real, really-billed assessment
+    and has to stay in the table or the usage meter under-reports what was spent — but it is a
+    synthesiser reading the benchmark passage, and none of this view's questions have an
+    honest answer for it. Left in, it would put a point nobody spoke on the trajectory and let
+    the voice's own weak sounds into "what keeps going wrong".
+
+    Applied at every entry point rather than inside one chart, so the trajectory, the rankings
+    and the last-read date cannot disagree about which attempts exist.
+    """
+    return [row for row in rows if not rhythm.is_baseline_capture(row["reference_text"])]
+
+
 # --- Series and metrics ---------------------------------------------------------------------
 # Mode A and Mode B scores are NOT comparable and must never share a line. Mode B's overall
 # scores come from a duration-weighted merge across utterances (`speech_analyzer._merge_overall`)
@@ -226,7 +242,7 @@ def score_frame(rows: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
     the honest rendering.
     """
     records: list[dict[str, Any]] = []
-    for row in rows:
+    for row in spoken_attempts(rows):
         when = _parse_when(row["created_at"])
         if when is None:
             continue
@@ -310,7 +326,8 @@ def days_since_benchmark(rows: Iterable[Mapping[str, Any]], *, now: datetime | N
     """
     moments = [
         when for when in (
-            _parse_when(row["created_at"]) for row in rows if is_benchmark(row["reference_text"])
+            _parse_when(row["created_at"]) for row in spoken_attempts(rows)
+            if is_benchmark(row["reference_text"])
         ) if when is not None
     ]
     if not moments:
@@ -349,7 +366,7 @@ def parse_attempts(rows: Iterable[Mapping[str, Any]]) -> list[ParsedAttempt]:
     whole view.
     """
     parsed: list[ParsedAttempt] = []
-    for row in rows:
+    for row in spoken_attempts(rows):
         try:
             payload = json.loads(row["azure_raw_json"])
             payloads = payload if isinstance(payload, list) else [payload]

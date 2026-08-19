@@ -16,6 +16,7 @@ import pytest
 
 import db
 import progress_view as pv
+import rhythm
 import speech_analyzer as sa
 import utils
 from utils import Mode
@@ -401,3 +402,43 @@ def test_the_rankings_survive_an_empty_history() -> None:
     assert pv.flagged_words([]).empty
     assert pv.phoneme_chart(pv.flagged_phonemes([])).to_dict()
     assert pv.word_chart(pv.flagged_words([])).to_dict()
+
+
+# --- The TTS baseline capture is not a reading --------------------------------------------------
+
+
+def _capture_row(attempt_id: int = 99) -> dict:
+    """The attempts row `scripts/capture_baseline.py` writes: real spend, synthetic voice."""
+    return {
+        "id": attempt_id,
+        "created_at": "2026-08-19T14:24:09Z",
+        "mode": Mode.PARAGRAPH.value,
+        "reference_text": f"{rhythm.BASELINE_CAPTURE_MARKER} en-US-BrianNeural",
+        "recognised_text": "each morning i read these same words out loud",
+        "pron_score": 92.0, "accuracy": 93.0, "fluency": 90.0,
+        "completeness": 98.0, "prosody": 89.5,
+        "azure_raw_json": "{}",
+    }
+
+
+def test_the_baseline_capture_never_reaches_the_trajectory() -> None:
+    """It scores 92 and would sit at the top of the chart. Nobody spoke it."""
+    frame = pv.score_frame([_capture_row()])
+    assert len(frame) == 0
+
+
+def test_the_baseline_capture_does_not_count_as_reading_the_benchmark() -> None:
+    """Otherwise "benchmark last read today" becomes true of a synthesiser."""
+    assert pv.days_since_benchmark([_capture_row()]) is None
+
+
+def test_the_baseline_capture_is_left_out_of_what_keeps_going_wrong() -> None:
+    """The voice's own weak sounds are not the speaker's practice material."""
+    assert pv.parse_attempts([_capture_row()]) == []
+
+
+def test_spoken_attempts_keeps_everything_else() -> None:
+    """The filter is narrow: only the marked capture row goes."""
+    real = _capture_row(1) | {"reference_text": pv.BENCHMARK_PASSAGE}
+    kept = pv.spoken_attempts([real, _capture_row(2)])
+    assert [row["id"] for row in kept] == [1]

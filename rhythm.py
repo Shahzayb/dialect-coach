@@ -89,6 +89,22 @@ _FRAME_MS = speech_analyzer.FRAME_TICKS / speech_analyzer.TICKS_PER_MS
 
 BASELINE_FIXTURE = speech_analyzer.FIXTURE_DIR / "benchmark_tts_baseline.json"
 
+# Prefixed onto the `reference_text` of the attempts row `scripts/capture_baseline.py` writes.
+#
+# The capture is a real assessment and really costs quota, so it must be recorded — the meter
+# derives from the attempts table and skipping the row would silently under-report the spend.
+# But the text it was assessed against IS the benchmark passage, so without a marker
+# `progress_view.is_benchmark` matches it and the synthesiser's reading is plotted as the
+# user's own: the trajectory gains a point nobody spoke, and "benchmark last read today" is
+# true of a machine. The prefix keeps the row honest about the money and honest about whose
+# voice it was.
+BASELINE_CAPTURE_MARKER = "[tts rhythm baseline capture]"
+
+
+def is_baseline_capture(reference_text: str | None) -> bool:
+    """Whether a stored attempt is the TTS baseline capture rather than a spoken reading."""
+    return bool(reference_text) and reference_text.startswith(BASELINE_CAPTURE_MARKER)
+
 
 @dataclass(frozen=True)
 class Rhythm:

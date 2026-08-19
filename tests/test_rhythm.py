@@ -282,3 +282,24 @@ def test_a_captured_baseline_is_measured_and_keeps_its_provenance(tmp_path, fixt
     assert captured is not None
     assert captured.voice == "en-US-BrianNeural"
     assert captured.rhythm.npvi == pytest.approx(55.85, abs=0.01)
+
+
+# --- Keeping the capture out of the user's own history ------------------------------------------
+# The capture is a real, really-billed assessment of the benchmark passage, so its attempts row
+# has to stay in the table or the usage meter under-reports what was spent. But the voice on it
+# is a synthesiser's. These pin the marker that keeps both facts true at once.
+
+
+def test_the_capture_marker_is_not_mistaken_for_a_benchmark_read() -> None:
+    """The row's reference text must not match the benchmark passage.
+
+    Without this the Progress tab plots the synthesiser's reading on the user's own trajectory
+    and reports the benchmark as read today by a machine.
+    """
+    import progress_view
+
+    marked = f"{rhythm.BASELINE_CAPTURE_MARKER} en-US-BrianNeural"
+    assert rhythm.is_baseline_capture(marked)
+    assert not progress_view.is_benchmark(marked)
+    assert not rhythm.is_baseline_capture(progress_view.BENCHMARK_PASSAGE)
+    assert not rhythm.is_baseline_capture(None)
