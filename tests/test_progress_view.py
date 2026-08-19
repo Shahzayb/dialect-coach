@@ -206,10 +206,23 @@ def spec_layers(frame) -> list[dict]:
     return pv.score_chart(frame).to_dict()["spec"]["layer"]
 
 
-def test_only_the_benchmark_is_drawn_as_a_line() -> None:
+def test_free_practice_is_never_drawn_as_a_line() -> None:
+    """Two line layers now: the cold benchmark and the shadowed one, and nothing else.
+
+    Both are single-mode by construction (a 196-word passage is only ever read in paragraph
+    mode), which is what the rule actually requires — see the structural half below. Free
+    practice, the one series that spans two modes, still gets points and only points.
+    """
     marks = [layer["mark"]["type"] for layer in spec_layers(pv.score_frame(rows({})))]
-    assert marks.count("line") == 1
+    assert marks.count("line") == 2
     assert "point" in marks
+
+
+def test_the_shadowed_series_is_its_own_line() -> None:
+    """A shadowed read must never join the cold trajectory — it is what that is measured against."""
+    spec = json.dumps(spec_layers(pv.score_frame(rows({}))))
+    assert pv.SHADOWED_SERIES in spec
+    assert pv.BENCHMARK_SERIES in spec
 
 
 def test_no_line_layer_encodes_the_mode() -> None:
@@ -621,3 +634,158 @@ def test_the_accuracy_axis_is_pinned_so_noise_cannot_look_like_a_trend() -> None
     frame = pv.perception_frame([_trial("b1", True)] * 4)
     spec = pv.perception_chart(frame).to_dict()
     assert spec["layer"][0]["encoding"]["y"]["scale"]["domain"] == [0, 100]
+
+
+# --- Cold against shadowed ----------------------------------------------------------------------
+# The correctness crux of the shadowing chunk. `is_benchmark` identifies a benchmark read by
+# matching its reference text, so a shadowed read of the benchmark passage would otherwise land
+# on the headline trajectory as though it were cold — inflating the exact line the whole
+# benchmark design exists to keep honest.
+
+
+def test_a_row_without_the_column_reads_as_cold() -> None:
+    """Rows reach these readers from several places. An unknown read belongs on the cold
+    trajectory, where it is visible and can be questioned, not hidden in the assisted series."""
+    assert not pv.is_shadowed({"id": 1})
+
+
+def test_cold_attempts_drops_the_shadowed_ones() -> None:
+    kept = pv.cold_attempts(rows({"shadowed": 0}, {"shadowed": 1}))
+    assert [row["id"] for row in kept] == [1]
+
+
+def test_cold_attempts_still_drops_the_tts_baseline_capture() -> None:
+    """The two exclusions compose rather than replacing one another."""
+    kept = pv.cold_attempts(rows(
+        {"shadowed": 0},
+        {"reference_text": f"{rhythm.BASELINE_CAPTURE_MARKER} en-US-BrianNeural"},
+    ))
+    assert [row["id"] for row in kept] == [1]
+
+
+def test_a_shadowed_benchmark_read_is_not_on_the_headline_series() -> None:
+    frame = pv.score_frame(rows({"shadowed": 0}, {"shadowed": 1}))
+    headline = frame[frame["series"] == pv.BENCHMARK_SERIES]
+    assert set(headline["attempt_id"]) == {1}
+    assisted = frame[frame["series"] == pv.SHADOWED_SERIES]
+    assert set(assisted["attempt_id"]) == {2}
+
+
+def test_a_shadowed_free_practice_read_stays_in_the_cloud() -> None:
+    """The cloud is joined by nothing, so there is no line for it to inflate — the tooltip
+    carries the fact instead of a fourth legend entry."""
+    frame = pv.score_frame(rows({"reference_text": "something else", "shadowed": 1}))
+    assert set(frame["series"]) == {pv.FREE_SERIES}
+    assert bool(frame["shadowed"].iloc[0])
+
+
+def test_the_last_benchmark_read_means_the_last_cold_one() -> None:
+    """A week of shadowing must not report the benchmark as freshly read while the
+    unassisted series quietly went stale."""
+    now = datetime(2026, 7, 10, 8, 0, 0, tzinfo=timezone.utc)
+    both = rows({"created_at": "2026-07-01T08:00:00Z", "shadowed": 0},
+                {"created_at": "2026-07-09T08:00:00Z", "shadowed": 1})
+    assert pv.days_since_benchmark(both, now=now) == 9
+
+
+# --- The pairing ---------------------------------------------------------------------------------
+
+
+def shadow_rows(*records: dict) -> list[dict]:
+    """Attempts on the benchmark passage with controllable fluency, prosody and provenance."""
+    out = []
+    for index, record in enumerate(records, start=1):
+        base = {"id": index, "created_at": f"2026-07-{index:02d}T08:00:00Z",
+                "mode": "paragraph", "reference_text": pv.BENCHMARK_PASSAGE,
+                "pron_score": 80.0, "accuracy": 85.0, "fluency": 70.0, "prosody": 60.0,
+                "shadowed": 0}
+        base.update(record)
+        out.append(base)
+    return out
+
+
+def test_a_shadowed_read_is_paired_with_a_cold_read_of_the_same_passage() -> None:
+    frame = pv.shadow_pairs(shadow_rows(
+        {"fluency": 70.0, "prosody": 60.0},
+        {"fluency": 78.0, "prosody": 69.0, "shadowed": 1},
+    ))
+    deltas = dict(zip(frame["metric"], frame["delta"]))
+    assert deltas == {"Fluency": pytest.approx(8.0), "Prosody": pytest.approx(9.0)}
+
+
+def test_only_fluency_and_prosody_are_compared() -> None:
+    """Shadowing trains delivery, not articulation. A large accuracy delta would more likely
+    be the headphone caveat showing up in the data than a result."""
+    frame = pv.shadow_pairs(shadow_rows({}, {"shadowed": 1}))
+    assert set(frame["metric"]) == {"Fluency", "Prosody"}
+
+
+def test_the_pair_is_the_nearest_cold_read_either_side() -> None:
+    """Requiring the cold read to come first would throw away every pair from the first
+    weeks — exactly the weeks the narrowing question is about."""
+    frame = pv.shadow_pairs(shadow_rows(
+        {"created_at": "2026-07-01T08:00:00Z", "fluency": 50.0},
+        {"created_at": "2026-07-10T08:00:00Z", "fluency": 75.0, "shadowed": 1},
+        {"created_at": "2026-07-11T08:00:00Z", "fluency": 70.0},
+    ))
+    fluency = frame[frame["metric"] == "Fluency"].iloc[0]
+    assert fluency["cold_id"] == 3
+    assert fluency["delta"] == pytest.approx(5.0)
+    assert fluency["days_apart"] == 1
+
+
+def test_a_pair_across_different_passages_is_never_made() -> None:
+    """The whole comparison rests on holding the text still — a delta across two passages
+    measures text difficulty, which is what the benchmark exists to avoid."""
+    frame = pv.shadow_pairs(shadow_rows(
+        {"reference_text": "a different passage entirely"},
+        {"shadowed": 1},
+    ))
+    assert frame.empty
+
+
+def test_a_missing_metric_produces_no_row_rather_than_a_zero() -> None:
+    frame = pv.shadow_pairs(shadow_rows({"prosody": None}, {"shadowed": 1}))
+    assert set(frame["metric"]) == {"Fluency"}
+
+
+def test_a_shadowed_read_with_no_cold_partner_is_reported_not_dropped() -> None:
+    """'Nothing to compare against yet' is the honest day-one state, and an empty panel
+    reads as a broken one."""
+    rows_in = shadow_rows({"shadowed": 1})
+    assert pv.shadow_pairs(rows_in).empty
+    assert pv.unpaired_passages(rows_in) == [pv.BENCHMARK_TITLE]
+
+
+def test_a_paired_passage_is_not_reported_as_unpaired() -> None:
+    assert pv.unpaired_passages(shadow_rows({}, {"shadowed": 1})) == []
+
+
+def test_the_summary_always_carries_the_number_of_pairs() -> None:
+    """Same discipline as the perception trainer's chance floor: a number whose anchor can be
+    dropped will be read without it."""
+    frame = pv.shadow_pairs(shadow_rows({}, {"shadowed": 1}))
+    summary = pv.shadow_summary(frame)
+    assert "1 pair" in summary
+    assert "an observation, not a result" in summary
+
+
+def test_a_summary_with_enough_pairs_drops_the_caveat() -> None:
+    records = []
+    for index in range(pv.MIN_PAIRS_FOR_CLAIM * 2):
+        records.append({"shadowed": index % 2, "fluency": 70.0 + (index % 2) * 5})
+    frame = pv.shadow_pairs(shadow_rows(*records))
+    summary = pv.shadow_summary(frame)
+    assert f"{pv.MIN_PAIRS_FOR_CLAIM} pairs" in summary
+    assert "an observation, not a result" not in summary
+
+
+def test_an_empty_comparison_says_what_is_missing() -> None:
+    assert "no delta to name" in pv.shadow_summary(pv.shadow_pairs([]))
+
+
+def test_the_gap_chart_draws_a_rule_at_zero() -> None:
+    """Zero is where a shadowed read stops being better than a cold one — full transfer."""
+    frame = pv.shadow_pairs(shadow_rows({}, {"shadowed": 1}))
+    spec = json.dumps(pv.shadow_gap_chart(frame).to_dict())
+    assert "rule" in spec

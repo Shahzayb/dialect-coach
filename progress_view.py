@@ -28,6 +28,7 @@ import pandas as pd
 
 import fallback_coach
 import rhythm
+import shadowing
 import speech_analyzer
 import utils
 from utils import Mode
@@ -174,6 +175,43 @@ def spoken_attempts(rows: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]
     return [row for row in rows if not rhythm.is_baseline_capture(row["reference_text"])]
 
 
+def is_shadowed(row: Mapping[str, Any]) -> bool:
+    """Whether this attempt was read along with a synthesised model rather than cold.
+
+    Tolerant of a row that has no such key, in the same spirit as
+    `practice_queue.evidence_of`: rows reach here from several readers and from tests, and an
+    attempt whose provenance cannot be read is an attempt that was not shadowed. Erring that
+    way is the safe direction — it puts an unknown read on the cold trajectory, where it is
+    visible and can be questioned, rather than hiding it in the assisted series.
+    """
+    try:
+        return bool(row["shadowed"])
+    except (KeyError, IndexError, TypeError):
+        return False
+
+
+def cold_attempts(rows: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """Every attempt that is somebody reading the text cold — no model in their ear.
+
+    **The correctness crux of the shadowing chunk.** `is_benchmark` identifies a benchmark
+    read by matching its reference text, so a shadowed read of the benchmark passage would
+    otherwise land on the headline trajectory and on the nPVI series as though it were a cold
+    read — inflating the exact line this whole benchmark design exists to keep honest, and
+    corrupting the rhythm series doubly, since shadowing changes rhythm by construction.
+
+    Applied at every entry point that answers a question about unassisted speech: the score
+    trajectory, the rhythm chart and `days_since_benchmark`. `shadow_pairs` is the one reader
+    that wants both sides and so calls `spoken_attempts` directly.
+
+    What deliberately does NOT filter here: the flagged-phoneme, flagged-word and
+    weak-syllable aggregates. `_tally` counts the attempts a thing appeared in and
+    `practice_queue.candidates` thresholds on that cumulative count, so an assisted read can
+    only ever raise a count, never retire a target early — and a sound still flagged while a
+    model is carrying the read is stronger evidence, not weaker.
+    """
+    return [row for row in spoken_attempts(rows) if not is_shadowed(row)]
+
+
 # --- Series and metrics ---------------------------------------------------------------------
 # Mode A and Mode B scores are NOT comparable and must never share a line. Mode B's overall
 # scores come from a duration-weighted merge across utterances (`speech_analyzer._merge_overall`)
@@ -184,6 +222,12 @@ def spoken_attempts(rows: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]
 #   - free practice is drawn as unconnected points, shaped by mode, so there is no line for
 #     two modes to share.
 BENCHMARK_SERIES = "Benchmark passage"
+# The same passage, read along with a synthesised model. Its own series and never the
+# headline one: a read carried by a model is not evidence about unassisted speech, and
+# merging the two would make the trajectory climb for a reason that is not improvement.
+# Drawn rather than dropped, because **two lines converging is the acceptance test rendered** —
+# the gap is expected to narrow as the shadowed pattern becomes the cold-read pattern.
+SHADOWED_SERIES = "Benchmark, shadowed"
 FREE_SERIES = "Free practice"
 
 MODE_LABELS: Mapping[str, str] = {
@@ -205,7 +249,7 @@ METRICS: tuple[tuple[str, str], ...] = (
 METRIC_ORDER: tuple[str, ...] = tuple(label for _, label in METRICS)
 
 FRAME_COLUMNS: tuple[str, ...] = (
-    "when", "attempt_id", "metric", "value", "series", "mode", "label",
+    "when", "attempt_id", "metric", "value", "series", "mode", "label", "shadowed",
 )
 
 # How much of the reference text the tooltip shows. Enough to tell two free-practice texts
@@ -248,12 +292,21 @@ def score_frame(rows: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
         if when is None:
             continue
         benchmark = is_benchmark(row["reference_text"])
+        shadowed = is_shadowed(row)
+        if benchmark:
+            series = SHADOWED_SERIES if shadowed else BENCHMARK_SERIES
+        else:
+            # A shadowed free-practice read stays in the cloud rather than earning a fourth
+            # series. The cloud is context only and is joined by nothing, so there is no line
+            # for it to inflate; the tooltip carries the fact instead of a legend entry.
+            series = FREE_SERIES
         shared = {
             "when": when,
             "attempt_id": int(row["id"]),
-            "series": BENCHMARK_SERIES if benchmark else FREE_SERIES,
+            "series": series,
             "mode": MODE_LABELS.get(str(row["mode"]), str(row["mode"])),
             "label": _label(row["reference_text"], benchmark),
+            "shadowed": shadowed,
         }
         for column, metric in METRICS:
             value = row[column]
@@ -296,7 +349,8 @@ def score_chart(frame: pd.DataFrame) -> alt.Chart:
         tooltip=[alt.Tooltip("when:T", title="When"), alt.Tooltip("mode:N", title="Mode"),
                  alt.Tooltip("metric:N", title="Metric"),
                  alt.Tooltip("value:Q", title="Score", format=".1f"),
-                 alt.Tooltip("label:N", title="Text")],
+                 alt.Tooltip("label:N", title="Text"),
+                 alt.Tooltip("shadowed:N", title="Shadowed")],
     )
 
     # The benchmark: the only layer with a line mark, and it encodes no mode at all — it
@@ -312,7 +366,23 @@ def score_chart(frame: pd.DataFrame) -> alt.Chart:
                  alt.Tooltip("label:N", title="Text")],
     )
 
-    return alt.layer(cloud, benchmark).properties(height=130).facet(
+    # The same passage read along with the model. Dashed, and in its own colour, because it is
+    # NOT the trajectory — it is what the trajectory is being compared against. The two lines
+    # converging over weeks is the whole claim shadowing makes; if they stay apart, the model
+    # is a crutch that carries the read and puts nothing down, and that is a finding to report
+    # rather than a defect to hide.
+    shadowed = base.transform_filter(
+        alt.datum.series == SHADOWED_SERIES
+    ).mark_line(point=True, strokeWidth=2, strokeDash=[5, 3], color="#c46b1c").encode(
+        x=x,
+        y=y,
+        tooltip=[alt.Tooltip("when:T", title="When"),
+                 alt.Tooltip("metric:N", title="Metric"),
+                 alt.Tooltip("value:Q", title="Score", format=".1f"),
+                 alt.Tooltip("label:N", title="Text")],
+    )
+
+    return alt.layer(cloud, benchmark, shadowed).properties(height=130).facet(
         row=alt.Row("metric:N", title=None, sort=list(METRIC_ORDER),
                     header=alt.Header(labelFontWeight="bold", labelAnchor="start")),
     ).properties(title="Scores over time").resolve_scale(y="shared")
@@ -338,10 +408,17 @@ def rhythm_frame(parsed: Sequence[ParsedAttempt]) -> pd.DataFrame:
     An attempt with too little connected speech to measure produces no row — never a zero.
     Same rule as `score_frame` and for the same reason: a gap is honest, a zero invents a
     collapse into perfectly even syllables that nobody has ever produced.
+
+    **Shadowed reads are excluded outright**, with no series of their own. Every other chart
+    can afford to draw the assisted version beside the unassisted one, but not this one: a
+    shadowed read's rhythm is largely the synthesiser's, so its nPVI would be a measurement of
+    `benchmark_tts_baseline.json` taking a detour through a human — and the baseline is
+    already drawn on this chart as the fixed point. Two lines converging on it would mean
+    nothing at all.
     """
     records: list[dict[str, Any]] = []
     for attempt in parsed:
-        if not attempt.benchmark:
+        if not attempt.benchmark or attempt.shadowed:
             continue
         when = _parse_when(attempt.created_at)
         if when is None:
@@ -395,20 +472,218 @@ def rhythm_chart(frame: pd.DataFrame, baseline: float | None = None) -> alt.Char
 
 def days_since_benchmark(rows: Iterable[Mapping[str, Any]], *, now: datetime | None = None
                          ) -> int | None:
-    """Whole days since the benchmark passage was last read, or None if it never has been.
+    """Whole days since the benchmark passage was last read **cold**, or None if it never has.
 
     Stated as a fact, not as a nudge: nothing here decides the passage is due. The cadence
     is the user's discipline, and an app that nags about it would be gamification.
+
+    Cold reads only, because a shadowed read is not the thing this sentence claims happened.
+    Counting one would let a week of shadowing report the benchmark as freshly read while the
+    unassisted series — the one the whole view is about — quietly went stale.
     """
     moments = [
         when for when in (
-            _parse_when(row["created_at"]) for row in spoken_attempts(rows)
+            _parse_when(row["created_at"]) for row in cold_attempts(rows)
             if is_benchmark(row["reference_text"])
         ) if when is not None
     ]
     if not moments:
         return None
     return max(0, ((now or datetime.now(timezone.utc)) - max(moments)).days)
+
+
+# --- Shadowed against cold --------------------------------------------------------------------
+# The acceptance test the shadowing chunk carries, and it is free: both reads are already
+# ordinary stored attempts, so the comparison costs nothing beyond the reads themselves.
+#
+# What it is expected to show, written down BEFORE the data existed so the outcome is a
+# finding rather than a retrofit:
+#   1. A shadowed read should score higher on fluency and prosody than a cold read of the
+#      same passage.
+#   2. That gap should NARROW over weeks, as the shadowed pattern becomes the cold-read
+#      pattern. That narrowing is transfer, and transfer is the only thing that makes the
+#      practice worth the minutes.
+#   3. If the gap never narrows, the practice is not transferring and the design is wrong —
+#      the model is a crutch that carries the read and puts nothing down. That reading is
+#      stated on the surface, not explained away.
+#
+# Accuracy and pronunciation are deliberately not compared. Shadowing trains delivery, not
+# articulation, so a large accuracy delta would more likely be the headphone caveat showing
+# up in the data than a result.
+
+SHADOW_METRICS: tuple[tuple[str, str], ...] = (
+    ("fluency", "Fluency"),
+    ("prosody", "Prosody"),
+)
+
+SHADOW_COLUMNS: tuple[str, ...] = (
+    "when", "passage", "metric", "shadowed_score", "cold_score", "delta", "days_apart",
+    "shadowed_id", "cold_id",
+)
+
+
+def _pair_partner(
+    shadowed_when: datetime, cold: Sequence[tuple[datetime, Mapping[str, Any]]]
+) -> tuple[datetime, Mapping[str, Any]] | None:
+    """The cold read nearest in time to a shadowed one. Ties go to the earlier read.
+
+    Nearest either side, not the most recent one before it. Requiring precedence would throw
+    away every pair from the first weeks — exactly the weeks the narrowing question is about —
+    and the question a pair answers is "at this point in training, how much does the model
+    carry?", which the closest read in either direction answers best. How far apart they
+    actually were travels with the row rather than being hidden, so a pair straddling two
+    months is visible as the weak evidence it is.
+    """
+    if not cold:
+        return None
+    return min(cold, key=lambda item: (abs(item[0] - shadowed_when), item[0]))
+
+
+def shadow_pairs(rows: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
+    """Each shadowed read set against the nearest cold read of the same passage.
+
+    Long form, one row per (pair x metric), the same shape `score_frame` uses. A metric
+    missing on either side produces no row for that metric — never a zero, and never a delta
+    computed against a blank.
+    """
+    everything = spoken_attempts(rows)
+    by_passage: dict[str, list[tuple[datetime, Mapping[str, Any]]]] = {}
+    shadowed: list[tuple[datetime, Mapping[str, Any]]] = []
+
+    for row in everything:
+        when = _parse_when(row["created_at"])
+        if when is None:
+            continue
+        key = shadowing.passage_key(row["reference_text"])
+        if not key:
+            continue
+        if is_shadowed(row):
+            shadowed.append((when, row))
+        else:
+            by_passage.setdefault(key, []).append((when, row))
+
+    records: list[dict[str, Any]] = []
+    for when, row in sorted(shadowed, key=lambda item: item[0]):
+        key = shadowing.passage_key(row["reference_text"])
+        partner = _pair_partner(when, by_passage.get(key, []))
+        if partner is None:
+            # No cold read of this passage at all. Reported by `unpaired_passages` rather than
+            # dropped silently — "nothing to compare against yet" is the honest day-one state
+            # and the user has to be able to see it, or an empty panel reads as a broken one.
+            continue
+        cold_when, cold_row = partner
+        for column, metric in SHADOW_METRICS:
+            here, there = row[column], cold_row[column]
+            if here is None or there is None:
+                continue
+            records.append({
+                "when": when,
+                "passage": _label(row["reference_text"], is_benchmark(row["reference_text"])),
+                "metric": metric,
+                "shadowed_score": float(here),
+                "cold_score": float(there),
+                "delta": float(here) - float(there),
+                "days_apart": abs((when - cold_when).days),
+                "shadowed_id": int(row["id"]),
+                "cold_id": int(cold_row["id"]),
+            })
+
+    if not records:
+        return pd.DataFrame({name: pd.Series(dtype="object") for name in SHADOW_COLUMNS})
+    return pd.DataFrame.from_records(records)[list(SHADOW_COLUMNS)]
+
+
+def unpaired_passages(rows: Iterable[Mapping[str, Any]]) -> list[str]:
+    """Passages shadowed but never read cold, so their comparison has nothing to stand on."""
+    everything = spoken_attempts(rows)
+    cold_keys = {
+        shadowing.passage_key(row["reference_text"]) for row in everything
+        if not is_shadowed(row)
+    }
+    missing: dict[str, str] = {}
+    for row in everything:
+        if not is_shadowed(row):
+            continue
+        key = shadowing.passage_key(row["reference_text"])
+        if key and key not in cold_keys:
+            missing[key] = _label(
+                row["reference_text"], is_benchmark(row["reference_text"])
+            )
+    return list(missing.values())
+
+
+# Below this many pairs a delta is an observation, not a result, and the sentence has to say
+# so. Same discipline as the perception trainer's chance floor: a number whose anchor can be
+# dropped will be read without it.
+MIN_PAIRS_FOR_CLAIM = 3
+
+
+def shadow_summary(frame: pd.DataFrame) -> str:
+    """The delta named in a sentence, ALWAYS beside the number of pairs it rests on.
+
+    One definition, so the count cannot be dropped from one of the places the delta appears.
+    "+6.2 fluency" from a single pair and from twenty pairs are different claims, and only one
+    of them is a claim at all.
+    """
+    if frame.empty:
+        return (
+            "No shadowed read has a cold read of the same passage to sit against yet, so "
+            "there is no delta to name. Read a passage cold as well as shadowed and this "
+            "fills in."
+        )
+
+    parts: list[str] = []
+    for _, metric in SHADOW_METRICS:
+        rows = frame[frame["metric"] == metric]
+        if rows.empty:
+            continue
+        parts.append(f"**{metric} {rows['delta'].mean():+.1f}**")
+
+    pairs = int(frame[["shadowed_id", "cold_id"]].drop_duplicates().shape[0])
+    sentence = (
+        f"Shadowed reads score {' and '.join(parts)} against a cold read of the same "
+        f"passage, across {pairs} pair{'' if pairs == 1 else 's'}."
+    )
+    if pairs < MIN_PAIRS_FOR_CLAIM:
+        sentence += (
+            f" That is an observation, not a result — {MIN_PAIRS_FOR_CLAIM} pairs is the "
+            f"least this view will call a pattern."
+        )
+    return sentence
+
+
+def shadow_gap_chart(frame: pd.DataFrame) -> alt.Chart:
+    """The gap over time: does the model still carry the read as much as it used to?
+
+    The y axis is a DELTA, so it is centred on zero with a rule drawn there rather than pinned
+    to 0-100 the way the score chart is. Zero is the interesting line: it is where a shadowed
+    read stops being better than a cold one, which is what full transfer looks like. A
+    trajectory falling toward it is the claim being met; a flat one is the claim failing, and
+    the caption above it says so in as many words.
+    """
+    base = alt.Chart(frame)
+    # Drawn from `frame` with a constant datum rather than from a one-row frame of its own:
+    # a facet needs a single top-level data source, and a second one makes altair refuse the
+    # whole chart rather than quietly drawing the rule in the wrong place.
+    zero = base.mark_rule(strokeDash=[4, 4], color="#8a8a8a").encode(y=alt.datum(0))
+
+    points = base.mark_line(point=True, strokeWidth=2, color="#c46b1c").encode(
+        x=alt.X("when:T", title=None),
+        y=alt.Y("delta:Q", title=None, axis=alt.Axis(tickCount=5)),
+        tooltip=[alt.Tooltip("when:T", title="When"),
+                 alt.Tooltip("metric:N", title="Metric"),
+                 alt.Tooltip("shadowed_score:Q", title="Shadowed", format=".1f"),
+                 alt.Tooltip("cold_score:Q", title="Cold", format=".1f"),
+                 alt.Tooltip("delta:Q", title="Gap", format="+.1f"),
+                 alt.Tooltip("days_apart:Q", title="Days between the two reads"),
+                 alt.Tooltip("passage:N", title="Passage")],
+    )
+
+    return alt.layer(zero, points).properties(height=130).facet(
+        row=alt.Row("metric:N", title=None,
+                    sort=[label for _, label in SHADOW_METRICS],
+                    header=alt.Header(labelFontWeight="bold", labelAnchor="start")),
+    ).properties(title="Shadowed minus cold, over time").resolve_scale(y="shared")
 
 
 # --- What keeps going wrong -----------------------------------------------------------------
@@ -428,6 +703,11 @@ class ParsedAttempt:
     reference_text: str
     benchmark: bool
     words: list[dict[str, Any]]
+    # Whether a synthesised model was playing while this was recorded. Carried rather than
+    # filtered out at the source because the two consumers want different things: the rhythm
+    # chart must exclude it (shadowing changes rhythm by construction) while the flagged
+    # aggregates deliberately keep it (see `cold_attempts`).
+    shadowed: bool = False
 
 
 def parse_attempts(rows: Iterable[Mapping[str, Any]]) -> list[ParsedAttempt]:
@@ -460,6 +740,7 @@ def parse_attempts(rows: Iterable[Mapping[str, Any]]) -> list[ParsedAttempt]:
             reference_text=reference_text,
             benchmark=is_benchmark(reference_text),
             words=words,
+            shadowed=is_shadowed(row),
         ))
     return parsed
 

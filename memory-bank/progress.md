@@ -15,6 +15,12 @@ High Variability Phonetic Training, and a practice queue that persists a small t
 opening the app answers "what am I doing today?" instead of showing a blank textarea. That
 closes the gap the brief opened with — every earlier chunk explained the problem better, and
 this is the first one that does something about it.
+**The app now practises against a model in real time (v0.8.0)** — shadowing, with a
+**pre-registered acceptance test**: a shadowed read should beat a cold read of the same
+passage on fluency and prosody, and that gap should **narrow** over weeks as the shadowed
+pattern becomes the cold-read pattern. If it never narrows, the practice is not transferring
+and the design is wrong. Written down before the data existed, and stated on the comparison
+surface itself, so that outcome is a finding rather than something explained away.
 **Milestone v0.3.0 is closed** — #10, #11, #13 closed with comments
 pointing at what implemented them; #12 split, its content-score half (vocabulary/grammar/
 topic) retitled and moved to v0.12.0 since scripted assessment never returns it. What
@@ -61,21 +67,28 @@ below still open, on the user's explicit instruction (fix-after rather than fix-
 
 ## Next concrete step
 
-**Read the benchmark passage.** The progress view ships with its headline series empty —
-that is not a defect, it is the first day. Four or five reads spread over a month are what
-make the chart worth looking at, and the first one also settles whether 196 words really
-lands inside 60-90 seconds at an actual reading pace (the attempt's own `audio_seconds`
-says; the TTS baseline took 61.8 s, and a human reads it slower). Until then the only thing
-on screen is the free-practice cloud, which is exactly the thing that cannot be read as
-progress.
+**Read the benchmark passage — cold, and then shadowed.** The progress view ships with its
+headline series empty — that is not a defect, it is the first day. Four or five reads spread
+over a month are what make the chart worth looking at, and the first one also settles whether
+196 words really lands inside 60-90 seconds at an actual reading pace (the attempt's own
+`audio_seconds` says; the TTS baseline took 61.8 s, and a human reads it slower). Until then
+the only thing on screen is the free-practice cloud, which is exactly the thing that cannot be
+read as progress.
 
-Three things now depend on it rather than one. The rhythm chart plots benchmark reads only,
+Four things now depend on it rather than one. The rhythm chart plots benchmark reads only,
 because nPVI moves with the text as much as with the speaker, and the first read is the first
 number that can be set against the TTS baseline's 58.45. **The practice queue is the third,
 and it is the one that changes what a read is for**: targets are promoted from sounds flagged
 across separate attempts, so until there are real attempts the queue has nothing to schedule
 and the Today tab correctly offers nothing. Reading the passage is now what starts the whole
 loop, not only what fills a chart.
+
+**Shadowing is the fourth, and it needs the cold read specifically.** A shadowed read with
+nothing to sit against says nothing at all — the comparison surface correctly reports "no cold
+read of this passage yet" rather than inventing a partner. So the order matters: read it cold
+first, then shadow it on headphones, and the first honest pair exists. That pair is also the
+first real test of the pre-registered finding above, and of whether the recording survives the
+press-record-then-press-play sequence in a real browser, which no test can answer.
 
 **Then do some blocks.** The trainer has been run, not used. The graduation rule (90% across
 two completed blocks) has never fired on real listening, the spaced-review schedule has never
@@ -91,6 +104,14 @@ verified before it can be planned. `UNSCRIPTED_TWO_PASS` is defined and priced b
 `budget.passes_for` but unread by any recognition code yet.
 
 ## Active plan
+
+`plans/2026-08-19_shadowing-practice-flow.md` — **built and complete offline; the live half is
+outstanding and cannot be closed without a human at a microphone.** Open as
+[PR #27](https://github.com/Shahzayb/dialect-coach/pull/27) with the v0.8.0 milestone attached,
+version bumped to 0.8.0 — **not yet merged, tagged or released.** 632 tests and the whole
+surface driven in the browser, but no real shadowed read exists yet, so the acceptance test it
+carries has no data. Unlike every earlier chunk's deferred check, this one is not just a
+calendar item — nothing in the repository can answer it.
 
 `plans/2026-08-19_perception-trainer-practice-queue.md` — complete. The live block was run
 against real Azure and asserted against the meter, so the exit criteria are met rather than
@@ -323,6 +344,96 @@ a day is a habit anyone keeps, and whether the perception gain shows up in the A
 all, are questions only weeks of real blocks answer — the same shape as the benchmark's 30-day
 check. The graduation rule (90% across two blocks) has never fired on real listening.
 
+**Practice against a model, in real time (milestone v0.8.0).** Shadowing: press record,
+press play, and speak **with** a synthesised reading of the passage. The read is then assessed
+as an ordinary Mode B attempt — nothing in the analysis pipeline changed — and tagged
+`shadowed`, so a shadowed read and a cold read of the same passage can be set side by side
+with their fluency and prosody delta named. A second mode, **echo** (per-sentence clips with a
+silence matched to each clip's own duration), is a warm-up and is deliberately never assessed:
+its recording would pause between every phrase, so Azure would mark the delivery down for a gap
+the format put there.
+
+The feature carries its own acceptance test and the test is free, because both reads are
+already stored attempts. **It is pre-registered**, in `progress_view`'s section header and in
+the plan file, so the outcome is a finding rather than a retrofit:
+
+1. A shadowed read should score higher on fluency and prosody than a cold read of the same
+   passage.
+2. **That gap should narrow over weeks**, as the shadowed pattern becomes the cold-read
+   pattern. The narrowing is transfer, and transfer is the only thing that makes the practice
+   worth the minutes.
+3. **If the gap never narrows, the practice is not transferring and the design is wrong** — the
+   model is a crutch that carries the read and puts nothing down. The comparison surface says
+   so in as many words rather than leaving it to be explained away later.
+
+Verified offline, no keys and no network: `make test` is **632 tests** (up from 556). The whole
+surface was driven in the browser on the seeded demo, both themes — the shadow card is offered
+on Today with no history at all (it is the one practice here that needs none), the session
+renders in place the way a listening block does, "Prepare the model" is disabled under
+`OFFLINE_MODE` with the reason, echo mode names its 14 phrases and offers no recorder at all,
+and the comparison names `Fluency +7.7` and `Prosody +7.3` **beside its four pairs** with the
+gap chart converging on zero. The browser check caught one thing the tests could not: a dashed
+orange line with no legend entry reads as a second trajectory, which is the one thing it must
+not be taken for, so a caption now says what it is.
+
+**Measured live against Azure on 2026-08-19, and the meter is the assertion** — same
+discipline as v0.7.0, on a database and a month that both started at zero, so every charge is
+attributable:
+
+- The benchmark model clip charged **exactly one `tts_usage` row of 975 characters**, the
+  passage's own length, and came back as **61.775 s of audio** — the committed TTS baseline
+  says 61.8 s, so the arithmetic the 180-second duration ceiling was chosen on is right.
+- Leaving the session and preparing again charged **nothing**: *"Shadow audio served entirely
+  from the disk cache; nothing charged."*
+- The echo track needed **14 clips and charged 959 characters**, which is
+  `sum(len(p) for p in phrases(BENCHMARK_PASSAGE))` exactly — one row per clip, none
+  double-charged — and produced a **129.15 s** track against the 129.2 s the gap rule predicts.
+- Switching back to speak-along charged nothing; 15 clips on disk, 15 rows, meter unmoved.
+- **The layout constraint holds in a real browser**: the model player has `autoplay=false` and
+  native controls, the recorder sits after it, and there are **zero buttons between them**, so
+  nothing can trigger a rerun between pressing record and pressing play.
+- **Echo mode renders no recorder at all** — the Today tab panel held 0 recorders and 1 audio
+  element, so an echo take cannot be submitted even by accident.
+- On a completely empty database the queue correctly offers nothing while **shadowing is still
+  offered**, which is the branch that matters: it is the one practice here that needs no history.
+- Total spend for the whole exercise: **1,934 TTS characters** of 500,000, and **no STT at all**.
+
+**The first real shadowed read was done on 2026-08-19, and it found two defects the whole
+offline suite had missed.** Both came from the same root: **two surfaces can now start an
+assessment, and Streamlit executes every tab body on every rerun.**
+
+- **`StreamlitDuplicateElementKey`, on the real read.** `last_key` is a single slot, so the
+  Practice tab rendered the same result underneath the shadow surface — and `render_result`
+  derives its widget keys from the attempt, so the second render *collided with the first* and
+  blew up the page rather than merely looking odd. A `result_owner` slot now says which surface
+  produced the result; each renders only its own. The regression test reproduces the original
+  error with the guard removed, which is the only way to know a regression test works.
+- **A queue holding nothing but a shadowing passage read as a full one.** With one attempt and
+  nothing promoted, the shadow row made `targets` non-empty, so Today answered "what am I doing
+  today?" with *"nothing due, they are all on the review schedule"* and captioned the empty list
+  *"everything promoted so far has graduated"*. Both false. The empty-state check now keys on
+  `practice_queue.promotable`, the same predicate that stops a shadow row eating one of the
+  three slots.
+
+**The lesson worth keeping: a second surface that can start the same job is not a UI change, it
+is a change to who owns the single result slot.** Neither defect is reachable by any test that
+exercises one surface at a time, and both appeared on the first real use.
+
+The read itself: 66.5 s, pronunciation 84.1, accuracy 95.3, fluency 87.2, prosody 69.9, stored
+`offline = 0` and tagged `shadowed`, with the shadow target created and due again three days
+later — so `record_shadow_session` fired exactly once, as designed. Live spend for everything
+above: **66 s of 18,000 STT seconds and 6,283 of 500,000 TTS characters.**
+
+**What this still does not prove.** *There is no cold read of the benchmark passage yet*, so
+the comparison correctly renders its day-one state — "no shadowed read has a cold read of the
+same passage to sit against yet" — and the pre-registered finding above has **no data at all**.
+One shadowed read is not a trend and cannot be: the whole claim is about a gap narrowing over
+weeks. The seeded demo's gap was *written* to narrow because that is the shape the design predicts —
+seeding the failure shape would have demoed a broken feature, but it means the demo is an
+illustration and not evidence. Whether a real shadowed read beats a real cold one, and whether
+the gap really closes, needs weeks of real reads on headphones. Same shape as the benchmark's
+30-day check and the perception trainer's "has been run, not used".
+
 ## Known issues
 
 **The 8 code-review findings from 2026-08-18 are all fixed** (2026-08-19, in the
@@ -341,6 +452,25 @@ Worth keeping from that pass:
   stress-and-rhythm lines) as well as the fixes, and rejects the whole report rather than
   editing a fabricated sound out of a sentence — there is no way to cut a clause and be
   left with English, and the offline report that replaces it is complete.
+
+**A real `.env` can silently undo the 180-second paragraph ceiling.** The default moved from
+120 to 180 for shadowing, but `.env.example` and any existing `.env` set the variable
+explicitly, so a file written before this chunk still says 120 and wins. A slow shadowed read of
+the benchmark is 61.775 s x 1.54 = **~95 s of model audio** plus the lead-in and tail, so ~105 s
+lands inside 120 with almost no margin for a shadower who trails the model. Check the live
+`.env`, not just `utils._DEFAULTS`.
+
+**A shadowed read is only as clean as the headphones.** The model plays while the microphone
+is open, so on speakers Azure assesses a mixture of the speaker and the synthesiser. The UI
+says so above the recorder, but nothing enforces it and nothing in the stored row records
+which was used — an unexplained jump in *accuracy* on a shadowed read is the symptom to
+suspect, since shadowing trains delivery and should not move articulation.
+
+**Preparing the model for the benchmark passage is one 975-character synthesis** (about
+1,150 as SSML at the slow rate), and echo mode is 14 separate clips of the same text. Both are
+cached on disk and bought once per (passage, rate), so the cost is paid the first time and
+never again — but the first slow echo track on a fresh cache is 14 sequential calls before
+anything plays.
 
 **Preparing a fresh block takes about 40 seconds.** Synthesis is sequential at roughly one
 second per clip and a block needs ~38 of them, so the first block on a new contrast has a real

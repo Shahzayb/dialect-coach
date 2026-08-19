@@ -133,6 +133,12 @@ REVIEW_INTERVAL_DAYS = (3, 7, 21, 60)
 # queue will promote it. One bad reading is not evidence of a pattern.
 RECUR_ATTEMPTS = 2
 
+# How often a shadowing session comes back. Unlike REVIEW_INTERVAL_DAYS this gap never widens:
+# shadowing does not graduate, so there is nothing for a widening schedule to be confident
+# about. Three days leaves room for cold reads in between, which is what the shadowed-versus-
+# cold comparison needs to have anything to compare. A tuning value, kept here to be retuned.
+SHADOW_INTERVAL_DAYS = 3
+
 # Below this many minimal pairs a contrast cannot fill a block with enough item variety to
 # be worth calling training, so it is not offered. `phoneme_reference` has eleven contrasts
 # with no pairs at all, which are honest empties rather than gaps to paper over.
@@ -166,7 +172,11 @@ _DEFAULTS: dict[str, str] = {
     "DB_PATH": "./data/coach.db",
     "MIN_DURATION_SECONDS": "1.5",
     "MAX_DURATION_SECONDS_DRILL": "30",
-    "MAX_DURATION_SECONDS_PARAGRAPH": "120",
+    # 180, not 120, because of shadowing: the benchmark passage runs 61.8 s through Azure TTS
+    # at the normal rate (measured, `tests/fixtures/benchmark_tts_baseline.json`) and ~95 s at
+    # the slow rate, and a shadowed read starts recording before the model and stops after it.
+    # A read is billed for its own seconds either way, so the ceiling costs nothing unspent.
+    "MAX_DURATION_SECONDS_PARAGRAPH": "180",
     "MAX_DURATION_SECONDS_UNSCRIPTED": "300",
     "UNSCRIPTED_TWO_PASS": "true",
     "OFFLINE_MODE": "false",

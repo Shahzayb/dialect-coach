@@ -309,3 +309,64 @@ def test_a_reason_never_restates_the_rule_rendered_beside_it() -> None:
         assert rule not in pq.grade(target("/θ/ → /s/"), blocks).reason
     stress = pq.grade(target("weather", kind=pq.STRESS), still_flagged=True)
     assert pq.graduation_rule(pq.STRESS) not in stress.reason
+
+
+# --- The shadowing kind -------------------------------------------------------------------------
+# A shadowing passage lives in the same table only because that table is where "what am I doing
+# today?" is answered. It is never promoted from evidence and it never graduates, so almost
+# every rule above has to leave it alone.
+
+
+def test_a_shadow_row_does_not_consume_a_promotion_slot() -> None:
+    """The failure this guards is silent: adding a standing practice would otherwise retire a
+    sound the recordings are still flagging."""
+    existing = [target("Benchmark", kind=pq.SHADOW)]
+    found = pq.candidates([phoneme_row(e, p) for e, p in
+                           (("θ", "s"), ("v", "w"), ("ð", "d"), ("l", "ɹ"))])
+    assert len(pq.promote(existing, found)) == utils.MAX_ACTIVE_TARGETS
+
+
+def test_shadow_is_not_a_promotable_kind() -> None:
+    assert not pq.promotable(pq.SHADOW)
+    assert all(pq.promotable(kind) for kind in pq.KIND_ORDER)
+    assert pq.SHADOW not in pq.KIND_ORDER
+
+
+def test_shadow_has_a_label_on_screen() -> None:
+    assert pq.KIND_LABELS[pq.SHADOW]
+
+
+def test_grading_a_shadow_target_changes_nothing() -> None:
+    """`app.apply_decisions` skips a target whose state is unchanged and which did not
+    regress, which is exactly what keeps a shadow row's schedule out of the grader's hands."""
+    decision = pq.grade(target("Benchmark", kind=pq.SHADOW))
+    assert decision.state == pq.ACTIVE
+    assert not decision.regressed
+
+
+def test_a_shadow_target_is_due_on_a_fixed_gap_not_immediately() -> None:
+    """"Active means due now" would make it due on every render, since it is always active."""
+    decision = pq.grade(target("Benchmark", kind=pq.SHADOW))
+    assert pq.next_due(decision, now=NOW, kind=pq.SHADOW) == pq._iso(
+        NOW + timedelta(days=utils.SHADOW_INTERVAL_DAYS)
+    )
+
+
+def test_the_shadow_gap_never_widens() -> None:
+    """Unlike REVIEW_INTERVAL_DAYS: there is no graduation for a widening schedule to grow
+    confident about."""
+    passed = pq.Decision(pq.ACTIVE, "", reviews_passed=3)
+    assert pq.next_due(passed, now=NOW, kind=pq.SHADOW) == pq.next_due(
+        pq.Decision(pq.ACTIVE, ""), now=NOW, kind=pq.SHADOW
+    )
+
+
+def test_the_shadow_rule_says_nothing_takes_it_off() -> None:
+    rule = pq.graduation_rule(pq.SHADOW)
+    assert "Nothing takes this off the list" in rule
+    assert str(utils.SHADOW_INTERVAL_DAYS) in rule
+
+
+def test_a_due_shadow_target_sorts_with_the_others() -> None:
+    rows = [target("Benchmark", kind=pq.SHADOW, next_due="2026-08-01T00:00:00Z")]
+    assert [row["item"] for row in pq.due(rows, now=NOW)] == ["Benchmark"]
