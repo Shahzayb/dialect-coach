@@ -70,6 +70,10 @@ verified before it can be planned. `UNSCRIPTED_TWO_PASS` is defined and priced b
 
 ## Active plan
 
+`plans/2026-08-19_perception-trainer-practice-queue.md` — complete. The live block was run
+against real Azure and asserted against the meter, so the exit criteria are met rather than
+deferred.
+
 `plans/2026-08-19_timing-data-and-npvi.md` — complete. The TTS baseline was captured, so the
 nPVI figure ships with the comparison that makes it mean something rather than with a caveat.
 
@@ -264,6 +268,39 @@ and the chart. The benchmark series starts **empty** on the day this ships, and 
 five real reads spread over a month make it worth looking at. The first real read is also
 the only way to confirm that 196 words lands inside 60-90 seconds at an actual reading pace.
 
+**Training, not only diagnosis (milestone v0.7.0).** A **Today** tab is now the first thing
+the app opens on, and it answers "what am I doing today?" instead of presenting a blank
+textarea — the textarea is one tab click away. It carries at most three targets, each
+promoted out of the user's own flagged history, each showing the counts it was promoted on
+and the rule that takes it off. The due one is either a **listening block** (a contrast or a
+vowel gap) or a **stress drill**.
+
+A block is High Variability Phonetic Training: 20 forced-choice trials on minimal pairs from
+`phoneme_reference`, cycling **six en-US voices** — three male, three female, across two
+voice generations — scored immediately, with the answer revealed and both words replayable.
+Every accuracy figure on screen sits beside its chance floor, and the Progress tab plots
+per-contrast accuracy against a dashed 50% rule.
+
+Verified live against Azure on 2026-08-19, and the meter is the assertion:
+
+- A fresh 20-trial block on `/θ/ → /t/` needed **38 clips and charged 167 characters** —
+  one `tts_usage` row per clip, none double-charged.
+- A **second block charged 9 characters**, for the 2 clips it had never played; the other 36
+  came off the disk cache. Nothing already on disk is ever bought again.
+- `scripts/list_voices.py` listed the roster and **charged nothing** (meter 0 before, 0
+  after), which is what it exists to prove.
+- Total spend for the whole exercise: **176 TTS characters** of 500,000, and no STT at all.
+
+Verified in the browser on the seeded demo, both themes: Today promotes one consonant
+contrast, one vowel gap and one stress item; a trial autoplays, scores, reveals `tick` against
+`thick` with the contrast note, and offers both words back; the perception chart draws the
+chance line under a rising trajectory. `make test` is **556 tests**, all offline with no keys.
+
+**What this does not yet prove.** The trainer has been run, not *used*. Whether twenty trials
+a day is a habit anyone keeps, and whether the perception gain shows up in the Azure scores at
+all, are questions only weeks of real blocks answer — the same shape as the benchmark's 30-day
+check. The graduation rule (90% across two blocks) has never fired on real listening.
+
 ## Known issues
 
 **The 8 code-review findings from 2026-08-18 are all fixed** (2026-08-19, in the
@@ -282,6 +319,18 @@ Worth keeping from that pass:
   stress-and-rhythm lines) as well as the fixes, and rejects the whole report rather than
   editing a fabricated sound out of a sentence — there is no way to cut a clause and be
   left with English, and the offline report that replaces it is complete.
+
+**Preparing a fresh block takes about 40 seconds.** Synthesis is sequential at roughly one
+second per clip and a block needs ~38 of them, so the first block on a new contrast has a real
+wait before trial one. The progress bar names the count while it runs, and every later block on
+that contrast is instant because the clips are on disk. Parallelising the batch is the obvious
+fix and was deliberately not attempted in this chunk.
+
+**A stress item cannot be checked, only drilled.** Azure returns per-syllable accuracy but no
+stress marks, so there is no way to ask "which syllable was stressed?" and know the right
+answer without a pronouncing dictionary or another recording. Stress items therefore graduate
+on the evidence drying up rather than on a score. A CMUdict-backed stress-location task would
+close it and is the recorded upgrade path.
 
 Still open, lower severity, from the same pass: `app.py`'s word card shows the raw unsmeared
 duplicate phoneme that the coaching report collapses — the two views can disagree on how
