@@ -28,6 +28,16 @@ remains is Mode C (unscripted), which is also what unblocks #12's remaining half
 
 ## Releases
 
+**v0.8.0 — 2026-08-19.** Shadowing: practise against a synthesised model in real time, then
+assess that read as an ordinary Mode B attempt — a flow wrapped around the existing path, with
+nothing in the analysis pipeline changed. Two modes, only the speak-along one assessed. Merged
+via [PR #27](https://github.com/Shahzayb/dialect-coach/pull/27), tagged, and released
+(`gh release create v0.8.0`). Milestone v0.8.0 closed; it carried no issues — this chunk came
+from the brief rather than from the tracker, so the release closes none. **The exit criterion is
+met structurally but not yet with data**: a shadowed read and a cold read of the same passage
+render side by side with their fluency and prosody delta named, and the surface currently and
+correctly renders its day-one empty state, because only the shadowed half exists.
+
 **v0.7.0 — 2026-08-19.** The perception trainer and the practice queue: forced-choice
 minimal-pair identification across six en-US voices, and a persisted target set of at most
 three items promoted from the user's own flagged history. A new **Today** tab is the app's
