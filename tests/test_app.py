@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import os
+import threading
 from datetime import datetime, timezone
 
 import pytest
@@ -761,9 +762,7 @@ def settled_poll(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(st, "rerun", lambda *a, **k: None)
 
 
-def _hanging_job(app: AppTest, stop: "threading.Event") -> app_module.AssessJob:
-    import threading
-
+def _hanging_job(app: AppTest, stop: threading.Event) -> app_module.AssessJob:
     job = app_module.AssessJob(
         cancel_event=threading.Event(), key="k",
         reference_text=REFERENCE, mode=Mode.DRILL,
@@ -776,8 +775,6 @@ def _hanging_job(app: AppTest, stop: "threading.Event") -> app_module.AssessJob:
 
 def test_a_running_job_disables_assess_and_offers_stop(run_app, settled_poll) -> None:
     """No double-submit is reachable: the button that starts a run is off while one runs."""
-    import threading
-
     app = run_app()
     never_finishes = threading.Event()
     _hanging_job(app, never_finishes)
@@ -792,8 +789,6 @@ def test_a_running_job_disables_assess_and_offers_stop(run_app, settled_poll) ->
 
 
 def test_clicking_stop_sets_the_cancel_flag(run_app, settled_poll) -> None:
-    import threading
-
     app = run_app()
     never_finishes = threading.Event()
     job = _hanging_job(app, never_finishes)
@@ -808,8 +803,6 @@ def test_clicking_stop_sets_the_cancel_flag(run_app, settled_poll) -> None:
 def test_a_second_assess_click_while_running_starts_nothing(run_app, settled_poll,
                                                             monkeypatch) -> None:
     """The state guard, not the disabled flag, is what closes the double-submit race."""
-    import threading
-
     started: list[int] = []
     monkeypatch.setattr(app_module, "start_assessment",
                         lambda *a, **k: started.append(1))
@@ -825,8 +818,6 @@ def test_a_second_assess_click_while_running_starts_nothing(run_app, settled_pol
 
 
 def test_a_cancelled_job_is_reported_and_clears_itself(run_app) -> None:
-    import threading
-
     app = run_app()
     job = app_module.AssessJob(
         cancel_event=threading.Event(), key="k",
@@ -847,8 +838,6 @@ def test_a_cancelled_job_is_reported_and_clears_itself(run_app) -> None:
 
 def test_a_job_that_died_without_an_outcome_does_not_crash_the_page(run_app) -> None:
     """Unreachable in practice — the worker catches everything — but not a crash if it happens."""
-    import threading
-
     app = run_app()
     job = app_module.AssessJob(
         cancel_event=threading.Event(), key="k",
@@ -1668,8 +1657,6 @@ def test_the_tag_travels_through_the_worker_thread(monkeypatch: pytest.MonkeyPat
     a tag that failed to land there would be invisible until a shadowed read had already gone
     onto the cold trajectory. Offline, so it replays the fixture and spends nothing.
     """
-    import threading
-
     import shadowing
 
     conn = db.connect(":memory:")
@@ -1694,8 +1681,6 @@ def test_the_tag_travels_through_the_worker_thread(monkeypatch: pytest.MonkeyPat
 
 def test_an_untagged_assessment_writes_no_tag(monkeypatch: pytest.MonkeyPatch) -> None:
     """A cold read must stay untagged, or the trajectory it belongs on would lose it."""
-    import threading
-
     conn = db.connect(":memory:")
     outcome = app_module.run_assessment_job(
         conn, b"RIFF" + b"\x00" * 40, 12.0, REFERENCE, Mode.DRILL, threading.Event(),
