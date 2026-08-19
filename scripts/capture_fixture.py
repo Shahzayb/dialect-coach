@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 
 import audio_utils  # noqa: E402
 import budget  # noqa: E402
@@ -88,11 +88,14 @@ def main() -> int:
     # Charge the meter for what this actually consumed, so the app's remaining-allowance
     # figure stays honest rather than silently ignoring fixture captures.
     db.record_attempt(
-        conn, mode=mode, reference_text=reference_text,
+        conn,
+        mode=mode,
+        reference_text=reference_text,
         recognised_text=speech_analyzer._display_text(payloads[0]),
         audio_seconds=seconds * max(attempts, 1),
         audio_sha256=utils.sha256_bytes(wav_bytes),
-        overall_scores={}, azure_raw=payloads if len(payloads) > 1 else payloads[0],
+        overall_scores={},
+        azure_raw=payloads if len(payloads) > 1 else payloads[0],
         offline=False,
     )
 
@@ -101,8 +104,7 @@ def main() -> int:
     document = payloads[0] if mode is Mode.DRILL and len(payloads) == 1 else payloads
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n",
-                        encoding="utf-8")
+    out_path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
     # `relative_to` raises on a path outside the repo, and a `--out` typed relative to the
     # working directory is one of those — which used to crash *after* the quota was spent

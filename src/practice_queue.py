@@ -29,9 +29,10 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
-from typing import Any, Iterable, Mapping, Sequence
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import perception_trainer
 import utils
@@ -81,14 +82,13 @@ def _parse(when: str | None) -> datetime | None:
     if not when:
         return None
     try:
-        return datetime.strptime(str(when), "%Y-%m-%dT%H:%M:%SZ").replace(
-            tzinfo=timezone.utc)
+        return datetime.strptime(str(when), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
     except ValueError:
         return None
 
 
 def _iso(moment: datetime) -> str:
-    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 # --- Candidates ---------------------------------------------------------------------------------
@@ -106,10 +106,7 @@ class Candidate:
     @property
     def why(self) -> str:
         """The sentence the UI shows under "why is this here". Numbers, not a claim."""
-        counts = (
-            f"flagged in {self.attempts} separate attempt"
-            f"{'' if self.attempts == 1 else 's'}"
-        )
+        counts = f"flagged in {self.attempts} separate attempt{'' if self.attempts == 1 else 's'}"
         tokens = self.evidence.get("tokens")
         if isinstance(tokens, int) and tokens > self.attempts:
             counts += f" ({tokens} times in total)"
@@ -119,7 +116,7 @@ class Candidate:
         if self.kind == STRESS:
             syllable = self.evidence.get("syllable")
             where = f", weakest on /{syllable}/" if syllable else ""
-            return f"\"{self.item}\" was {counts}{where}."
+            return f'"{self.item}" was {counts}{where}.'
         return f"{self.item} was {counts}."
 
 
@@ -156,19 +153,21 @@ def candidates(
         if not perception_trainer.trainable(expected, produced):
             # Covers the "(unclear)" marker too: it is not a phoneme, so it has no pairs.
             continue
-        found.append(Candidate(
-            item=str(row.get("label") or f"/{expected}/ → /{produced}/"),
-            kind=perception_trainer.kind_for(expected),
-            attempts=attempts,
-            evidence={
-                "source": "flagged_phonemes",
-                "expected": expected,
-                "produced": produced,
-                "attempts": attempts,
-                "benchmark_attempts": int(row.get("benchmark_attempts") or 0),
-                "tokens": int(row.get("tokens") or 0),
-            },
-        ))
+        found.append(
+            Candidate(
+                item=str(row.get("label") or f"/{expected}/ → /{produced}/"),
+                kind=perception_trainer.kind_for(expected),
+                attempts=attempts,
+                evidence={
+                    "source": "flagged_phonemes",
+                    "expected": expected,
+                    "produced": produced,
+                    "attempts": attempts,
+                    "benchmark_attempts": int(row.get("benchmark_attempts") or 0),
+                    "tokens": int(row.get("tokens") or 0),
+                },
+            )
+        )
 
     for row in syllables:
         attempts = int(row.get("attempts") or 0)
@@ -177,19 +176,21 @@ def candidates(
         word = str(row.get("word") or "")
         if not word:
             continue
-        found.append(Candidate(
-            item=word,
-            kind=STRESS,
-            attempts=attempts,
-            evidence={
-                "source": "weak_syllables",
-                "word": word,
-                "syllable": str(row.get("syllable") or ""),
-                "attempts": attempts,
-                "benchmark_attempts": int(row.get("benchmark_attempts") or 0),
-                "tokens": int(row.get("tokens") or 0),
-            },
-        ))
+        found.append(
+            Candidate(
+                item=word,
+                kind=STRESS,
+                attempts=attempts,
+                evidence={
+                    "source": "weak_syllables",
+                    "word": word,
+                    "syllable": str(row.get("syllable") or ""),
+                    "attempts": attempts,
+                    "benchmark_attempts": int(row.get("benchmark_attempts") or 0),
+                    "tokens": int(row.get("tokens") or 0),
+                },
+            )
+        )
 
     found.sort(key=lambda c: (-c.attempts, -int(c.evidence.get("tokens") or 0), c.item))
     return found
@@ -214,7 +215,8 @@ def promote(
     cap = utils.MAX_ACTIVE_TARGETS if limit is None else limit
     known = {(str(row["item"]), str(row["kind"])) for row in existing}
     active_kinds = [
-        str(row["kind"]) for row in existing
+        str(row["kind"])
+        for row in existing
         if str(row["state"]) == ACTIVE and promotable(str(row["kind"]))
     ]
     slots = cap - len(active_kinds)
@@ -246,7 +248,7 @@ def promote(
     return picked[:slots]
 
 
-# --- Grading ---------------------------------------------------------------------------------------
+# --- Grading --------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -285,8 +287,9 @@ class BlockSummary:
         return perception_trainer.chance_floor(self.alternatives)
 
 
-def summarise_blocks(trials: Iterable[Mapping[str, Any]], *, planned: int | None = None
-                     ) -> list[BlockSummary]:
+def summarise_blocks(
+    trials: Iterable[Mapping[str, Any]], *, planned: int | None = None
+) -> list[BlockSummary]:
     """Group stored trial rows into blocks, oldest first.
 
     `planned` is how many trials a full block holds. It is passed rather than stored per
@@ -307,19 +310,23 @@ def summarise_blocks(trials: Iterable[Mapping[str, Any]], *, planned: int | None
     for block_id in order:
         rows = grouped[block_id]
         review = bool(rows[0].get("review"))
-        target = planned if planned is not None else (
-            utils.PERCEPTION_REVIEW_TRIALS if review else utils.PERCEPTION_BLOCK_TRIALS
+        target = (
+            planned
+            if planned is not None
+            else (utils.PERCEPTION_REVIEW_TRIALS if review else utils.PERCEPTION_BLOCK_TRIALS)
         )
-        summaries.append(BlockSummary(
-            block_id=block_id,
-            created_at=str(rows[0].get("created_at") or ""),
-            correct=sum(1 for r in rows if r.get("correct")),
-            total=len(rows),
-            planned=target,
-            novel=sum(1 for r in rows if r.get("novel")),
-            alternatives=int(rows[0].get("alternatives") or 2),
-            review=review,
-        ))
+        summaries.append(
+            BlockSummary(
+                block_id=block_id,
+                created_at=str(rows[0].get("created_at") or ""),
+                correct=sum(1 for r in rows if r.get("correct")),
+                total=len(rows),
+                planned=target,
+                novel=sum(1 for r in rows if r.get("novel")),
+                alternatives=int(rows[0].get("alternatives") or 2),
+                review=review,
+            )
+        )
     summaries.sort(key=lambda s: s.created_at)
     return summaries
 
@@ -395,13 +402,12 @@ def grade(
         if still_flagged:
             return Decision(
                 ACTIVE,
-                "Still on the list: the word is still being flagged in your recent "
-                "attempts.",
+                "Still on the list: the word is still being flagged in your recent attempts.",
             )
         return Decision(
             GRADUATED,
-            f"Graduated: the word has stopped being flagged in your recent attempts. It "
-            f"comes back for a check if it reappears.",
+            "Graduated: the word has stopped being flagged in your recent attempts. It "
+            "comes back for a check if it reappears.",
             reviews_passed=passed,
         )
 
@@ -437,9 +443,10 @@ def grade(
             reviews_passed=passed + 1,
         )
 
-    recent = completed[-utils.PERCEPTION_GRADUATE_BLOCKS:]
-    if (len(recent) >= utils.PERCEPTION_GRADUATE_BLOCKS
-            and all(b.accuracy >= utils.PERCEPTION_GRADUATE_ACCURACY for b in recent)):
+    recent = completed[-utils.PERCEPTION_GRADUATE_BLOCKS :]
+    if len(recent) >= utils.PERCEPTION_GRADUATE_BLOCKS and all(
+        b.accuracy >= utils.PERCEPTION_GRADUATE_ACCURACY for b in recent
+    ):
         scores = ", ".join(f"{b.accuracy:.0%}" for b in recent)
         return Decision(
             GRADUATED,
@@ -509,10 +516,12 @@ def due(targets: Iterable[Mapping[str, Any]], *, now: datetime) -> list[Mapping[
         moment = _parse(row.get("next_due"))
         if moment is None or moment <= now:
             ready.append(row)
-    ready.sort(key=lambda row: (
-        0 if str(row.get("state")) == ACTIVE else 1,
-        str(row.get("next_due") or ""),
-    ))
+    ready.sort(
+        key=lambda row: (
+            0 if str(row.get("state")) == ACTIVE else 1,
+            str(row.get("next_due") or ""),
+        )
+    )
     return ready
 
 

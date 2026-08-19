@@ -8,7 +8,10 @@ test_error_type_is_read_from_inside_the_assessment_block).
 
 from __future__ import annotations
 
+import itertools
 import json
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -18,13 +21,17 @@ from utils import Mode
 
 
 @pytest.fixture
-def drill_payload(fixtures_dir) -> dict:
-    return json.loads((fixtures_dir / "sample_azure_response.json").read_text())
+def drill_payload(fixtures_dir: Path) -> dict[str, Any]:
+    payload: dict[str, Any] = json.loads((fixtures_dir / "sample_azure_response.json").read_text())
+    return payload
 
 
 @pytest.fixture
-def continuous_payloads(fixtures_dir) -> list[dict]:
-    return json.loads((fixtures_dir / "sample_azure_continuous.json").read_text())
+def continuous_payloads(fixtures_dir: Path) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = json.loads(
+        (fixtures_dir / "sample_azure_continuous.json").read_text()
+    )
+    return payloads
 
 
 @pytest.fixture
@@ -71,11 +78,13 @@ def test_flagged_phonemes_report_what_was_actually_produced(
     _, _, words = sa.normalise([drill_payload], reference, Mode.DRILL)
     scored_phonemes = [p for w in words for p in w["phonemes"] if p["score"] is not None]
     assert scored_phonemes, "no phoneme-level scores parsed at all"
-    assert all(p["nbest"] for p in scored_phonemes), \
+    assert all(p["nbest"] for p in scored_phonemes), (
         "every scored phoneme must carry its produced alternates"
+    )
     assert all(
         isinstance(alt["phoneme"], str) and isinstance(alt["score"], float)
-        for p in scored_phonemes for alt in p["nbest"]
+        for p in scored_phonemes
+        for alt in p["nbest"]
     )
 
 
@@ -109,8 +118,9 @@ def test_error_type_is_read_from_inside_the_assessment_block(
     assert "ErrorType" in word["PronunciationAssessment"]
 
     _, _, words = sa.normalise([drill_payload], reference, Mode.DRILL)
-    assert {w["error_type"] for w in words} != {"None"}, \
+    assert {w["error_type"] for w in words} != {"None"}, (
         "a real attempt with mispronunciations must not parse as entirely clean"
+    )
 
 
 def test_mispronunciations_are_surfaced(drill_payload: dict, reference: str) -> None:
@@ -124,9 +134,7 @@ def test_recognised_text_is_captured(drill_payload: dict, reference: str) -> Non
     assert "weather" in recognised.lower()
 
 
-def test_delivery_error_types_ignore_the_none_marker(
-    drill_payload: dict, reference: str
-) -> None:
+def test_delivery_error_types_ignore_the_none_marker(drill_payload: dict, reference: str) -> None:
     """Azure reports Break.ErrorTypes: ["None"] for clean words — not a delivery problem."""
     _, _, words = sa.normalise([drill_payload], reference, Mode.DRILL)
     assert all("None" not in w["delivery_error_types"] for w in words)
@@ -141,21 +149,27 @@ def test_delivery_error_types_are_extracted_when_present(reference: str) -> None
     payload = {
         "Duration": 10_000_000,
         "DisplayText": "weather",
-        "NBest": [{
-            "Display": "weather",
-            "PronunciationAssessment": {"AccuracyScore": 80.0, "PronScore": 80.0},
-            "Words": [{
-                "Word": "weather",
-                "PronunciationAssessment": {
-                    "AccuracyScore": 70.0,
-                    "ErrorType": "None",
-                    "Feedback": {"Prosody": {
-                        "Break": {"ErrorTypes": ["UnexpectedBreak"]},
-                        "Intonation": {"ErrorTypes": ["Monotone"]},
-                    }},
-                },
-            }],
-        }],
+        "NBest": [
+            {
+                "Display": "weather",
+                "PronunciationAssessment": {"AccuracyScore": 80.0, "PronScore": 80.0},
+                "Words": [
+                    {
+                        "Word": "weather",
+                        "PronunciationAssessment": {
+                            "AccuracyScore": 70.0,
+                            "ErrorType": "None",
+                            "Feedback": {
+                                "Prosody": {
+                                    "Break": {"ErrorTypes": ["UnexpectedBreak"]},
+                                    "Intonation": {"ErrorTypes": ["Monotone"]},
+                                }
+                            },
+                        },
+                    }
+                ],
+            }
+        ],
     }
     _, _, words = sa.normalise([payload], reference, Mode.DRILL)
     assert words[0]["delivery_error_types"] == ["UnexpectedBreak", "Monotone"]
@@ -219,8 +233,12 @@ def test_an_omitted_word_carries_the_timing_keys_as_none() -> None:
 
 @pytest.mark.parametrize(
     "name",
-    ["sample_azure_response.json", "sample_azure_continuous.json",
-     "bad_delivery_capture.json", "synthetic_delivery_faults.json"],
+    [
+        "sample_azure_response.json",
+        "sample_azure_continuous.json",
+        "bad_delivery_capture.json",
+        "synthetic_delivery_faults.json",
+    ],
 )
 def test_every_timing_value_lands_on_the_ten_millisecond_grid(fixtures_dir, name: str) -> None:
     """Every Offset and Duration, at every level, is a whole multiple of FRAME_TICKS.
@@ -240,8 +258,12 @@ def test_every_timing_value_lands_on_the_ten_millisecond_grid(fixtures_dir, name
 
 @pytest.mark.parametrize(
     "name",
-    ["sample_azure_response.json", "sample_azure_continuous.json",
-     "bad_delivery_capture.json", "synthetic_delivery_faults.json"],
+    [
+        "sample_azure_response.json",
+        "sample_azure_continuous.json",
+        "bad_delivery_capture.json",
+        "synthetic_delivery_faults.json",
+    ],
 )
 def test_segments_tile_their_parent_with_a_one_frame_seam(fixtures_dir, name: str) -> None:
     """The seam `_timing` documents, held to at every level.
@@ -263,7 +285,7 @@ def test_segments_tile_their_parent_with_a_one_frame_seam(fixtures_dir, name: st
                 assert children[0]["Offset"] == word["Offset"]
                 last = children[-1]
                 assert last["Offset"] + last["Duration"] == word["Offset"] + word["Duration"]
-                for before, after in zip(children, children[1:]):
+                for before, after in itertools.pairwise(children):
                     gap = after["Offset"] - (before["Offset"] + before["Duration"])
                     assert gap == sa.FRAME_TICKS
                     seams += 1
@@ -320,9 +342,9 @@ def test_continuous_completeness_is_locally_recomputed(
 ) -> None:
     """Not Azure's CompletenessScore — enableMiscue is off in continuous mode."""
     overall, _, _ = sa.normalise(continuous_payloads, reference, Mode.PARAGRAPH)
-    azure_completeness = (
-        continuous_payloads[0]["NBest"][0]["PronunciationAssessment"]["CompletenessScore"]
-    )
+    azure_completeness = continuous_payloads[0]["NBest"][0]["PronunciationAssessment"][
+        "CompletenessScore"
+    ]
     assert overall["completeness"] != azure_completeness
     assert 0 <= overall["completeness"] <= 100
 
@@ -373,9 +395,17 @@ def test_quota_exhaustion_is_a_type_not_a_marker_string() -> None:
     assert not sa.is_quota_exhausted(sa.AssessmentError("something else"))
 
 
-def word(text: str, accuracy=None, error_type="None", error_source="azure",
-         delivery=None, phonemes=None, syllables=None,
-         break_length=None, monotone_confidence=None) -> dict:
+def word(
+    text: str,
+    accuracy=None,
+    error_type="None",
+    error_source="azure",
+    delivery=None,
+    phonemes=None,
+    syllables=None,
+    break_length=None,
+    monotone_confidence=None,
+) -> dict:
     """One normalised word, hand-built. The captured fixtures carry no delivery faults."""
     return {
         "word": text,
@@ -384,7 +414,8 @@ def word(text: str, accuracy=None, error_type="None", error_source="azure",
         "error_source": error_source,
         "delivery_error_types": delivery or [],
         "prosody_detail": {
-            "break_length_ms": break_length, "monotone_confidence": monotone_confidence,
+            "break_length_ms": break_length,
+            "monotone_confidence": monotone_confidence,
         },
         "syllables": syllables or [],
         "phonemes": phonemes or [],
@@ -398,34 +429,62 @@ def word(text: str, accuracy=None, error_type="None", error_source="azure",
 
 def test_the_produced_phoneme_is_the_best_alternate_that_differs() -> None:
     """'/ð/ → /d/' is actionable; '/ð/ scored 80' is not. This is the tool's whole point."""
-    subject = word("this", 97.0, phonemes=[
-        {"phoneme": "ð", "score": 80.0, "is_mispronounced": False,
-         "nbest": [{"phoneme": "d", "score": 100.0}, {"phoneme": "ð", "score": 92.0}]},
-    ])
+    subject = word(
+        "this",
+        97.0,
+        phonemes=[
+            {
+                "phoneme": "ð",
+                "score": 80.0,
+                "is_mispronounced": False,
+                "nbest": [{"phoneme": "d", "score": 100.0}, {"phoneme": "ð", "score": 92.0}],
+            },
+        ],
+    )
     assert sa.phoneme_pairs(subject) == [("ð", "d", 80.0)]
 
 
 def test_no_substitution_is_reported_when_the_target_wins() -> None:
-    subject = word("this", 97.0, phonemes=[
-        {"phoneme": "ð", "score": 99.0, "is_mispronounced": False,
-         "nbest": [{"phoneme": "ð", "score": 100.0}, {"phoneme": "d", "score": 20.0}]},
-    ])
+    subject = word(
+        "this",
+        97.0,
+        phonemes=[
+            {
+                "phoneme": "ð",
+                "score": 99.0,
+                "is_mispronounced": False,
+                "nbest": [{"phoneme": "ð", "score": 100.0}, {"phoneme": "d", "score": 20.0}],
+            },
+        ],
+    )
     assert sa.phoneme_pairs(subject) == [("ð", None, 99.0)]
 
 
 def test_the_best_alternate_is_taken_by_score_not_by_position() -> None:
-    subject = word("this", 50.0, phonemes=[
-        {"phoneme": "θ", "score": 40.0, "is_mispronounced": True,
-         "nbest": [{"phoneme": "s", "score": 30.0}, {"phoneme": "t", "score": 90.0}]},
-    ])
+    subject = word(
+        "this",
+        50.0,
+        phonemes=[
+            {
+                "phoneme": "θ",
+                "score": 40.0,
+                "is_mispronounced": True,
+                "nbest": [{"phoneme": "s", "score": 30.0}, {"phoneme": "t", "score": 90.0}],
+            },
+        ],
+    )
     assert sa.phoneme_pairs(subject)[0][1] == "t"
 
 
 def test_a_phoneme_with_no_symbol_is_not_rendered_as_the_word_none() -> None:
     """Showing "/None/" invents a target sound in a tool whose job is naming sounds."""
-    subject = word("odd", 40.0, phonemes=[
-        {"phoneme": None, "score": 30.0, "is_mispronounced": True, "nbest": []},
-    ])
+    subject = word(
+        "odd",
+        40.0,
+        phonemes=[
+            {"phoneme": None, "score": 30.0, "is_mispronounced": True, "nbest": []},
+        ],
+    )
     assert sa.phoneme_pairs(subject) == [(None, None, 30.0)]
 
 
@@ -468,7 +527,7 @@ def test_the_prosody_measurements_are_read_off_the_captured_payload(
     """
     _, _, words = sa.normalise([drill_payload], reference, Mode.DRILL)
 
-    clean = words[1]                                            # "weather"
+    clean = words[1]  # "weather"
     assert clean["prosody_detail"]["break_length_ms"] == 0.0
     assert clean["prosody_detail"]["monotone_confidence"] == pytest.approx(0.17783079)
 
@@ -487,14 +546,18 @@ def test_a_word_with_no_feedback_block_measures_nothing(reference: str) -> None:
     payload = {
         "Duration": 10_000_000,
         "DisplayText": "weather",
-        "NBest": [{
-            "Display": "weather",
-            "PronunciationAssessment": {"AccuracyScore": 80.0, "PronScore": 80.0},
-            "Words": [{
-                "Word": "weather",
-                "PronunciationAssessment": {"AccuracyScore": 70.0, "ErrorType": "None"},
-            }],
-        }],
+        "NBest": [
+            {
+                "Display": "weather",
+                "PronunciationAssessment": {"AccuracyScore": 80.0, "PronScore": 80.0},
+                "Words": [
+                    {
+                        "Word": "weather",
+                        "PronunciationAssessment": {"AccuracyScore": 70.0, "ErrorType": "None"},
+                    }
+                ],
+            }
+        ],
     }
     _, _, words = sa.normalise([payload], reference, Mode.DRILL)
     assert words[0]["prosody_detail"] == {"break_length_ms": None, "monotone_confidence": None}
@@ -566,8 +629,11 @@ def test_a_clean_attempt_reports_no_delivery_faults() -> None:
 
 
 @pytest.fixture
-def bad_delivery_payloads(fixtures_dir) -> list[dict]:
-    return json.loads((fixtures_dir / "bad_delivery_capture.json").read_text())
+def bad_delivery_payloads(fixtures_dir: Path) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = json.loads(
+        (fixtures_dir / "bad_delivery_capture.json").read_text()
+    )
+    return payloads
 
 
 @pytest.fixture
@@ -624,7 +690,8 @@ def test_the_captured_reading_confirms_break_length_is_in_ticks(
     which is what a deliberately halting reading sounds like."""
     _, _, words = sa.normalise(bad_delivery_payloads, bad_delivery_reference, Mode.PARAGRAPH)
     longest = max(
-        w["prosody_detail"]["break_length_ms"] for w in words
+        w["prosody_detail"]["break_length_ms"]
+        for w in words
         if w["prosody_detail"]["break_length_ms"] is not None
     )
     assert 3000 < longest < 4000

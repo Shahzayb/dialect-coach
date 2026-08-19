@@ -11,8 +11,8 @@ import io
 import logging
 import os
 import tempfile
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
-from typing import Iterator, Sequence
 
 from pydub import AudioSegment
 
@@ -83,8 +83,7 @@ def validate_duration(seconds: float, mode: Mode) -> None:
 
     if seconds < minimum:
         raise AudioError(
-            f"That recording is {seconds:.1f}s — too short to assess. "
-            f"Record at least {minimum:g}s."
+            f"That recording is {seconds:.1f}s — too short to assess. Record at least {minimum:g}s."
         )
     if seconds > maximum:
         raise AudioError(

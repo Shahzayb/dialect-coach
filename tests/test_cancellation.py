@@ -17,7 +17,6 @@ import pytest
 
 import app as app_module
 import speech_analyzer as sa
-import utils
 from utils import Mode
 
 REFERENCE = "Thursday brought thunder and thick clouds."
@@ -32,7 +31,7 @@ class FakeAsync:
     def get(self):
         if self._on_get is not None:
             self._on_get()
-        return None
+        return
 
 
 class FakeSignal:
@@ -88,7 +87,8 @@ def recognizer_factory(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(sa, "_speech_config", lambda: None)
     monkeypatch.setattr(
-        sa, "_pron_config",
+        sa,
+        "_pron_config",
         lambda *a, **k: type("C", (), {"apply_to": lambda self, r: None})(),
     )
     monkeypatch.setattr(sa, "CANCEL_POLL_SECONDS", 0.01)
@@ -175,9 +175,7 @@ def test_a_cancelled_run_writes_no_attempt_row(tmp_path, monkeypatch) -> None:
     event = threading.Event()
     event.set()
 
-    outcome = app_module.run_assessment_job(
-        conn, b"RIFFfake", 5.0, REFERENCE, Mode.DRILL, event
-    )
+    outcome = app_module.run_assessment_job(conn, b"RIFFfake", 5.0, REFERENCE, Mode.DRILL, event)
 
     assert outcome.cancelled is True
     assert conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0] == 0
@@ -205,15 +203,17 @@ def test_a_result_that_arrives_after_a_stop_is_discarded(tmp_path, monkeypatch) 
         # The user clicks Stop while Azure is answering.
         event.set()
         return sa.Assessment(
-            raw=[{}], overall_scores={"pron_score": 80.0},
-            recognised_text="thursday", words=[], offline=True, attempts=0,
+            raw=[{}],
+            overall_scores={"pron_score": 80.0},
+            recognised_text="thursday",
+            words=[],
+            offline=True,
+            attempts=0,
         )
 
     monkeypatch.setattr(sa, "analyse", analyse_then_stop)
 
-    outcome = app_module.run_assessment_job(
-        conn, b"RIFFfake", 5.0, REFERENCE, Mode.DRILL, event
-    )
+    outcome = app_module.run_assessment_job(conn, b"RIFFfake", 5.0, REFERENCE, Mode.DRILL, event)
 
     assert outcome.cancelled is True
     assert outcome.assessment is None
@@ -224,10 +224,18 @@ def test_a_completed_run_does_write_its_row(tmp_path, monkeypatch) -> None:
     """The control case: without a cancel, the row lands exactly as before."""
     conn = _wav_and_conn(tmp_path)
 
-    monkeypatch.setattr(sa, "analyse", lambda *a, **k: sa.Assessment(
-        raw=[{"ok": True}], overall_scores={"pron_score": 83.0},
-        recognised_text="thursday", words=[], offline=True, attempts=0,
-    ))
+    monkeypatch.setattr(
+        sa,
+        "analyse",
+        lambda *a, **k: sa.Assessment(
+            raw=[{"ok": True}],
+            overall_scores={"pron_score": 83.0},
+            recognised_text="thursday",
+            words=[],
+            offline=True,
+            attempts=0,
+        ),
+    )
 
     outcome = app_module.run_assessment_job(
         conn, b"RIFFfake", 5.0, REFERENCE, Mode.DRILL, threading.Event()
@@ -259,13 +267,18 @@ def test_the_worker_never_raises_even_on_an_unexpected_bug(tmp_path, monkeypatch
 def test_a_worker_failure_is_returned_not_rendered(tmp_path, monkeypatch) -> None:
     """The worker cannot call st.error: it returns an (icon, message) pair instead."""
     conn = _wav_and_conn(tmp_path)
-    monkeypatch.setattr(sa, "analyse", lambda *a, **k: (_ for _ in ()).throw(
-        sa.NoSpeechDetected("Azure heard no speech in that recording.")
-    ))
+    monkeypatch.setattr(
+        sa,
+        "analyse",
+        lambda *a, **k: (_ for _ in ()).throw(
+            sa.NoSpeechDetected("Azure heard no speech in that recording.")
+        ),
+    )
 
     outcome = app_module.run_assessment_job(
         conn, b"RIFFfake", 5.0, REFERENCE, Mode.DRILL, threading.Event()
     )
 
+    assert outcome.error is not None
     icon, message = outcome.error
     assert icon and "no speech" in message.lower()

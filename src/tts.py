@@ -21,10 +21,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
-from xml.sax.saxutils import escape as xml_escape, quoteattr
+from xml.sax.saxutils import escape as xml_escape
+from xml.sax.saxutils import quoteattr
 
 import utils
 from speech_analyzer import classify_cancellation
@@ -32,7 +33,6 @@ from speech_analyzer import classify_cancellation
 logger = logging.getLogger(__name__)
 
 LOCALE = "en-US"
-
 
 
 # --- The disk cache ---------------------------------------------------------------------
@@ -180,8 +180,7 @@ def _speak(payload: str, voice: str, *, is_ssml: bool) -> bytes:
     synthesizer = speechsdk.SpeechSynthesizer(speech_config=config, audio_config=None)
 
     future = (
-        synthesizer.speak_ssml_async(payload) if is_ssml
-        else synthesizer.speak_text_async(payload)
+        synthesizer.speak_ssml_async(payload) if is_ssml else synthesizer.speak_text_async(payload)
     )
     result = future.get()
 
@@ -191,14 +190,17 @@ def _speak(payload: str, voice: str, *, is_ssml: bool) -> bytes:
             raise SynthesisError("Azure reported success but returned no audio.")
         return audio
     if result.reason == speechsdk.ResultReason.Canceled:
-        raise classify_cancellation(
-            result.cancellation_details, bad_request_hint=BAD_REQUEST_HINT
-        )
+        raise classify_cancellation(result.cancellation_details, bad_request_hint=BAD_REQUEST_HINT)
     raise SynthesisError(f"Unexpected synthesis result: {result.reason}")
 
 
-def synthesise(text: str, *, voice: str | None = None, slow: bool = False,
-               on_attempt: Callable[[int], None] | None = None) -> Synthesis:
+def synthesise(
+    text: str,
+    *,
+    voice: str | None = None,
+    slow: bool = False,
+    on_attempt: Callable[[int], None] | None = None,
+) -> Synthesis:
     """Synthesise `text` with the configured neural voice. Returns audio and billing info.
 
     `characters` counts the **full payload sent to Azure**, SSML markup included. If Azure
@@ -233,12 +235,8 @@ def synthesise(text: str, *, voice: str | None = None, slow: bool = False,
         if on_attempt is not None:
             on_attempt(attempt)
 
-    audio = utils.retry_transient(
-        lambda: _speak(payload, chosen, is_ssml=slow), on_attempt=count
-    )
+    audio = utils.retry_transient(lambda: _speak(payload, chosen, is_ssml=slow), on_attempt=count)
     if made > 1:
         logger.warning("Synthesis took %d attempts; all of them may have cost quota.", made)
 
-    return Synthesis(
-        audio=audio, characters=len(payload), voice=chosen, attempts=max(made, 1)
-    )
+    return Synthesis(audio=audio, characters=len(payload), voice=chosen, attempts=max(made, 1))

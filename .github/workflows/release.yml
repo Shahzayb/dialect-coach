@@ -1,0 +1,39 @@
+# Publish a GitHub Release when a v* tag is pushed.
+#
+# Deliberately a separate file from ci.yml. This job needs `contents: write` to create the
+# release, and CI must keep `contents: read` — merging them would hand every push the write
+# permission that only a tag push needs.
+#
+# This workflow does reference a secret, and that is the one place it is fine: GITHUB_TOKEN is
+# Actions' own auto-provisioned repository token. It cannot authenticate to Azure or to Google,
+# so it cannot spend any of the quota this project guards. The rule is "no API keys", and it
+# holds here.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: publish the release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Full history: --generate-notes builds the changelog from the commits since the
+      # previous tag, and a shallow clone has none of them.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # --verify-tag refuses to publish for a tag that is not actually in the repository,
+      # so a mistyped or deleted tag fails here rather than producing an empty release.
+      - name: Create the release
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

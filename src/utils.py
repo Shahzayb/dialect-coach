@@ -13,14 +13,26 @@ import os
 import random
 import re
 import time
+from collections.abc import Callable, Iterable
 from enum import Enum
-from typing import Callable, Iterable, TypeVar
+from typing import Any, Protocol
 
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
-T = TypeVar("T")
+
+class RowLike(Protocol):
+    """A database row as its readers actually use one: subscript by column name.
+
+    `sqlite3.Row` and `dict` both satisfy this and neither is a subtype of the other.
+    A Row is not a `Mapping` — it has no `.get`, and it raises `IndexError` where a dict
+    raises `KeyError`, which is why `progress_view.is_shadowed` catches both. Readers that
+    only subscript should say only that, rather than claiming `Mapping[str, Any]` and being
+    handed a `sqlite3.Row` anyway.
+    """
+
+    def __getitem__(self, key: str, /) -> Any: ...
 
 
 class Mode(str, Enum):
@@ -35,8 +47,8 @@ class Mode(str, Enum):
 # Heuristics chosen for this tool, NOT values Azure defines or endorses. Azure returns a
 # 0-100 score and says nothing about where "bad" starts; these are the cut points the UI
 # colours against, kept here so there is exactly one place to retune them.
-WORD_RED = 80.0      # below this: red
-WORD_AMBER = 95.0    # below this: amber, at or above: green
+WORD_RED = 80.0  # below this: red
+WORD_AMBER = 95.0  # below this: amber, at or above: green
 PHONEME_RED = 60.0
 PHONEME_AMBER = 85.0
 
@@ -89,11 +101,11 @@ AZURE_GOOD_CUT = 90.0
 class AzureBand(str, Enum):
     """Azure's own qualitative band for a pron/accuracy/fluency/prosody score."""
 
-    LOW = "low"              # 0-59
-    FAIR = "fair"             # 60-79
-    GOOD = "good"             # 80-89
-    EXCELLENT = "excellent"   # 90-100
-    NONE = "none"             # no score to band — never render as LOW
+    LOW = "low"  # 0-59
+    FAIR = "fair"  # 60-79
+    GOOD = "good"  # 80-89
+    EXCELLENT = "excellent"  # 90-100
+    NONE = "none"  # no score to band — never render as LOW
 
 
 def azure_score_band(score: float | None) -> AzureBand:
@@ -115,10 +127,10 @@ def azure_score_band(score: float | None) -> AzureBand:
 # the HVPT literature varies block length and criterion from study to study, so these are a
 # defensible reading of it rather than a citation. Kept here so there is exactly one place
 # to retune them.
-PERCEPTION_BLOCK_TRIALS = 20      # a block short enough to do daily without dreading it
-PERCEPTION_REVIEW_TRIALS = 10     # a spaced re-check is a spot check, not a full block
+PERCEPTION_BLOCK_TRIALS = 20  # a block short enough to do daily without dreading it
+PERCEPTION_REVIEW_TRIALS = 10  # a spaced re-check is a spot check, not a full block
 PERCEPTION_GRADUATE_ACCURACY = 0.90
-PERCEPTION_GRADUATE_BLOCKS = 2    # sustained across two, so one lucky block cannot graduate
+PERCEPTION_GRADUATE_BLOCKS = 2  # sustained across two, so one lucky block cannot graduate
 PERCEPTION_REGRESS_ACCURACY = 0.75  # a review below this returns the item to rotation
 
 # At most three active targets, because a target set you cannot hold in your head while
@@ -217,8 +229,8 @@ def _from_streamlit_secrets(name: str) -> str | None:
     try:
         import streamlit as st
 
-        value = st.secrets[name]  # type: ignore[index]
-    except Exception:
+        value = st.secrets[name]
+    except Exception:  # noqa: BLE001 — no Streamlit, no secrets file, no key: all mean None
         return None
     return str(value) if value else None
 
@@ -354,7 +366,8 @@ class SecretRedactingFilter(logging.Filter):
         # Short values would redact half the log; a real key is long.
         self._secrets = sorted(
             {s for s in secrets if s and len(s) >= MIN_REDACTABLE_SECRET_LENGTH},
-            key=len, reverse=True,
+            key=len,
+            reverse=True,
         )
 
     def _scrub(self, text: str) -> str:
@@ -369,7 +382,7 @@ class SecretRedactingFilter(logging.Filter):
         # args interpolated later cannot smuggle a key past the filter.
         try:
             message = record.getMessage()
-        except Exception:
+        except Exception:  # noqa: BLE001 — a log filter that raises would lose the record
             message = str(record.msg)
         scrubbed = self._scrub(message)
         if scrubbed != message:
@@ -420,7 +433,7 @@ class PermanentError(RuntimeError):
     """Not worth retrying: a bad key, an exhausted quota, or a malformed request."""
 
 
-def retry_transient(
+def retry_transient[T](
     fn: Callable[[], T],
     *,
     attempts: int = MAX_SYNTHESIS_ATTEMPTS,
@@ -452,7 +465,10 @@ def retry_transient(
             delay += random.uniform(0, delay / 2)  # jitter: avoid lockstep retries
             logger.warning(
                 "Transient failure (attempt %d/%d), retrying in %.1fs: %s",
-                attempt, attempts, delay, exc,
+                attempt,
+                attempts,
+                delay,
+                exc,
             )
             sleep(delay)
     assert last is not None

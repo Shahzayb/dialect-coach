@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import io
 import os
-from datetime import datetime, timezone
+import threading
+from datetime import UTC, datetime
 
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -19,10 +20,11 @@ import db
 import fallback_coach
 import speech_analyzer as sa
 import utils
-from tests.conftest import ROOT
 from utils import AzureBand, Mode
 
-APP = str(ROOT / "app.py")
+from conftest import ROOT
+
+APP = str(ROOT / "src" / "app.py")
 REFERENCE = (
     "The weather this month has been rather unpredictable. Thursday brought thunder "
     "and thick clouds, while Wednesday stayed warm and clear."
@@ -72,7 +74,8 @@ def test_offline_page_renders_without_the_f0_acknowledgement(run_app) -> None:
 
 def test_online_without_the_f0_acknowledgement_is_refused(run_app) -> None:
     app = run_app(
-        OFFLINE_MODE="false", MONTHLY_BUDGET_USD="0.00",
+        OFFLINE_MODE="false",
+        MONTHLY_BUDGET_USD="0.00",
         AZURE_TIER_CONFIRMED_F0="false",
     )
     assert app.error, "the app must refuse to start rather than risk an S0 resource"
@@ -82,7 +85,8 @@ def test_online_without_the_f0_acknowledgement_is_refused(run_app) -> None:
 
 def test_missing_credentials_are_reported_by_name(run_app) -> None:
     app = run_app(
-        OFFLINE_MODE="false", MONTHLY_BUDGET_USD="0.00",
+        OFFLINE_MODE="false",
+        MONTHLY_BUDGET_USD="0.00",
         AZURE_TIER_CONFIRMED_F0="true",
     )
     assert app.error
@@ -120,8 +124,9 @@ def test_presets_contain_no_digits() -> None:
 # --- Result rendering ---------------------------------------------------------------------
 
 
-def seed_result(app: AppTest, assessment, *, attempt_id: int | None = None,
-                mode: Mode = Mode.DRILL) -> AppTest:
+def seed_result(
+    app: AppTest, assessment, *, attempt_id: int | None = None, mode: Mode = Mode.DRILL
+) -> AppTest:
     """Put an assessment in the session cache the way a successful run would.
 
     The reference text, the row id and the mode travel with it because the widgets that
@@ -131,12 +136,17 @@ def seed_result(app: AppTest, assessment, *, attempt_id: int | None = None,
     from collections import OrderedDict
 
     key = utils.attempt_hash(REFERENCE, b"audio", mode)
-    app.session_state["assessments"] = OrderedDict({
-        key: app_module.CachedAttempt(
-            key=key, assessment=assessment, reference_text=REFERENCE,
-            attempt_id=attempt_id, mode=mode,
-        )
-    })
+    app.session_state["assessments"] = OrderedDict(
+        {
+            key: app_module.CachedAttempt(
+                key=key,
+                assessment=assessment,
+                reference_text=REFERENCE,
+                attempt_id=attempt_id,
+                mode=mode,
+            )
+        }
+    )
     app.session_state["last_key"] = key
     return app.run()
 
@@ -163,8 +173,11 @@ def test_a_result_renders_the_score_breakdown(run_app) -> None:
     # Fixture values from tests/fixtures/sample_azure_response.json: pron 83.0 (good, 80-89),
     # accuracy 89.0 (good), fluency 88.0 (good), prosody 76.4 (fair, 60-79).
     assert "83" in rendered
-    for label, value in (("Accuracy score", "89"), ("Fluency score", "88"),
-                          ("Prosody score", "76")):
+    for label, value in (
+        ("Accuracy score", "89"),
+        ("Fluency score", "88"),
+        ("Prosody score", "76"),
+    ):
         assert f"{label}</span><span>{value} / 100</span>" in rendered
     assert app_module.AZURE_BAND_COLOURS[AzureBand.GOOD] in rendered
     assert app_module.AZURE_BAND_COLOURS[AzureBand.FAIR] in rendered
@@ -271,9 +284,11 @@ def test_a_cached_phrase_is_not_charged_to_the_meter_twice(tmp_path, monkeypatch
     monkeypatch.setenv("OFFLINE_MODE", "false")
     monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
     monkeypatch.setattr(
-        tts, "synthesise",
-        lambda text, **kw: tts.Synthesis(audio=b"WAV", characters=len(text),
-                                         voice="en-US-BrianNeural", attempts=1),
+        tts,
+        "synthesise",
+        lambda text, **kw: tts.Synthesis(
+            audio=b"WAV", characters=len(text), voice="en-US-BrianNeural", attempts=1
+        ),
     )
 
     cache: OrderedDict = OrderedDict()
@@ -285,8 +300,10 @@ def test_a_cached_phrase_is_not_charged_to_the_meter_twice(tmp_path, monkeypatch
         app_module.play(conn, "weather", slow=False, label="test", source="word-0")
 
     assert db.monthly_tts_characters(conn) == len("weather"), "charged once, not four times"
-    assert state["now_playing"] == {"key": ("en-US-BrianNeural", "weather", False),
-                                    "source": "word-0"}
+    assert state["now_playing"] == {
+        "key": ("en-US-BrianNeural", "weather", False),
+        "source": "word-0",
+    }
     conn.close()
 
 
@@ -315,7 +332,7 @@ def test_the_cache_evicts_least_recently_used() -> None:
     for i in range(app_module.CACHE_LIMIT):
         app_module.lru_put(cache, f"key{i}", None, app_module.CACHE_LIMIT)
 
-    app_module.lru_get(cache, "key0")          # re-used, so it must survive
+    app_module.lru_get(cache, "key0")  # re-used, so it must survive
     app_module.lru_put(cache, "overflow", None, app_module.CACHE_LIMIT)
 
     assert len(cache) == app_module.CACHE_LIMIT
@@ -358,11 +375,14 @@ def test_a_retried_assessment_charges_the_meter_for_every_attempt(tmp_path) -> N
     assessment.attempts = 3
 
     db.record_attempt(
-        conn, mode=Mode.DRILL, reference_text=REFERENCE,
+        conn,
+        mode=Mode.DRILL,
+        reference_text=REFERENCE,
         recognised_text=assessment.recognised_text,
         audio_seconds=12.0 * max(assessment.attempts, 1),
         audio_sha256=utils.sha256_bytes(b"x"),
-        overall_scores=assessment.overall_scores, azure_raw=assessment.raw[0],
+        overall_scores=assessment.overall_scores,
+        azure_raw=assessment.raw[0],
         offline=False,
     )
     assert db.monthly_stt_seconds(conn) == 36.0
@@ -397,7 +417,7 @@ def test_a_failed_synthesis_is_returned_not_rendered_in_a_narrow_column(
     outcome = app_module.play(conn, "weather", slow=False, label="x", source="word-0")
 
     assert outcome is not None, "the failure must come back to the caller"
-    icon, message = outcome
+    _icon, message = outcome
     assert "malformed" in message
     conn.close()
 
@@ -431,9 +451,17 @@ def test_a_run_that_fails_after_retries_still_charges_the_meter(tmp_path, monkey
 def test_omitted_words_still_offer_playback(run_app) -> None:
     """A word you skipped is the one you most need to hear a native rendering of."""
     assessment = offline_assessment()
-    assessment.words = [dict(assessment.words[0], word="unpredictable", accuracy=None,
-                             error_type="Omission", error_source="local_diff",
-                             phonemes=[], syllables=[])]
+    assessment.words = [
+        dict(
+            assessment.words[0],
+            word="unpredictable",
+            accuracy=None,
+            error_type="Omission",
+            error_source="local_diff",
+            phonemes=[],
+            syllables=[],
+        )
+    ]
     app = seed_result(run_app(), assessment)
     assert not app.exception
     assert any("Hear it" in b.label for b in app.button)
@@ -463,12 +491,18 @@ def test_a_monotone_span_produces_a_drill_that_names_it_offline(run_app) -> None
     — so this is the offline coach and nothing else.
     """
     assessment = offline_assessment()
-    assessment.words.append({
-        "word": "clouds", "accuracy": 96.0, "error_type": "None",
-        "error_source": "azure", "delivery_error_types": ["Monotone"],
-        "prosody_detail": {"break_length_ms": None, "monotone_confidence": 0.88},
-        "syllables": [], "phonemes": [],
-    })
+    assessment.words.append(
+        {
+            "word": "clouds",
+            "accuracy": 96.0,
+            "error_type": "None",
+            "error_source": "azure",
+            "delivery_error_types": ["Monotone"],
+            "prosody_detail": {"break_length_ms": None, "monotone_confidence": 0.88},
+            "syllables": [],
+            "phonemes": [],
+        }
+    )
 
     app = seed_result(run_app(), assessment)
 
@@ -487,12 +521,18 @@ def test_a_long_span_is_summarised_rather_than_listed_in_full(run_app) -> None:
     practising is quoted in the drill anyway."""
     assessment = offline_assessment()
     for index in range(20):
-        assessment.words.append({
-            "word": f"word{index}", "accuracy": 96.0, "error_type": "None",
-            "error_source": "azure", "delivery_error_types": ["Monotone"],
-            "prosody_detail": {"break_length_ms": None, "monotone_confidence": 0.9},
-            "syllables": [], "phonemes": [],
-        })
+        assessment.words.append(
+            {
+                "word": f"word{index}",
+                "accuracy": 96.0,
+                "error_type": "None",
+                "error_source": "azure",
+                "delivery_error_types": ["Monotone"],
+                "prosody_detail": {"break_length_ms": None, "monotone_confidence": 0.9},
+                "syllables": [],
+                "phonemes": [],
+            }
+        )
 
     app = seed_result(run_app(), assessment)
 
@@ -506,12 +546,18 @@ def test_the_delivery_panel_shows_what_azure_measured(run_app) -> None:
     """Synthetic. The panel and the coaching section read the same helper, so they cannot
     disagree about the number — which is the reason the panel quotes one at all."""
     assessment = offline_assessment()
-    assessment.words.append({
-        "word": "clouds", "accuracy": 96.0, "error_type": "None",
-        "error_source": "azure", "delivery_error_types": ["Monotone"],
-        "prosody_detail": {"break_length_ms": None, "monotone_confidence": 0.88},
-        "syllables": [], "phonemes": [],
-    })
+    assessment.words.append(
+        {
+            "word": "clouds",
+            "accuracy": 96.0,
+            "error_type": "None",
+            "error_source": "azure",
+            "delivery_error_types": ["Monotone"],
+            "prosody_detail": {"break_length_ms": None, "monotone_confidence": 0.88},
+            "syllables": [],
+            "phonemes": [],
+        }
+    )
 
     app = seed_result(run_app(), assessment)
 
@@ -563,13 +609,20 @@ def test_the_report_is_attached_to_the_attempt_row_it_describes(run_app, tmp_pat
     """Stored verbatim, so changing what this panel shows later is a re-parse."""
     conn = db.connect(str(tmp_path / "coach.db"))
     attempt_id = db.record_attempt(
-        conn, mode=Mode.DRILL, reference_text=REFERENCE, recognised_text="x",
-        audio_seconds=1.0, audio_sha256="deadbeef", overall_scores={}, azure_raw={},
+        conn,
+        mode=Mode.DRILL,
+        reference_text=REFERENCE,
+        recognised_text="x",
+        audio_seconds=1.0,
+        audio_sha256="deadbeef",
+        overall_scores={},
+        azure_raw={},
         offline=True,
     )
     seed_result(run_app(), offline_assessment(), attempt_id=attempt_id)
 
     row = db.get_attempt(conn, attempt_id)
+    assert row is not None
     assert row["coach_source"] == fallback_coach.SOURCE_FALLBACK
     assert row["gemini_raw_json"], "the report itself is stored on the offline path"
 
@@ -590,18 +643,29 @@ def test_clicking_the_button_swaps_the_models_report_in(run_app, monkeypatch, tm
     assessment = offline_assessment()
     conn = db.connect(str(tmp_path / "coach.db"))
     attempt_id = db.record_attempt(
-        conn, mode=Mode.DRILL, reference_text=REFERENCE, recognised_text="x",
-        audio_seconds=1.0, audio_sha256="deadbeef", overall_scores={}, azure_raw={},
+        conn,
+        mode=Mode.DRILL,
+        reference_text=REFERENCE,
+        recognised_text="x",
+        audio_seconds=1.0,
+        audio_sha256="deadbeef",
+        overall_scores={},
+        azure_raw={},
         offline=True,
     )
 
     improved = fallback_coach.build(assessment, Mode.DRILL).model_copy(
         update={"overall_comment": "A second opinion from the model."}
     )
-    monkeypatch.setattr(ai_coach, "coach", lambda *a, **k: ai_coach.CoachingResult(
-        report=improved, source=fallback_coach.SOURCE_GEMINI,
-        raw={"candidates": [{"content": {"parts": [{"text": improved.model_dump_json()}]}}]},
-    ))
+    monkeypatch.setattr(
+        ai_coach,
+        "coach",
+        lambda *a, **k: ai_coach.CoachingResult(
+            report=improved,
+            source=fallback_coach.SOURCE_GEMINI,
+            raw={"candidates": [{"content": {"parts": [{"text": improved.model_dump_json()}]}}]},
+        ),
+    )
     monkeypatch.setenv("OFFLINE_MODE", "false")
     monkeypatch.setenv("GEMINI_API_KEY", "placeholder-not-a-real-key")
     monkeypatch.setenv("AZURE_SPEECH_KEY", "placeholder")
@@ -616,7 +680,9 @@ def test_clicking_the_button_swaps_the_models_report_in(run_app, monkeypatch, tm
     assert not app.exception
     assert any("second opinion from the model" in m.value for m in app.markdown)
     assert any(ai_coach.model_name() in c.value for c in app.caption)
-    assert db.get_attempt(conn, attempt_id)["coach_source"] == fallback_coach.SOURCE_GEMINI
+    row = db.get_attempt(conn, attempt_id)
+    assert row is not None
+    assert row["coach_source"] == fallback_coach.SOURCE_GEMINI
 
 
 def test_a_second_click_cannot_spend_another_call(run_app, monkeypatch, tmp_path) -> None:
@@ -761,12 +827,12 @@ def settled_poll(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(st, "rerun", lambda *a, **k: None)
 
 
-def _hanging_job(app: AppTest, stop: "threading.Event") -> app_module.AssessJob:
-    import threading
-
+def _hanging_job(app: AppTest, stop: threading.Event) -> app_module.AssessJob:
     job = app_module.AssessJob(
-        cancel_event=threading.Event(), key="k",
-        reference_text=REFERENCE, mode=Mode.DRILL,
+        cancel_event=threading.Event(),
+        key="k",
+        reference_text=REFERENCE,
+        mode=Mode.DRILL,
     )
     job.thread = threading.Thread(target=stop.wait, daemon=True)
     job.thread.start()
@@ -776,8 +842,6 @@ def _hanging_job(app: AppTest, stop: "threading.Event") -> app_module.AssessJob:
 
 def test_a_running_job_disables_assess_and_offers_stop(run_app, settled_poll) -> None:
     """No double-submit is reachable: the button that starts a run is off while one runs."""
-    import threading
-
     app = run_app()
     never_finishes = threading.Event()
     _hanging_job(app, never_finishes)
@@ -792,8 +856,6 @@ def test_a_running_job_disables_assess_and_offers_stop(run_app, settled_poll) ->
 
 
 def test_clicking_stop_sets_the_cancel_flag(run_app, settled_poll) -> None:
-    import threading
-
     app = run_app()
     never_finishes = threading.Event()
     job = _hanging_job(app, never_finishes)
@@ -805,14 +867,12 @@ def test_clicking_stop_sets_the_cancel_flag(run_app, settled_poll) -> None:
         never_finishes.set()
 
 
-def test_a_second_assess_click_while_running_starts_nothing(run_app, settled_poll,
-                                                            monkeypatch) -> None:
+def test_a_second_assess_click_while_running_starts_nothing(
+    run_app, settled_poll, monkeypatch
+) -> None:
     """The state guard, not the disabled flag, is what closes the double-submit race."""
-    import threading
-
     started: list[int] = []
-    monkeypatch.setattr(app_module, "start_assessment",
-                        lambda *a, **k: started.append(1))
+    monkeypatch.setattr(app_module, "start_assessment", lambda *a, **k: started.append(1))
 
     app = run_app()
     never_finishes = threading.Event()
@@ -825,12 +885,12 @@ def test_a_second_assess_click_while_running_starts_nothing(run_app, settled_pol
 
 
 def test_a_cancelled_job_is_reported_and_clears_itself(run_app) -> None:
-    import threading
-
     app = run_app()
     job = app_module.AssessJob(
-        cancel_event=threading.Event(), key="k",
-        reference_text=REFERENCE, mode=Mode.DRILL,
+        cancel_event=threading.Event(),
+        key="k",
+        reference_text=REFERENCE,
+        mode=Mode.DRILL,
     )
     job.thread = threading.Thread(target=lambda: None)
     job.thread.start()
@@ -847,12 +907,12 @@ def test_a_cancelled_job_is_reported_and_clears_itself(run_app) -> None:
 
 def test_a_job_that_died_without_an_outcome_does_not_crash_the_page(run_app) -> None:
     """Unreachable in practice — the worker catches everything — but not a crash if it happens."""
-    import threading
-
     app = run_app()
     job = app_module.AssessJob(
-        cancel_event=threading.Event(), key="k",
-        reference_text=REFERENCE, mode=Mode.DRILL,
+        cancel_event=threading.Event(),
+        key="k",
+        reference_text=REFERENCE,
+        mode=Mode.DRILL,
     )
     job.thread = threading.Thread(target=lambda: None)
     job.thread.start()
@@ -868,11 +928,17 @@ def test_a_job_that_died_without_an_outcome_does_not_crash_the_page(run_app) -> 
 def test_words_scoring_full_marks_are_collapsed_out_of_the_flagged_list(run_app) -> None:
     """A monotone 100 is real, but it is not what the flagged list is for."""
     assessment = offline_assessment()
-    assessment.words.append({
-        "word": "clouds", "accuracy": 100.0, "error_type": "None",
-        "error_source": "azure", "delivery_error_types": ["Monotone"],
-        "syllables": [], "phonemes": [],
-    })
+    assessment.words.append(
+        {
+            "word": "clouds",
+            "accuracy": 100.0,
+            "error_type": "None",
+            "error_source": "azure",
+            "delivery_error_types": ["Monotone"],
+            "syllables": [],
+            "phonemes": [],
+        }
+    )
 
     app = seed_result(run_app(), assessment)
 
@@ -886,11 +952,17 @@ def test_a_collapsed_word_still_gets_a_unique_playback_key(run_app) -> None:
     """The word index keeps counting across both groups; a repeated key is a hard error."""
     assessment = offline_assessment()
     for word in ("clouds", "thunder"):
-        assessment.words.append({
-            "word": word, "accuracy": 100.0, "error_type": "None",
-            "error_source": "azure", "delivery_error_types": ["Monotone"],
-            "syllables": [], "phonemes": [],
-        })
+        assessment.words.append(
+            {
+                "word": word,
+                "accuracy": 100.0,
+                "error_type": "None",
+                "error_source": "azure",
+                "delivery_error_types": ["Monotone"],
+                "syllables": [],
+                "phonemes": [],
+            }
+        )
 
     app = seed_result(run_app(), assessment)
 
@@ -907,6 +979,7 @@ def test_a_collapsed_word_still_gets_a_unique_playback_key(run_app) -> None:
 def seed_attempts(app: AppTest, count: int = 3, *, benchmark: bool = False) -> None:
     """Write attempts straight into the app's own database, the way a real session would."""
     import json
+
     import progress_view
 
     payload = json.loads((ROOT / "tests" / "fixtures" / "sample_azure_response.json").read_text())
@@ -916,10 +989,18 @@ def seed_attempts(app: AppTest, count: int = 3, *, benchmark: bool = False) -> N
             conn,
             mode=Mode.PARAGRAPH if benchmark else Mode.DRILL,
             reference_text=progress_view.BENCHMARK_PASSAGE if benchmark else REFERENCE,
-            recognised_text=REFERENCE, audio_seconds=12.0, audio_sha256=f"seed-{index}",
-            overall_scores={"pron_score": 80.0 + index, "accuracy": 85.0, "fluency": 78.0,
-                            "completeness": 100.0, "prosody": None if index else 70.0},
-            azure_raw=payload, created_at=f"2026-07-0{index + 1}T08:00:00Z",
+            recognised_text=REFERENCE,
+            audio_seconds=12.0,
+            audio_sha256=f"seed-{index}",
+            overall_scores={
+                "pron_score": 80.0 + index,
+                "accuracy": 85.0,
+                "fluency": 78.0,
+                "completeness": 100.0,
+                "prosody": None if index else 70.0,
+            },
+            azure_raw=payload,
+            created_at=f"2026-07-0{index + 1}T08:00:00Z",
         )
     conn.close()
 
@@ -999,7 +1080,8 @@ def test_the_rhythm_section_reports_the_fixtures_npvi(run_app) -> None:
 
 
 def test_rhythm_without_a_baseline_says_the_number_has_no_comparison(
-    run_app, monkeypatch: pytest.MonkeyPatch,
+    run_app,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The published-band trap, named out loud rather than left to be assumed."""
     import rhythm
@@ -1013,15 +1095,21 @@ def test_rhythm_without_a_baseline_says_the_number_has_no_comparison(
 
 
 def test_rhythm_against_a_baseline_names_the_voice_and_the_direction(
-    run_app, monkeypatch: pytest.MonkeyPatch,
+    run_app,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A synthesiser, not a native speaker — and which way a lower score points."""
     import rhythm
 
-    monkeypatch.setattr(rhythm, "baseline", lambda *a, **k: rhythm.Baseline(
-        rhythm=rhythm.Rhythm(npvi=58.4, pairs=180, intervals=206, runs=26),
-        voice="en-US-BrianNeural", captured_at="2026-08-19T00:00:00Z",
-    ))
+    monkeypatch.setattr(
+        rhythm,
+        "baseline",
+        lambda *a, **k: rhythm.Baseline(
+            rhythm=rhythm.Rhythm(npvi=58.4, pairs=180, intervals=206, runs=26),
+            voice="en-US-BrianNeural",
+            captured_at="2026-08-19T00:00:00Z",
+        ),
+    )
     app = seed_result(run_app(), offline_assessment())
     said = " ".join(c.value for c in app.caption)
     assert "en-US-BrianNeural" in said
@@ -1038,7 +1126,8 @@ def test_too_little_speech_shows_no_rhythm_number(run_app, monkeypatch) -> None:
 
     assessment = offline_assessment()
     monkeypatch.setattr(
-        rhythm, "npvi",
+        rhythm,
+        "npvi",
         lambda *a, **k: rhythm.Rhythm(npvi=None, pairs=3, intervals=4, runs=1),
     )
     app = seed_result(run_app(), assessment)
@@ -1060,15 +1149,19 @@ def seed_flagged_history(times: int = 2) -> None:
     """Record `times` attempts of the captured drill, whose headline fault is /θ/ → /s/."""
     import json
 
-    payload = json.loads((ROOT / "tests" / "fixtures" /
-                          "sample_azure_response.json").read_text())
+    payload = json.loads((ROOT / "tests" / "fixtures" / "sample_azure_response.json").read_text())
     conn = db.connect()
     for index in range(times):
         db.record_attempt(
-            conn, mode=Mode.DRILL, reference_text=REFERENCE,
-            recognised_text=REFERENCE, audio_seconds=12.8,
-            audio_sha256=f"seed-{index}", overall_scores={"pron_score": 83.0},
-            azure_raw=payload, offline=False,
+            conn,
+            mode=Mode.DRILL,
+            reference_text=REFERENCE,
+            recognised_text=REFERENCE,
+            audio_seconds=12.8,
+            audio_sha256=f"seed-{index}",
+            overall_scores={"pron_score": 83.0},
+            azure_raw=payload,
+            offline=False,
             created_at=f"2026-08-{10 + index:02d}T00:00:00Z",
         )
     conn.close()
@@ -1107,7 +1200,8 @@ def test_a_recurring_substitution_is_promoted_from_the_stored_attempts(run_app) 
 
     parsed = progress_view.parse_attempts(db.attempt_payloads(conn))
     offered = {
-        (c.item, c.kind) for c in practice_queue.candidates(
+        (c.item, c.kind)
+        for c in practice_queue.candidates(
             progress_view.flagged_phonemes(parsed).to_dict("records"),
             progress_view.weak_syllables(parsed).to_dict("records"),
         )
@@ -1138,7 +1232,7 @@ def test_a_promoted_target_survives_a_restart(run_app) -> None:
 
     import streamlit as st
 
-    st.cache_resource.clear()          # a fresh process would have no connection either
+    st.cache_resource.clear()  # a fresh process would have no connection either
     conn = db.connect()
     rows = db.targets(conn)
     assert rows and rows[0]["state"] == "active"
@@ -1159,9 +1253,9 @@ def test_the_evidence_and_the_rule_are_both_on_screen(run_app) -> None:
     seed_flagged_history()
     app = run_app()
     rendered = " ".join(block.value for block in app.markdown)
-    assert "flagged in 2 separate attempts" in rendered   # the evidence, with numbers
-    assert "90%" in rendered                              # the rule
-    assert "50%" in rendered                              # and the chance floor beside it
+    assert "flagged in 2 separate attempts" in rendered  # the evidence, with numbers
+    assert "90%" in rendered  # the rule
+    assert "50%" in rendered  # and the chance floor beside it
 
 
 def test_the_target_set_is_capped_at_three(run_app) -> None:
@@ -1248,9 +1342,7 @@ def test_a_block_runs_end_to_end_and_charges_only_what_it_synthesised(
     import perception_trainer
 
     expected = perception_trainer.stimuli(block)
-    assert sorted(no_synthesis) == sorted(expected), (
-        "every clip the block needs, and nothing else"
-    )
+    assert sorted(no_synthesis) == sorted(expected), "every clip the block needs, and nothing else"
     charged = db.monthly_tts_characters(conn) - before
     assert charged == sum(len(text) for text, _ in expected)
 
@@ -1323,9 +1415,7 @@ def perception_trainer_min_voices() -> int:
     return perception_trainer.MIN_VOICES
 
 
-def test_an_abandoned_block_keeps_its_answers_but_earns_no_verdict(
-    run_app, no_synthesis
-) -> None:
+def test_an_abandoned_block_keeps_its_answers_but_earns_no_verdict(run_app, no_synthesis) -> None:
     """Store the evidence, not only the verdict — the two are separate questions."""
     import practice_queue
 
@@ -1419,8 +1509,9 @@ def shadow_synthesis(monkeypatch: pytest.MonkeyPatch, tmp_path):
             on_attempt(1)
         calls.append((text, slow))
         payload = tts.payload_for(text, slow=slow, voice=voice)
-        return tts.Synthesis(audio=real_wav(), characters=len(payload),
-                             voice=voice or tts.voice_name(), attempts=1)
+        return tts.Synthesis(
+            audio=real_wav(), characters=len(payload), voice=voice or tts.voice_name(), attempts=1
+        )
 
     monkeypatch.setattr(tts, "synthesise", fake)
     return calls
@@ -1559,10 +1650,19 @@ def test_a_shadowed_read_is_stored_tagged(run_app, shadow_synthesis) -> None:
 
     conn = db.connect(os.environ["DB_PATH"])
     attempt_id = db.record_attempt(
-        conn, mode=Mode.PARAGRAPH, reference_text=passage, recognised_text=passage,
-        audio_seconds=70.0, audio_sha256="shadowed-read",
-        overall_scores={"pron_score": 80.0, "accuracy": 85.0, "fluency": 78.0,
-                        "completeness": 100.0, "prosody": 70.0},
+        conn,
+        mode=Mode.PARAGRAPH,
+        reference_text=passage,
+        recognised_text=passage,
+        audio_seconds=70.0,
+        audio_sha256="shadowed-read",
+        overall_scores={
+            "pron_score": 80.0,
+            "accuracy": 85.0,
+            "fluency": 78.0,
+            "completeness": 100.0,
+            "prosody": 70.0,
+        },
         azure_raw={"RecognitionStatus": "Success"},
     )
     db.tag_attempt(conn, attempt_id, shadowing.SHADOW_TAG)
@@ -1582,8 +1682,10 @@ def test_finishing_a_read_puts_the_passage_on_the_queue(run_app, shadow_synthesi
     assert [r for r in db.targets(conn) if r["kind"] == practice_queue.SHADOW] == []
 
     app_module.record_shadow_session(
-        conn, str(state["title"]), str(state["passage"]),
-        now=datetime(2026, 8, 19, tzinfo=timezone.utc),
+        conn,
+        str(state["title"]),
+        str(state["passage"]),
+        now=datetime(2026, 8, 19, tzinfo=UTC),
     )
     rows = [r for r in db.targets(conn) if r["kind"] == practice_queue.SHADOW]
     conn.close()
@@ -1599,9 +1701,10 @@ def test_a_shadow_target_does_not_appear_in_the_three_slots(run_app, shadow_synt
     seed_flagged_history()
     conn = db.connect(os.environ["DB_PATH"])
     app_module.record_shadow_session(
-        conn, "Benchmark", app_module.PRESETS[Mode.PARAGRAPH][
-            list(app_module.PRESETS[Mode.PARAGRAPH])[0]
-        ], now=datetime(2026, 8, 19, tzinfo=timezone.utc),
+        conn,
+        "Benchmark",
+        app_module.PRESETS[Mode.PARAGRAPH][list(app_module.PRESETS[Mode.PARAGRAPH])[0]],
+        now=datetime(2026, 8, 19, tzinfo=UTC),
     )
     conn.close()
 
@@ -1611,10 +1714,13 @@ def test_a_shadow_target_does_not_appear_in_the_three_slots(run_app, shadow_synt
     # The promoted targets are counted; the shadowing passage sitting beside them is not, and
     # it gets its own section rather than a card in this list.
     conn = db.connect(os.environ["DB_PATH"])
-    expected = len([
-        r for r in db.targets(conn, state=practice_queue.ACTIVE)
-        if practice_queue.promotable(str(r["kind"]))
-    ])
+    expected = len(
+        [
+            r
+            for r in db.targets(conn, state=practice_queue.ACTIVE)
+            if practice_queue.promotable(str(r["kind"]))
+        ]
+    )
     conn.close()
     assert expected, "the seeded history promoted nothing, so this proves nothing"
     assert f"Working on ({expected} of {utils.MAX_ACTIVE_TARGETS})" in headings
@@ -1635,16 +1741,21 @@ def test_the_progress_tab_names_the_delta_against_a_cold_read(run_app) -> None:
     import shadowing
 
     conn = db.connect(os.environ["DB_PATH"])
-    for index, (fluency, prosody, shadowed) in enumerate(
-        [(70.0, 60.0, False), (78.0, 69.0, True)]
-    ):
+    for index, (fluency, prosody, shadowed) in enumerate([(70.0, 60.0, False), (78.0, 69.0, True)]):
         attempt_id = db.record_attempt(
-            conn, mode=Mode.PARAGRAPH,
+            conn,
+            mode=Mode.PARAGRAPH,
             reference_text=progress_view.BENCHMARK_PASSAGE,
             recognised_text=progress_view.BENCHMARK_PASSAGE,
-            audio_seconds=70.0, audio_sha256=f"pair-{index}",
-            overall_scores={"pron_score": 80.0, "accuracy": 85.0, "fluency": fluency,
-                            "completeness": 100.0, "prosody": prosody},
+            audio_seconds=70.0,
+            audio_sha256=f"pair-{index}",
+            overall_scores={
+                "pron_score": 80.0,
+                "accuracy": 85.0,
+                "fluency": fluency,
+                "completeness": 100.0,
+                "prosody": prosody,
+            },
             azure_raw={"RecognitionStatus": "Success"},
             created_at=f"2026-07-0{index + 1}T08:00:00Z",
         )
@@ -1668,8 +1779,6 @@ def test_the_tag_travels_through_the_worker_thread(monkeypatch: pytest.MonkeyPat
     a tag that failed to land there would be invisible until a shadowed read had already gone
     onto the cold trajectory. Offline, so it replays the fixture and spends nothing.
     """
-    import threading
-
     import shadowing
 
     conn = db.connect(":memory:")
@@ -1694,11 +1803,14 @@ def test_the_tag_travels_through_the_worker_thread(monkeypatch: pytest.MonkeyPat
 
 def test_an_untagged_assessment_writes_no_tag(monkeypatch: pytest.MonkeyPatch) -> None:
     """A cold read must stay untagged, or the trajectory it belongs on would lose it."""
-    import threading
-
     conn = db.connect(":memory:")
     outcome = app_module.run_assessment_job(
-        conn, b"RIFF" + b"\x00" * 40, 12.0, REFERENCE, Mode.DRILL, threading.Event(),
+        conn,
+        b"RIFF" + b"\x00" * 40,
+        12.0,
+        REFERENCE,
+        Mode.DRILL,
+        threading.Event(),
     )
     assert outcome.attempt_id is not None
     assert db.tags_for(conn, outcome.attempt_id) == set()
@@ -1729,12 +1841,17 @@ def test_a_shadowed_result_renders_on_exactly_one_surface(
 
     key = utils.attempt_hash(passage, b"take", Mode.PARAGRAPH)
     state["key"] = key
-    app.session_state["assessments"] = OrderedDict({
-        key: app_module.CachedAttempt(
-            key=key, assessment=sa.analyse("/nonexistent.wav", passage, Mode.PARAGRAPH),
-            reference_text=passage, attempt_id=1, mode=Mode.PARAGRAPH,
-        )
-    })
+    app.session_state["assessments"] = OrderedDict(
+        {
+            key: app_module.CachedAttempt(
+                key=key,
+                assessment=sa.analyse("/nonexistent.wav", passage, Mode.PARAGRAPH),
+                reference_text=passage,
+                attempt_id=1,
+                mode=Mode.PARAGRAPH,
+            )
+        }
+    )
     app.session_state["last_key"] = key
     app.session_state[app_module.RESULT_OWNER_KEY] = app_module.SHADOW_OWNER
     app = app.run()
@@ -1768,9 +1885,10 @@ def test_a_shadow_row_alone_still_reads_as_an_empty_queue(run_app, shadow_synthe
     """
     conn = db.connect(os.environ["DB_PATH"])
     app_module.record_shadow_session(
-        conn, "Benchmark", app_module.PRESETS[Mode.PARAGRAPH][
-            list(app_module.PRESETS[Mode.PARAGRAPH])[0]
-        ], now=datetime(2026, 8, 19, tzinfo=timezone.utc),
+        conn,
+        "Benchmark",
+        app_module.PRESETS[Mode.PARAGRAPH][list(app_module.PRESETS[Mode.PARAGRAPH])[0]],
+        now=datetime(2026, 8, 19, tzinfo=UTC),
     )
     conn.close()
 

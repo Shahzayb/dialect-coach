@@ -31,18 +31,20 @@ import argparse
 import json
 import random
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-import db  # noqa: E402
-import perception_trainer  # noqa: E402
-import practice_queue  # noqa: E402
-import progress_view  # noqa: E402
-import shadowing  # noqa: E402
-import utils  # noqa: E402
-from utils import Mode  # noqa: E402
+from typing import Any
+
+import db
+import perception_trainer
+import practice_queue
+import progress_view
+import shadowing
+import utils
+from utils import Mode
 
 DEFAULT_PATH = "data/seed_demo.db"
 FIXTURES = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
@@ -73,22 +75,44 @@ FIXTURE_REFERENCE = (
 # real ranking would show rather than an arbitrary scatter. SYNTHETIC — invented here for a
 # demo database, never captured from Azure.
 _TROUBLE: dict[str, tuple[str, str]] = {
-    "three": ("θ", "t"), "things": ("θ", "t"), "third": ("θ", "t"), "thoughts": ("θ", "s"),
-    "month": ("θ", "s"), "breath": ("θ", "f"), "thought": ("θ", "t"),
-    "brother": ("ð", "d"), "breathe": ("ð", "d"), "whether": ("ð", "d"),
-    "value": ("v", "w"), "vowel": ("v", "w"), "believe": ("v", "w"),
-    "world": ("l", "ɹ"), "school": ("l", "ɹ"), "careful": ("l", "ɹ"), "full": ("l", "ɹ"),
-    "asked": ("t", ""), "helped": ("t", ""), "next": ("t", ""), "first": ("t", ""),
-    "sure": ("ʃ", "s"), "short": ("ʃ", "s"),
-    "judge": ("dʒ", "z"), "joy": ("dʒ", "z"),
+    "three": ("θ", "t"),
+    "things": ("θ", "t"),
+    "third": ("θ", "t"),
+    "thoughts": ("θ", "s"),
+    "month": ("θ", "s"),
+    "breath": ("θ", "f"),
+    "thought": ("θ", "t"),
+    "brother": ("ð", "d"),
+    "breathe": ("ð", "d"),
+    "whether": ("ð", "d"),
+    "value": ("v", "w"),
+    "vowel": ("v", "w"),
+    "believe": ("v", "w"),
+    "world": ("l", "ɹ"),
+    "school": ("l", "ɹ"),
+    "careful": ("l", "ɹ"),
+    "full": ("l", "ɹ"),
+    "asked": ("t", ""),
+    "helped": ("t", ""),
+    "next": ("t", ""),
+    "first": ("t", ""),
+    "sure": ("ʃ", "s"),
+    "short": ("ʃ", "s"),
+    "judge": ("dʒ", "z"),
+    "joy": ("dʒ", "z"),
 }
 
 _TICKS_PER_SECOND = 10_000_000
 
 
-def _word_payload(word: str, offset: int, duration: int, accuracy: float,
-                  substitution: tuple[str, str] | None,
-                  timed: list[dict] | None = None) -> dict:
+def _word_payload(
+    word: str,
+    offset: int,
+    duration: int,
+    accuracy: float,
+    substitution: tuple[str, str] | None,
+    timed: list[dict] | None = None,
+) -> dict:
     """One word in Azure's own shape, down to the phoneme.
 
     Only the fields this project's parser reads are filled in. Note `ErrorType` and
@@ -102,17 +126,24 @@ def _word_payload(word: str, offset: int, duration: int, accuracy: float,
     phonemes = list(timed or [])
     if substitution:
         expected, produced = substitution
-        phonemes.append({
-            "Phoneme": expected,
-            "PronunciationAssessment": {
-                "AccuracyScore": accuracy,
-                # No differing alternate means "weakened or dropped", which is what final
-                # cluster simplification looks like — the parser buckets it as (unclear).
-                "NBestPhonemes": ([{"Phoneme": produced, "Score": 96.0},
-                                   {"Phoneme": expected, "Score": accuracy}]
-                                  if produced else [{"Phoneme": expected, "Score": accuracy}]),
-            },
-        })
+        phonemes.append(
+            {
+                "Phoneme": expected,
+                "PronunciationAssessment": {
+                    "AccuracyScore": accuracy,
+                    # No differing alternate means "weakened or dropped", which is what final
+                    # cluster simplification looks like — the parser buckets it as (unclear).
+                    "NBestPhonemes": (
+                        [
+                            {"Phoneme": produced, "Score": 96.0},
+                            {"Phoneme": expected, "Score": accuracy},
+                        ]
+                        if produced
+                        else [{"Phoneme": expected, "Score": accuracy}]
+                    ),
+                },
+            }
+        )
     return {
         "Word": word,
         "Offset": offset,
@@ -120,8 +151,12 @@ def _word_payload(word: str, offset: int, duration: int, accuracy: float,
         "PronunciationAssessment": {
             "AccuracyScore": accuracy,
             "ErrorType": "Mispronunciation" if accuracy < utils.WORD_RED else "None",
-            "Feedback": {"Prosody": {"Break": {"ErrorTypes": ["None"], "BreakLength": 0},
-                                     "Intonation": {"ErrorTypes": []}}},
+            "Feedback": {
+                "Prosody": {
+                    "Break": {"ErrorTypes": ["None"], "BreakLength": 0},
+                    "Intonation": {"ErrorTypes": []},
+                }
+            },
         },
         "Syllables": [],
         "Phonemes": phonemes,
@@ -147,8 +182,10 @@ def _baseline_phonemes() -> list[list[dict]] | None:
     try:
         captured = json.loads(BASELINE_FIXTURE.read_text(encoding="utf-8"))
         return [
-            [{"Phoneme": p["Phoneme"], "Duration": p["Duration"]}
-             for p in (word.get("Phonemes") or [])]
+            [
+                {"Phoneme": p["Phoneme"], "Duration": p["Duration"]}
+                for p in (word.get("Phonemes") or [])
+            ]
             for payload in captured["payloads"]
             for word in payload["NBest"][0].get("Words") or []
         ]
@@ -156,8 +193,9 @@ def _baseline_phonemes() -> list[list[dict]] | None:
         return None
 
 
-def _timed_phonemes(borrowed: list[dict], offset: int, flatten: float,
-                    rng: random.Random) -> tuple[list[dict], int]:
+def _timed_phonemes(
+    borrowed: list[dict], offset: int, flatten: float, rng: random.Random
+) -> tuple[list[dict], int]:
     """Lay borrowed phonemes out from `offset`, pulled toward equal length by `flatten`.
 
     `flatten` at 1.0 makes every phoneme in the word the same length — a perfectly
@@ -178,18 +216,22 @@ def _timed_phonemes(borrowed: list[dict], offset: int, flatten: float,
         jittered = pulled * rng.uniform(0.92, 1.08)
         # Back onto the 10 ms grid, and never zero — a zero-length segment is not a thing
         # Azure emits, and `rhythm.npvi` would drop it rather than measure it.
-        duration = max(_FRAME, int(round(jittered / _FRAME)) * _FRAME)
-        laid_out.append({
-            "Phoneme": phoneme["Phoneme"],
-            "Offset": cursor,
-            "Duration": duration,
-            "PronunciationAssessment": {"AccuracyScore": 100.0},
-        })
+        duration = max(_FRAME, round(jittered / _FRAME) * _FRAME)
+        laid_out.append(
+            {
+                "Phoneme": phoneme["Phoneme"],
+                "Offset": cursor,
+                "Duration": duration,
+                "PronunciationAssessment": {"AccuracyScore": 100.0},
+            }
+        )
         cursor += duration + _FRAME
     return laid_out, cursor - _FRAME
 
 
-def benchmark_payload(rng: random.Random, scores: dict[str, float], skill: float) -> dict:
+def benchmark_payload(
+    rng: random.Random, scores: dict[str, float | None], skill: float
+) -> dict[str, Any]:
     """An Azure payload for one reading of the benchmark passage.
 
     `skill` runs 0 (first read) to 1 (last): the troublesome words climb out of the red as it
@@ -219,8 +261,7 @@ def benchmark_payload(rng: random.Random, scores: dict[str, float], skill: float
             # trips over the odd ordinary word too, so one in twelve dips below it — but
             # if every word dipped, "the" and "i" would head the flagged-word ranking and
             # the seeded picture would say nothing about the sounds being measured.
-            accuracy = (rng.uniform(84.0, 94.0) if rng.random() < 0.08
-                        else rng.uniform(96.0, 100.0))
+            accuracy = rng.uniform(84.0, 94.0) if rng.random() < 0.08 else rng.uniform(96.0, 100.0)
         if borrowed is None:
             timed, duration = None, int(_TICKS_PER_SECOND * rng.uniform(0.22, 0.42))
         else:
@@ -228,8 +269,9 @@ def benchmark_payload(rng: random.Random, scores: dict[str, float], skill: float
             # payload is internally consistent the way a real one is.
             timed, end = _timed_phonemes(borrowed[index], offset, flatten, rng)
             duration = (end - offset) if timed else int(_TICKS_PER_SECOND * 0.3)
-        payload_words.append(_word_payload(word, offset, duration, round(accuracy, 1),
-                                           substitution, timed))
+        payload_words.append(
+            _word_payload(word, offset, duration, round(accuracy, 1), substitution, timed)
+        )
         offset += duration + int(_TICKS_PER_SECOND * 0.04)
 
     return {
@@ -237,17 +279,19 @@ def benchmark_payload(rng: random.Random, scores: dict[str, float], skill: float
         "Offset": 0,
         "Duration": offset,
         "DisplayText": progress_view.BENCHMARK_PASSAGE,
-        "NBest": [{
-            "Display": progress_view.BENCHMARK_PASSAGE,
-            "PronunciationAssessment": {
-                "AccuracyScore": scores["accuracy"],
-                "FluencyScore": scores["fluency"],
-                "ProsodyScore": scores["prosody"] if scores["prosody"] is not None else 0.0,
-                "CompletenessScore": scores["completeness"],
-                "PronScore": scores["pron_score"],
-            },
-            "Words": payload_words,
-        }],
+        "NBest": [
+            {
+                "Display": progress_view.BENCHMARK_PASSAGE,
+                "PronunciationAssessment": {
+                    "AccuracyScore": scores["accuracy"],
+                    "FluencyScore": scores["fluency"],
+                    "ProsodyScore": scores["prosody"] if scores["prosody"] is not None else 0.0,
+                    "CompletenessScore": scores["completeness"],
+                    "PronScore": scores["pron_score"],
+                },
+                "Words": payload_words,
+            }
+        ],
     }
 
 
@@ -257,6 +301,7 @@ def _scores(rng: random.Random, skill: float, *, spread: float) -> dict[str, flo
     That None is deliberate: the chart has to render a NULL prosody as a gap and never as a
     zero, and a seeded history that never contains one cannot show whether it does.
     """
+
     def value(base: float, gain: float) -> float:
         return round(min(99.5, max(35.0, base + gain * skill + rng.uniform(-spread, spread))), 1)
 
@@ -281,7 +326,7 @@ def seed(path: str, *, days: int, seed_value: int) -> int:
     rng = random.Random(seed_value)
     conn = db.connect(path)
     written = 0
-    start = datetime.now(timezone.utc).replace(hour=8, minute=0, second=0, microsecond=0)
+    start = datetime.now(UTC).replace(hour=8, minute=0, second=0, microsecond=0)
 
     drill_fixture = json.loads((FIXTURES / "sample_azure_response.json").read_text())
     paragraph_fixture = json.loads((FIXTURES / "sample_azure_continuous.json").read_text())
@@ -292,12 +337,17 @@ def seed(path: str, *, days: int, seed_value: int) -> int:
         created_at = when.strftime("%Y-%m-%dT%H:%M:%SZ")
 
         if day % BENCHMARK_EVERY_DAYS == 0:
-            scores = _scores(rng, skill, spread=2.0)   # the fixed passage varies least
+            scores = _scores(rng, skill, spread=2.0)  # the fixed passage varies least
             db.record_attempt(
-                conn, mode=Mode.PARAGRAPH, reference_text=progress_view.BENCHMARK_PASSAGE,
-                recognised_text=progress_view.BENCHMARK_PASSAGE, audio_seconds=82.0,
-                audio_sha256=f"benchmark-{day}", overall_scores=scores,
-                azure_raw=benchmark_payload(rng, {**scores}, skill), created_at=created_at,
+                conn,
+                mode=Mode.PARAGRAPH,
+                reference_text=progress_view.BENCHMARK_PASSAGE,
+                recognised_text=progress_view.BENCHMARK_PASSAGE,
+                audio_seconds=82.0,
+                audio_sha256=f"benchmark-{day}",
+                overall_scores=scores,
+                azure_raw=benchmark_payload(rng, {**scores}, skill),
+                created_at=created_at,
             )
             written += 1
 
@@ -316,12 +366,17 @@ def seed(path: str, *, days: int, seed_value: int) -> int:
             scores = _scores(rng, skill, spread=1.0)
             gap = SHADOW_GAP_START + (SHADOW_GAP_END - SHADOW_GAP_START) * skill
             for metric in ("fluency", "prosody"):
-                if scores[metric] is not None:
-                    scores[metric] = round(min(99.5, scores[metric] + gap), 1)
+                value = scores[metric]
+                if value is not None:
+                    scores[metric] = round(min(99.5, value + gap), 1)
             attempt_id = db.record_attempt(
-                conn, mode=Mode.PARAGRAPH, reference_text=progress_view.BENCHMARK_PASSAGE,
-                recognised_text=progress_view.BENCHMARK_PASSAGE, audio_seconds=88.0,
-                audio_sha256=f"shadowed-{day}", overall_scores=scores,
+                conn,
+                mode=Mode.PARAGRAPH,
+                reference_text=progress_view.BENCHMARK_PASSAGE,
+                recognised_text=progress_view.BENCHMARK_PASSAGE,
+                audio_seconds=88.0,
+                audio_sha256=f"shadowed-{day}",
+                overall_scores=scores,
                 azure_raw=benchmark_payload(rng, {**scores}, skill),
                 created_at=when.replace(hour=12).strftime("%Y-%m-%dT%H:%M:%SZ"),
             )
@@ -334,9 +389,12 @@ def seed(path: str, *, days: int, seed_value: int) -> int:
         if rng.random() < 0.72:
             drill = rng.random() < 0.5
             db.record_attempt(
-                conn, mode=Mode.DRILL if drill else Mode.PARAGRAPH,
-                reference_text=FIXTURE_REFERENCE, recognised_text=FIXTURE_REFERENCE,
-                audio_seconds=13.0 if drill else 34.0, audio_sha256=f"practice-{day}",
+                conn,
+                mode=Mode.DRILL if drill else Mode.PARAGRAPH,
+                reference_text=FIXTURE_REFERENCE,
+                recognised_text=FIXTURE_REFERENCE,
+                audio_seconds=13.0 if drill else 34.0,
+                audio_sha256=f"practice-{day}",
                 overall_scores=_scores(rng, skill, spread=7.5),
                 azure_raw=drill_fixture if drill else paragraph_fixture,
                 created_at=when.replace(hour=19).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -376,7 +434,9 @@ def seed_blocks(conn, rng: random.Random, start: datetime) -> None:
 
     candidate = trainable[0]
     target_id = db.upsert_target(
-        conn, item=candidate.item, kind=candidate.kind,
+        conn,
+        item=candidate.item,
+        kind=candidate.kind,
         evidence={**candidate.evidence, "why": candidate.why},
     )
     expected = str(candidate.evidence["expected"])
@@ -387,8 +447,11 @@ def seed_blocks(conn, rng: random.Random, start: datetime) -> None:
         heard = db.heard_stimuli(conn, candidate.item)
         try:
             block = perception_trainer.build_block(
-                item=candidate.item, expected=expected, produced=produced,
-                heard=heard, rng=rng,
+                item=candidate.item,
+                expected=expected,
+                produced=produced,
+                heard=heard,
+                rng=rng,
             )
         except perception_trainer.BlockError:
             return
@@ -398,20 +461,32 @@ def seed_blocks(conn, rng: random.Random, start: datetime) -> None:
         block_id = f"seed-{day}"
         for trial, correct in zip(block.trials, outcomes):
             db.record_trial(
-                conn, block_id=block_id, target_id=target_id, item=candidate.item,
-                word=trial.word, voice=trial.voice, novel=trial.novel,
+                conn,
+                block_id=block_id,
+                target_id=target_id,
+                item=candidate.item,
+                word=trial.word,
+                voice=trial.voice,
+                novel=trial.novel,
                 alternatives=len(trial.alternatives),
                 answered=trial.word if correct else trial.other,
-                correct=correct, created_at=when,
+                correct=correct,
+                created_at=when,
             )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--path", default=DEFAULT_PATH, help=f"database to write (default {DEFAULT_PATH})")
+    parser.add_argument(
+        "--path", default=DEFAULT_PATH, help=f"database to write (default {DEFAULT_PATH})"
+    )
     parser.add_argument("--days", type=int, default=30, help="how many days of history")
-    parser.add_argument("--seed", type=int, default=20260819,
-                        help="random seed; the same seed always draws the same picture")
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=20260819,
+        help="random seed; the same seed always draws the same picture",
+    )
     args = parser.parse_args()
 
     written = seed(args.path, days=args.days, seed_value=args.seed)

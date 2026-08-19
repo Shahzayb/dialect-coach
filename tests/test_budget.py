@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import pytest
 
@@ -12,18 +13,18 @@ import db
 from budget import BudgetError, TierNotAcknowledged
 from utils import Mode
 
-WHEN = datetime(2026, 8, 18, tzinfo=timezone.utc)
+WHEN = datetime(2026, 8, 18, tzinfo=UTC)
 
 
 @pytest.fixture
-def conn() -> sqlite3.Connection:
+def conn() -> Iterator[sqlite3.Connection]:
     connection = db.connect(":memory:")
     yield connection
     connection.close()
 
 
 @pytest.fixture(autouse=True)
-def clean_exhausted_flag() -> None:
+def clean_exhausted_flag() -> Iterator[None]:
     budget.reset_exhausted_flag()
     yield
     budget.reset_exhausted_flag()
@@ -45,9 +46,15 @@ def online(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def fill_stt(conn: sqlite3.Connection, seconds: float) -> None:
     db.record_attempt(
-        conn, mode=Mode.DRILL, reference_text="x", recognised_text="x",
-        audio_seconds=seconds, audio_sha256="h", overall_scores={},
-        azure_raw={}, created_at="2026-08-05T00:00:00Z",
+        conn,
+        mode=Mode.DRILL,
+        reference_text="x",
+        recognised_text="x",
+        audio_seconds=seconds,
+        audio_sha256="h",
+        overall_scores={},
+        azure_raw={},
+        created_at="2026-08-05T00:00:00Z",
     )
 
 
@@ -78,9 +85,7 @@ def test_a_nonzero_budget_needs_no_acknowledgement(
     budget.require_f0_acknowledgement()
 
 
-def test_tier_message_never_leaks_a_key(
-    monkeypatch: pytest.MonkeyPatch, online: None
-) -> None:
+def test_tier_message_never_leaks_a_key(monkeypatch: pytest.MonkeyPatch, online: None) -> None:
     monkeypatch.setenv("AZURE_SPEECH_KEY", "sk-secret-value-0123456789")
     monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "false")
     with pytest.raises(TierNotAcknowledged) as excinfo:
@@ -91,9 +96,7 @@ def test_tier_message_never_leaks_a_key(
 # --- Pre-flight ----------------------------------------------------------------------------
 
 
-def test_within_the_free_allowance_costs_nothing(
-    conn: sqlite3.Connection, online: None
-) -> None:
+def test_within_the_free_allowance_costs_nothing(conn: sqlite3.Connection, online: None) -> None:
     fill_stt(conn, 100.0)
     budget.preflight_stt(conn, 25.0, Mode.DRILL, WHEN)  # must not raise
 
@@ -171,7 +174,7 @@ def test_the_exhausted_flag_does_not_carry_into_the_next_month(
     conn: sqlite3.Connection, online: None
 ) -> None:
     budget.mark_quota_exhausted(WHEN)
-    next_month = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    next_month = datetime(2026, 9, 1, tzinfo=UTC)
     budget.preflight_stt(conn, 10.0, Mode.DRILL, next_month)  # must not raise
 
 

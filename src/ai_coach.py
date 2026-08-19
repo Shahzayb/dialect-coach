@@ -157,7 +157,8 @@ def build_prompt(compacted: dict[str, Any], reference_text: str, recognised_text
             "<reference_notes>",
             json.dumps(
                 fallback_coach.reference_notes(compacted["observed_pairs"]),
-                ensure_ascii=False, indent=1,
+                ensure_ascii=False,
+                indent=1,
             ),
             "</reference_notes>",
             _as_data("reference_text", reference_text),
@@ -170,14 +171,14 @@ def build_prompt(compacted: dict[str, Any], reference_text: str, recognised_text
 # --- The call ------------------------------------------------------------------------------
 
 
-def _client():
+def _client() -> Any:
     """Build the client. Imported lazily, like the Azure SDK, so tests never need it."""
     from google import genai
 
     return genai.Client(api_key=utils.require("GEMINI_API_KEY"))
 
 
-def _config():
+def _config() -> Any:
     from google.genai import types
 
     return types.GenerateContentConfig(
@@ -247,25 +248,24 @@ def _text_of(response: Any) -> str:
     """
     try:
         text = response.text or ""
-    except Exception:  # the SDK raises rather than returning None in some shapes
+    except Exception:  # noqa: BLE001 — the SDK raises rather than returning None in some shapes
         text = ""
     if not text.strip():
         candidates = getattr(response, "candidates", None) or []
         reason = getattr(candidates[0], "finish_reason", None) if candidates else None
         logger.warning(
             "Gemini returned no usable text (finish_reason=%s, prompt_feedback=%s)",
-            reason, getattr(response, "prompt_feedback", None),
+            reason,
+            getattr(response, "prompt_feedback", None),
         )
     return text
 
 
-def _call(client, prompt: str):
+def _call(client: Any, prompt: str) -> Any:
     """One request. Raises Transient/Permanent so `retry_transient` can decide."""
     try:
-        return client.models.generate_content(
-            model=model_name(), contents=prompt, config=_config()
-        )
-    except Exception as exc:  # noqa: BLE001 — every SDK failure is mapped, none escapes
+        return client.models.generate_content(model=model_name(), contents=prompt, config=_config())
+    except Exception as exc:  # every SDK failure is mapped, none escapes
         # redact(): SDK errors can echo the request, and the request carries a key header.
         logger.warning("Gemini call failed: %s", utils.redact(str(exc)))
         raise _classify(exc) from exc
@@ -301,9 +301,7 @@ def _checked_drills(
     """
     faults = compacted.get("delivery_faults") or []
     spans = {fault["fault"]: [w for w in fault["words"] if w] for fault in faults}
-    templates = {
-        drill.fault: drill for drill in fallback_coach.delivery_drills(compacted)
-    }
+    templates = {drill.fault: drill for drill in fallback_coach.delivery_drills(compacted)}
 
     usable: dict[str, fallback_coach.DeliveryDrill] = {}
     for drill in report.delivery_drills:
@@ -350,13 +348,19 @@ def validated(report: CoachingReport, compacted: dict[str, Any]) -> CoachingRepo
         if (expected, produced) not in observed:
             logger.warning(
                 "Dropped an invented fix: /%s/ -> /%s/ is not in the Azure data",
-                fix.expected_phoneme, fix.produced_phoneme,
+                fix.expected_phoneme,
+                fix.produced_phoneme,
             )
             continue
         # Rewritten in Azure's spelling, so the report and the word cards agree on symbols.
-        kept.append(fix.model_copy(update={
-            "expected_phoneme": expected, "produced_phoneme": produced,
-        }))
+        kept.append(
+            fix.model_copy(
+                update={
+                    "expected_phoneme": expected,
+                    "produced_phoneme": produced,
+                }
+            )
+        )
 
     if not report.overall_comment.strip():
         return None
@@ -368,7 +372,9 @@ def validated(report: CoachingReport, compacted: dict[str, Any]) -> CoachingRepo
     # Only the model's own drills. The backfilled ones are this project's templates and
     # contain no phoneme at all, so sweeping them would be sweeping our own literals.
     prose.extend(
-        text for drill in drills if drill.fault in from_model
+        text
+        for drill in drills
+        if drill.fault in from_model
         for text in (drill.what_happened, drill.drill)
     )
     for passage in prose:
@@ -385,9 +391,12 @@ def validated(report: CoachingReport, compacted: dict[str, Any]) -> CoachingRepo
     if report.priority_fixes and not kept:
         return None
 
-    return report.model_copy(update={
-        "priority_fixes": kept[:MAX_PRIORITY_FIXES], "delivery_drills": drills,
-    })
+    return report.model_copy(
+        update={
+            "priority_fixes": kept[:MAX_PRIORITY_FIXES],
+            "delivery_drills": drills,
+        }
+    )
 
 
 def _readable(stored: Any) -> Any:
@@ -414,9 +423,7 @@ def report_from_raw(raw: Any, source: str) -> CoachingReport | None:
     try:
         if source == SOURCE_GEMINI:
             try:
-                parts = (
-                    (raw or {}).get("candidates", [{}])[0].get("content", {}).get("parts", [])
-                )
+                parts = (raw or {}).get("candidates", [{}])[0].get("content", {}).get("parts", [])
                 text = "".join(part.get("text") or "" for part in parts)
                 return CoachingReport.model_validate(_readable(json.loads(text)))
             except Exception:  # noqa: BLE001 — not an envelope, so try the flat shape
@@ -430,7 +437,9 @@ def report_from_raw(raw: Any, source: str) -> CoachingReport | None:
 # --- The entry point ---------------------------------------------------------------------------
 
 
-def coach(assessment: Any, reference_text: str, mode: Mode, *, client: Any = None) -> CoachingResult:
+def coach(
+    assessment: Any, reference_text: str, mode: Mode, *, client: Any = None
+) -> CoachingResult:
     """Coach one attempt. Always returns a report, whatever the network did.
 
     `client` is injectable so the failure paths can be exercised without a key: every one
@@ -444,12 +453,10 @@ def coach(assessment: Any, reference_text: str, mode: Mode, *, client: Any = Non
     try:
         compacted = fallback_coach.compact(assessment, mode)
         offline_report = fallback_coach.build_from_compacted(compacted)
-    except Exception as exc:  # noqa: BLE001 — the guarantee is the whole point of the module
+    except Exception as exc:  # the guarantee is the whole point of the module
         logger.error("Could not build the offline report", exc_info=True)
         report = fallback_coach.emergency_report(f"{type(exc).__name__}: {exc}")
-        return CoachingResult(
-            report=report, source=SOURCE_FALLBACK, raw=report.model_dump()
-        )
+        return CoachingResult(report=report, source=SOURCE_FALLBACK, raw=report.model_dump())
 
     def fallback(reason: str) -> CoachingResult:
         if reason:
@@ -469,12 +476,10 @@ def coach(assessment: Any, reference_text: str, mode: Mode, *, client: Any = Non
 
     try:
         active = client if client is not None else _client()
-        response = utils.retry_transient(
-            lambda: _call(active, prompt), attempts=MAX_COACH_ATTEMPTS
-        )
+        response = utils.retry_transient(lambda: _call(active, prompt), attempts=MAX_COACH_ATTEMPTS)
     except (utils.ConfigError, PermanentError, TransientError) as exc:
         return fallback(utils.redact(str(exc)))
-    except Exception as exc:  # noqa: BLE001 — a coaching failure must never break the page
+    except Exception as exc:  # a coaching failure must never break the page
         logger.error("Unexpected coaching failure", exc_info=True)
         return fallback(f"{type(exc).__name__}: {utils.redact(str(exc))}")
 
@@ -500,6 +505,7 @@ def coach(assessment: Any, reference_text: str, mode: Mode, *, client: Any = Non
 
     logger.info(
         "Gemini coach: %d fixes reported from %d observed substitutions",
-        len(checked.priority_fixes), len(compacted["observed_pairs"]),
+        len(checked.priority_fixes),
+        len(compacted["observed_pairs"]),
     )
     return CoachingResult(report=checked, source=SOURCE_GEMINI, raw=raw)

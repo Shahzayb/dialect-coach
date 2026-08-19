@@ -222,11 +222,11 @@ def test_a_synthesis_403_is_caught_by_the_handler_that_acts_on_it() -> None:
     """
     import speech_analyzer as sa
 
-    handled = (utils.PermanentError, utils.TransientError, tts.SynthesisError,
-               sa.AssessmentError)
+    handled = (utils.PermanentError, utils.TransientError, tts.SynthesisError, sa.AssessmentError)
     assert issubclass(sa.QuotaExhausted, handled)
-    assert not issubclass(sa.QuotaExhausted, (utils.PermanentError, utils.TransientError,
-                                              tts.SynthesisError))
+    assert not issubclass(
+        sa.QuotaExhausted, (utils.PermanentError, utils.TransientError, tts.SynthesisError)
+    )
 
 
 def test_the_caller_sees_attempts_even_when_every_one_fails(
@@ -239,8 +239,9 @@ def test_the_caller_sees_attempts_even_when_every_one_fails(
     without `on_attempt` the caller has nothing to meter.
     """
     seen: list[int] = []
-    monkeypatch.setattr(tts, "_speak", lambda *a, **k: (_ for _ in ()).throw(
-        utils.TransientError("busy")))
+    monkeypatch.setattr(
+        tts, "_speak", lambda *a, **k: (_ for _ in ()).throw(utils.TransientError("busy"))
+    )
     monkeypatch.setattr(utils.time, "sleep", lambda _s: None)
 
     with pytest.raises(utils.TransientError):
@@ -316,7 +317,7 @@ def test_an_unwritable_cache_is_a_warning_not_a_failure(tmp_path, monkeypatch) -
     """Failing to cache costs quota next time; it must never break playback."""
     monkeypatch.setenv("TTS_CACHE_DIR", str(tmp_path / "file"))
     (tmp_path / "file").write_text("not a directory")
-    tts.store_audio("v", "think", b"bytes")   # no raise
+    tts.store_audio("v", "think", b"bytes")  # no raise
     assert tts.cached_audio("v", "think") is None
 
 

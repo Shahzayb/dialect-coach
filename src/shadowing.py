@@ -38,8 +38,8 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Mapping, Sequence
 
 import utils
 
@@ -98,7 +98,7 @@ _SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 MIN_PHRASE_CHARS = 12
 
 
-def phrases(text: str) -> list[str]:
+def phrases(text: str | None) -> list[str]:
     """Split a passage into the phrases the echo track plays one at a time.
 
     Paragraph breaks are collapsed first: a blank line is a visual convenience in the passage
@@ -177,7 +177,7 @@ def evidence_for(session: Session) -> dict[str, object]:
         "title": session.title,
         "passage_key": session.key,
         "why": (
-            f"You started shadowing \"{session.title}\". It is a standing practice rather "
+            f'You started shadowing "{session.title}". It is a standing practice rather '
             f"than a flagged sound, so nothing promoted it and nothing takes it off."
         ),
     }

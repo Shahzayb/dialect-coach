@@ -85,10 +85,9 @@ def test_temp_wav_writes_then_removes_the_file() -> None:
 def test_temp_wav_removes_the_file_when_the_body_raises() -> None:
     """Acceptance criterion 8: Azure raising mid-call must not leave audio on disk."""
     captured: str | None = None
-    with pytest.raises(RuntimeError):
-        with audio_utils.temp_wav(b"RIFFfake") as path:
-            captured = path
-            raise RuntimeError("Azure blew up mid-call")
+    with pytest.raises(RuntimeError), audio_utils.temp_wav(b"RIFFfake") as path:
+        captured = path
+        raise RuntimeError("Azure blew up mid-call")
     assert captured is not None
     assert not os.path.exists(captured)
 
@@ -122,9 +121,7 @@ def test_the_echo_track_is_resampled_to_the_assessment_format() -> None:
 
 def test_clips_at_different_rates_still_produce_the_right_length() -> None:
     """The regression the resampling exists to prevent: a wrong rate shows up as a wrong length."""
-    track = audio_utils.echo_track(
-        [make_wav(1.0, sample_rate=24_000, channels=1), make_wav(1.0)]
-    )
+    track = audio_utils.echo_track([make_wav(1.0, sample_rate=24_000, channels=1), make_wav(1.0)])
     assert audio_utils.duration_seconds(track) == pytest.approx(4.0, abs=0.05)
 
 

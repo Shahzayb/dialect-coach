@@ -27,7 +27,7 @@ import os
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 REFERENCE = (
     "The weather this month has been rather unpredictable. Thursday brought thunder "
@@ -50,11 +50,15 @@ def main() -> int:
 
     assessment = speech_analyzer.analyse("", REFERENCE, Mode.DRILL)
     compacted = fallback_coach.compact(assessment, Mode.DRILL)
-    print(f"fixture replayed: {len(assessment.words)} words, "
-          f"{len(compacted['flagged_words'])} flagged, "
-          f"{len(compacted['observed_pairs'])} substitutions observed")
-    print(f"payload sent: {len(json.dumps(compacted))} characters "
-          f"(raw response is {len(json.dumps(assessment.raw))})")
+    print(
+        f"fixture replayed: {len(assessment.words)} words, "
+        f"{len(compacted['flagged_words'])} flagged, "
+        f"{len(compacted['observed_pairs'])} substitutions observed"
+    )
+    print(
+        f"payload sent: {len(json.dumps(compacted))} characters "
+        f"(raw response is {len(json.dumps(assessment.raw))})"
+    )
 
     # Only now, and only for the coaching call.
     os.environ["OFFLINE_MODE"] = "false"
@@ -72,16 +76,17 @@ def main() -> int:
         return 1
 
     usage = (result.raw or {}).get("usage_metadata") or {}
-    print(f"tokens: {usage.get('prompt_token_count')} in, "
-          f"{usage.get('candidates_token_count')} out, "
-          f"{usage.get('total_token_count')} total")
+    print(
+        f"tokens: {usage.get('prompt_token_count')} in, "
+        f"{usage.get('candidates_token_count')} out, "
+        f"{usage.get('total_token_count')} total"
+    )
 
     report = result.report
     print(f"\n{report.overall_comment}\n")
     for rank, fix in enumerate(report.priority_fixes, start=1):
         pairs = ", ".join(f"{pair.a}/{pair.b}" for pair in fix.minimal_pairs)
-        print(f"{rank}. /{fix.expected_phoneme}/ -> /{fix.produced_phoneme}/  "
-              f"{fix.affected_words}")
+        print(f"{rank}. /{fix.expected_phoneme}/ -> /{fix.produced_phoneme}/  {fix.affected_words}")
         print(f"   why: {fix.why_it_matters}")
         print(f"   how: {fix.articulation}")
         print(f"   pairs: {pairs}")
@@ -96,18 +101,23 @@ def main() -> int:
     # The check that matters: nothing named that Azure did not report.
     observed = {(e, p) for e, p in compacted["observed_pairs"]}
     invented = [
-        (fix.expected_phoneme, fix.produced_phoneme) for fix in report.priority_fixes
+        (fix.expected_phoneme, fix.produced_phoneme)
+        for fix in report.priority_fixes
         if (fix.expected_phoneme, fix.produced_phoneme) not in observed
     ]
     words = len(" ".join([report.overall_comment, report.practice_plan]).split())
     reported = {fault["fault"] for fault in compacted["delivery_faults"]}
     answered = {drill.fault for drill in report.delivery_drills}
     print(f"\ninvented pairs surviving validation: {invented or 'none'}")
-    print(f"delivery faults reported: {sorted(reported) or 'none'}; "
-          f"drilled: {sorted(answered) or 'none'}; "
-          f"unmatched: {sorted(answered ^ reported) or 'none'}")
-    print(f"re-parsed from the stored payload: "
-          f"{ai_coach.report_from_raw(result.raw, result.source) is not None}")
+    print(
+        f"delivery faults reported: {sorted(reported) or 'none'}; "
+        f"drilled: {sorted(answered) or 'none'}; "
+        f"unmatched: {sorted(answered ^ reported) or 'none'}"
+    )
+    print(
+        f"re-parsed from the stored payload: "
+        f"{ai_coach.report_from_raw(result.raw, result.source) is not None}"
+    )
     print(f"prose length (comment + plan): {words} words")
     # Every reported fault must come back with a drill — the model's, or a backfilled
     # template — and no drill for a fault Azure never reported.

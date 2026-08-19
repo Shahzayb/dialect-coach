@@ -55,8 +55,19 @@ def test_every_produced_alternate_in_the_fixtures_resolves(fixtures_dir: Path) -
 
 @pytest.mark.parametrize(
     "written, azure",
-    [("iː", "i"), ("ɜː", "ɝ"), ("ɑː", "ɑ"), ("ɔː", "ɔ"), ("uː", "u"), ("ɡ", "g"),
-     ("r", "ɹ"), ("ʧ", "tʃ"), ("ʤ", "dʒ"), ("əʊ", "oʊ"), ("ˈɑ", "ɑ")],
+    [
+        ("iː", "i"),
+        ("ɜː", "ɝ"),
+        ("ɑː", "ɑ"),
+        ("ɔː", "ɔ"),
+        ("uː", "u"),
+        ("ɡ", "g"),
+        ("r", "ɹ"),
+        ("ʧ", "tʃ"),
+        ("ʤ", "dʒ"),
+        ("əʊ", "oʊ"),
+        ("ˈɑ", "ɑ"),
+    ],
 )
 def test_textbook_spellings_resolve_to_azures_symbols(written: str, azure: str) -> None:
     """Azure's IPA is rhotic and length-mark-free; sources and hands write it otherwise."""
@@ -137,10 +148,25 @@ def test_minimal_pairs_are_genuine_pairs() -> None:
 
 def test_the_seed_sounds_all_carry_pairs_to_drill() -> None:
     """The sounds this project was built to catch must be actionable, not just described."""
-    for expected, produced in [("θ", "s"), ("θ", "t"), ("ð", "d"), ("v", "w"), ("w", "v"),
-                               ("æ", "ɛ"), ("ɛ", "ɪ"), ("ɪ", "i"), ("i", "ɪ"), ("ʌ", "ɑ"),
-                               ("l", "ɹ"), ("z", "dʒ"), ("ʃ", "s"), ("f", "p"),
-                               ("t", "d"), ("d", "t"), ("ɝ", "æ")]:
+    for expected, produced in [
+        ("θ", "s"),
+        ("θ", "t"),
+        ("ð", "d"),
+        ("v", "w"),
+        ("w", "v"),
+        ("æ", "ɛ"),
+        ("ɛ", "ɪ"),
+        ("ɪ", "i"),
+        ("i", "ɪ"),
+        ("ʌ", "ɑ"),
+        ("l", "ɹ"),
+        ("z", "dʒ"),
+        ("ʃ", "s"),
+        ("f", "p"),
+        ("t", "d"),
+        ("d", "t"),
+        ("ɝ", "æ"),
+    ]:
         assert pr.minimal_pairs(expected, produced), f"/{expected}/ -> /{produced}/"
 
 

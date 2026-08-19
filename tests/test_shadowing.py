@@ -13,7 +13,6 @@ import pytest
 import progress_view
 import shadowing
 
-
 # --- Passage identity -------------------------------------------------------------------------
 # The comparison pairs a shadowed read to a cold read BY MATCHING normalised reference text,
 # so anything that splits one passage into two keys silently empties the whole feature.
@@ -27,9 +26,9 @@ def test_the_passage_key_survives_casing_punctuation_and_line_breaks() -> None:
 
 def test_the_passage_key_matches_the_benchmark_key() -> None:
     """One normaliser, or a shadowed benchmark read pairs against nothing."""
-    assert shadowing.passage_key(
+    assert shadowing.passage_key(progress_view.BENCHMARK_PASSAGE) == progress_view.benchmark_key(
         progress_view.BENCHMARK_PASSAGE
-    ) == progress_view.benchmark_key(progress_view.BENCHMARK_PASSAGE)
+    )
 
 
 def test_an_empty_passage_has_an_empty_key() -> None:
@@ -49,7 +48,9 @@ def test_title_for_matches_by_key_not_by_string() -> None:
 def test_phrases_split_on_sentence_ends() -> None:
     found = shadowing.phrases("One thing happened. Then another thing did! Did it really?")
     assert found == [
-        "One thing happened.", "Then another thing did!", "Did it really?",
+        "One thing happened.",
+        "Then another thing did!",
+        "Did it really?",
     ]
 
 

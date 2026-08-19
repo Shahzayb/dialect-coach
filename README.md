@@ -46,7 +46,7 @@ python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ```
 
 ```bash
-.venv/bin/streamlit run app.py
+.venv/bin/streamlit run src/app.py
 ```
 
 If you use `uv`, `uv venv --python 3.12 && uv pip install -r requirements.txt` fetches a
@@ -159,13 +159,32 @@ your configured `DB_PATH`, and spends nothing.
 make test
 ```
 
-Runs offline with no API keys and no network — the suite forces `OFFLINE_MODE` and clears
-the credentials, so it can never turn into a billable call. It works against
-`tests/fixtures/`, two verbatim Azure responses captured once from a real recording. That
-is what lets the parsing, scoring, and colouring layers be developed without spending any
-of the monthly allowance.
+Runs offline with no API keys and no network — the suite forces `OFFLINE_MODE`, clears the
+credentials, and refuses any non-loopback socket connection outright, so it can never turn
+into a billable call. It works against `tests/fixtures/`, two verbatim Azure responses
+captured once from a real recording. That is what lets the parsing, scoring, and colouring
+layers be developed without spending any of the monthly allowance.
 
 Rebuild first (`docker compose build`) if `requirements.txt` changed.
+
+## Checks
+
+```bash
+make check
+```
+
+Formatting, linting, types and the test suite — `make lint`, `make typecheck` and `make test`
+individually. All of them run in the container against the pinned tools in
+`requirements.txt`, which is exactly what CI runs, so a green `make check` is a green CI run.
+`make format` applies the formatter and the safe lint fixes.
+
+Ruff and mypy are configured in `pyproject.toml`, where every rule choice carries the reason
+it was made. mypy is strict on every module under `src/`.
+
+CI runs on every push and pull request and **cannot reach the network or spend quota**: the
+workflow references no secrets, a CI checkout has no `.env`, the suite clears the credentials,
+and the socket guard refuses the connection. Releases are a separate workflow, triggered by a
+`v*` tag, so CI itself stays read-only.
 
 ## Cost
 
@@ -207,7 +226,7 @@ Be clear-eyed about this rather than reassured:
 Not required — this is built to run on your own machine, and nothing in the app assumes
 otherwise. It is laid out to make a Hugging Face Space possible for anyone who wants one:
 `packages.txt` lists the apt packages such an image needs, and the app is a single
-`app.py` Streamlit entry point.
+`src/app.py` Streamlit entry point.
 
 Going that route means adding YAML frontmatter to the top of this file, since a Space will
 not build without it:
@@ -220,7 +239,7 @@ colorFrom: indigo
 colorTo: blue
 sdk: streamlit
 sdk_version: 1.61.1
-app_file: app.py
+app_file: src/app.py
 pinned: false
 ---
 ```

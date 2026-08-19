@@ -6,20 +6,21 @@ did not produce. Most of what follows checks a refusal rather than a result.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
-import pytest
+from datetime import UTC, datetime, timedelta
 
 import practice_queue as pq
 import utils
 
-NOW = datetime(2026, 8, 19, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 19, 12, 0, 0, tzinfo=UTC)
 
 
 def phoneme_row(expected: str, produced: str, attempts: int = 3, **extra):
     row = {
-        "label": f"/{expected}/ → /{produced}/", "expected": expected,
-        "produced": produced, "attempts": attempts, "benchmark_attempts": 1,
+        "label": f"/{expected}/ → /{produced}/",
+        "expected": expected,
+        "produced": produced,
+        "attempts": attempts,
+        "benchmark_attempts": 1,
         "tokens": attempts * 2,
     }
     row.update(extra)
@@ -27,24 +28,48 @@ def phoneme_row(expected: str, produced: str, attempts: int = 3, **extra):
 
 
 def syllable_row(word: str, attempts: int = 3, syllable: str = "ɚ"):
-    return {"word": word, "syllable": syllable, "attempts": attempts,
-            "benchmark_attempts": 0, "tokens": attempts}
+    return {
+        "word": word,
+        "syllable": syllable,
+        "attempts": attempts,
+        "benchmark_attempts": 0,
+        "tokens": attempts,
+    }
 
 
 def target(item: str, kind: str = pq.CONTRAST, state: str = pq.ACTIVE, **extra):
-    row = {"id": 1, "item": item, "kind": kind, "state": state, "reviews_passed": 0,
-           "added": "2026-08-01T00:00:00Z", "next_due": "2026-08-01T00:00:00Z",
-           "evidence": "{}", "last_seen": None}
+    row = {
+        "id": 1,
+        "item": item,
+        "kind": kind,
+        "state": state,
+        "reviews_passed": 0,
+        "added": "2026-08-01T00:00:00Z",
+        "next_due": "2026-08-01T00:00:00Z",
+        "evidence": "{}",
+        "last_seen": None,
+    }
     row.update(extra)
     return row
 
 
-def block(correct: int, total: int = 20, *, review: bool = False, when: str = "2026-08-10",
-          planned: int | None = None):
+def block(
+    correct: int,
+    total: int = 20,
+    *,
+    review: bool = False,
+    when: str = "2026-08-10",
+    planned: int | None = None,
+):
     return pq.BlockSummary(
-        block_id=f"b{when}{correct}", created_at=f"{when}T00:00:00Z", correct=correct,
-        total=total, planned=planned if planned is not None else total, novel=total,
-        alternatives=2, review=review,
+        block_id=f"b{when}{correct}",
+        created_at=f"{when}T00:00:00Z",
+        correct=correct,
+        total=total,
+        planned=planned if planned is not None else total,
+        novel=total,
+        alternatives=2,
+        review=review,
     )
 
 
@@ -85,8 +110,7 @@ def test_a_weak_syllable_becomes_a_stress_candidate() -> None:
 
 
 def test_candidates_rank_by_how_many_attempts_they_recurred_in() -> None:
-    found = pq.candidates([phoneme_row("θ", "s", attempts=2),
-                           phoneme_row("v", "w", attempts=9)])
+    found = pq.candidates([phoneme_row("θ", "s", attempts=2), phoneme_row("v", "w", attempts=9)])
     assert [c.item for c in found] == ["/v/ → /w/", "/θ/ → /s/"]
 
 
@@ -110,16 +134,21 @@ def test_why_for_a_stress_item_names_the_syllable() -> None:
 
 
 def test_promotion_stops_at_the_cap() -> None:
-    found = pq.candidates([phoneme_row(e, p) for e, p in
-                           (("θ", "s"), ("v", "w"), ("ð", "d"), ("l", "ɹ"))])
+    found = pq.candidates(
+        [phoneme_row(e, p) for e, p in (("θ", "s"), ("v", "w"), ("ð", "d"), ("l", "ɹ"))]
+    )
     assert len(pq.promote([], found)) == utils.MAX_ACTIVE_TARGETS
 
 
 def test_one_of_each_kind_before_a_second_of_any() -> None:
     """Three consonants would crowd out a vowel gap flagged just as often."""
     found = pq.candidates(
-        [phoneme_row("θ", "s", attempts=9), phoneme_row("v", "w", attempts=8),
-         phoneme_row("ð", "d", attempts=7), phoneme_row("æ", "ɛ", attempts=2)],
+        [
+            phoneme_row("θ", "s", attempts=9),
+            phoneme_row("v", "w", attempts=8),
+            phoneme_row("ð", "d", attempts=7),
+            phoneme_row("æ", "ɛ", attempts=2),
+        ],
         [syllable_row("weather", attempts=2)],
     )
     kinds = {c.kind for c in pq.promote([], found)}
@@ -127,8 +156,7 @@ def test_one_of_each_kind_before_a_second_of_any() -> None:
 
 
 def test_a_kind_with_no_candidate_does_not_hold_a_slot_empty() -> None:
-    found = pq.candidates([phoneme_row("θ", "s"), phoneme_row("v", "w"),
-                           phoneme_row("ð", "d")])
+    found = pq.candidates([phoneme_row("θ", "s"), phoneme_row("v", "w"), phoneme_row("ð", "d")])
     assert len(pq.promote([], found)) == 3
 
 
@@ -160,17 +188,37 @@ def test_a_graduated_target_frees_its_slot() -> None:
 
 def test_blocks_are_grouped_by_id_and_ordered_by_time() -> None:
     trials = [
-        {"block_id": "b", "created_at": "2026-08-11T00:00:00Z", "correct": 1,
-         "novel": 1, "alternatives": 2, "review": 0},
-        {"block_id": "a", "created_at": "2026-08-10T00:00:00Z", "correct": 0,
-         "novel": 1, "alternatives": 2, "review": 0},
+        {
+            "block_id": "b",
+            "created_at": "2026-08-11T00:00:00Z",
+            "correct": 1,
+            "novel": 1,
+            "alternatives": 2,
+            "review": 0,
+        },
+        {
+            "block_id": "a",
+            "created_at": "2026-08-10T00:00:00Z",
+            "correct": 0,
+            "novel": 1,
+            "alternatives": 2,
+            "review": 0,
+        },
     ]
     assert [b.block_id for b in pq.summarise_blocks(trials)] == ["a", "b"]
 
 
 def test_a_part_finished_block_is_incomplete() -> None:
-    trials = [{"block_id": "a", "created_at": "2026-08-10T00:00:00Z", "correct": 1,
-               "novel": 1, "alternatives": 2, "review": 0}] * 5
+    trials = [
+        {
+            "block_id": "a",
+            "created_at": "2026-08-10T00:00:00Z",
+            "correct": 1,
+            "novel": 1,
+            "alternatives": 2,
+            "review": 0,
+        }
+    ] * 5
     assert not pq.summarise_blocks(trials)[0].complete
 
 
@@ -321,8 +369,9 @@ def test_a_shadow_row_does_not_consume_a_promotion_slot() -> None:
     """The failure this guards is silent: adding a standing practice would otherwise retire a
     sound the recordings are still flagging."""
     existing = [target("Benchmark", kind=pq.SHADOW)]
-    found = pq.candidates([phoneme_row(e, p) for e, p in
-                           (("θ", "s"), ("v", "w"), ("ð", "d"), ("l", "ɹ"))])
+    found = pq.candidates(
+        [phoneme_row(e, p) for e, p in (("θ", "s"), ("v", "w"), ("ð", "d"), ("l", "ɹ"))]
+    )
     assert len(pq.promote(existing, found)) == utils.MAX_ACTIVE_TARGETS
 
 
@@ -345,7 +394,7 @@ def test_grading_a_shadow_target_changes_nothing() -> None:
 
 
 def test_a_shadow_target_is_due_on_a_fixed_gap_not_immediately() -> None:
-    """"Active means due now" would make it due on every render, since it is always active."""
+    """ "Active means due now" would make it due on every render, since it is always active."""
     decision = pq.grade(target("Benchmark", kind=pq.SHADOW))
     assert pq.next_due(decision, now=NOW, kind=pq.SHADOW) == pq._iso(
         NOW + timedelta(days=utils.SHADOW_INTERVAL_DAYS)

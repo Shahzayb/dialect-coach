@@ -34,3 +34,13 @@ pydantic==2.13.4
 # is a local dev container now that hosting is not a goal, and a second manifest is a
 # second thing to drift. Verified against PyPI 2026-08-18.
 pytest==9.1.1
+
+# Formatter and linter, configured in pyproject.toml. Here for the same reason pytest is —
+# one manifest — and so `make lint` and CI run the same binary as each other. Verified
+# against PyPI 2026-08-20.
+ruff==0.16.3
+
+# Type checker, configured in pyproject.toml. Same reasoning as ruff and pytest: one
+# manifest, one pinned binary, and `make typecheck` runs what CI runs. Verified against
+# PyPI 2026-08-20.
+mypy==2.3.1

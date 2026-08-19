@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+import pandas as pd
 import pytest
 
 import db
@@ -32,21 +35,29 @@ FIXTURE_REFERENCE = (
 
 
 @pytest.fixture
-def conn() -> sqlite3.Connection:
+def conn() -> Iterator[sqlite3.Connection]:
     connection = db.connect(":memory:")
     yield connection
     connection.close()
 
 
-def add(connection: sqlite3.Connection, **overrides) -> int:
+def add(connection: sqlite3.Connection, **overrides: Any) -> int:
     """One attempt, mirroring `test_db.add` so chronology and scores are controllable."""
-    kwargs = dict(
-        mode=Mode.DRILL, reference_text=FIXTURE_REFERENCE,
-        recognised_text=FIXTURE_REFERENCE, audio_seconds=12.0, audio_sha256="abc123",
-        overall_scores={"pron_score": 82.0, "accuracy": 85.0, "fluency": 90.0,
-                        "completeness": 100.0, "prosody": 78.0},
-        azure_raw={"RecognitionStatus": "Success", "NBest": [{"PronunciationAssessment": {}}]},
-    )
+    kwargs: dict[str, Any] = {
+        "mode": Mode.DRILL,
+        "reference_text": FIXTURE_REFERENCE,
+        "recognised_text": FIXTURE_REFERENCE,
+        "audio_seconds": 12.0,
+        "audio_sha256": "abc123",
+        "overall_scores": {
+            "pron_score": 82.0,
+            "accuracy": 85.0,
+            "fluency": 90.0,
+            "completeness": 100.0,
+            "prosody": 78.0,
+        },
+        "azure_raw": {"RecognitionStatus": "Success", "NBest": [{"PronunciationAssessment": {}}]},
+    }
     kwargs.update(overrides)
     return db.record_attempt(connection, **kwargs)
 
@@ -55,9 +66,16 @@ def rows(*records: dict) -> list[dict]:
     """Score rows in the shape `attempt_series` returns, with sane defaults."""
     out = []
     for index, record in enumerate(records, start=1):
-        base = {"id": index, "created_at": f"2026-07-{index:02d}T08:00:00Z",
-                "mode": "paragraph", "reference_text": pv.BENCHMARK_PASSAGE,
-                "pron_score": 80.0, "accuracy": 85.0, "fluency": 78.0, "prosody": 70.0}
+        base = {
+            "id": index,
+            "created_at": f"2026-07-{index:02d}T08:00:00Z",
+            "mode": "paragraph",
+            "reference_text": pv.BENCHMARK_PASSAGE,
+            "pron_score": 80.0,
+            "accuracy": 85.0,
+            "fluency": 78.0,
+            "prosody": 70.0,
+        }
         base.update(record)
         out.append(base)
     return out
@@ -86,10 +104,45 @@ def test_every_token_the_coverage_table_claims_is_really_in_the_passage() -> Non
 def test_the_passage_covers_the_consonants_and_the_whole_vowel_inventory() -> None:
     """Both instruments, in one read. The vowel list is `phoneme_reference`'s own."""
     covered = set(pv.BENCHMARK_COVERAGE)
-    consonants = {"θ", "ð", "v", "w", "t", "d", "ʃ", "s", "z", "dʒ",
-                  "l (dark, coda)", "l (clear, onset)", "final clusters"}
-    vowels = {"æ", "ɛ", "ɪ", "i", "ɑ", "ʌ", "ɝ", "ə", "ʊ", "u", "ɔ", "ɚ",
-              "eɪ", "aɪ", "oʊ", "aʊ", "ɔɪ", "ɑɹ", "ɔɹ", "ɛɹ", "ɪɹ", "ʊɹ"}
+    consonants = {
+        "θ",
+        "ð",
+        "v",
+        "w",
+        "t",
+        "d",
+        "ʃ",
+        "s",
+        "z",
+        "dʒ",
+        "l (dark, coda)",
+        "l (clear, onset)",
+        "final clusters",
+    }
+    vowels = {
+        "æ",
+        "ɛ",
+        "ɪ",
+        "i",
+        "ɑ",
+        "ʌ",
+        "ɝ",
+        "ə",
+        "ʊ",
+        "u",
+        "ɔ",
+        "ɚ",
+        "eɪ",
+        "aɪ",
+        "oʊ",
+        "aʊ",
+        "ɔɪ",
+        "ɑɹ",
+        "ɔɹ",
+        "ɛɹ",
+        "ɪɹ",
+        "ʊɹ",
+    }
     assert consonants <= covered
     assert vowels <= covered
     # FACE and GOAT are called out in the brief specifically; they are not scraping by.
@@ -144,10 +197,12 @@ def test_a_prosody_of_zero_is_still_plotted() -> None:
 
 
 def test_the_benchmark_and_free_practice_are_different_series() -> None:
-    frame = pv.score_frame(rows(
-        {"reference_text": pv.BENCHMARK_PASSAGE},
-        {"reference_text": "Something I made up this morning.", "mode": "drill"},
-    ))
+    frame = pv.score_frame(
+        rows(
+            {"reference_text": pv.BENCHMARK_PASSAGE},
+            {"reference_text": "Something I made up this morning.", "mode": "drill"},
+        )
+    )
     assert set(frame[frame["attempt_id"] == 1]["series"]) == {pv.BENCHMARK_SERIES}
     assert set(frame[frame["attempt_id"] == 2]["series"]) == {pv.FREE_SERIES}
 
@@ -159,10 +214,12 @@ def test_the_two_modes_are_labelled_apart() -> None:
 
 
 def test_the_tooltip_names_the_benchmark_and_truncates_a_free_text() -> None:
-    frame = pv.score_frame(rows(
-        {"reference_text": pv.BENCHMARK_PASSAGE},
-        {"reference_text": "A free practice paragraph that runs on well past the label cut."},
-    ))
+    frame = pv.score_frame(
+        rows(
+            {"reference_text": pv.BENCHMARK_PASSAGE},
+            {"reference_text": "A free practice paragraph that runs on well past the label cut."},
+        )
+    )
     assert set(frame[frame["attempt_id"] == 1]["label"]) == {pv.BENCHMARK_TITLE}
     label = list(frame[frame["attempt_id"] == 2]["label"])[0]
     assert label.endswith("…") and len(label) < 60
@@ -193,7 +250,8 @@ def test_the_series_is_ordered_by_time_not_by_insertion(conn: sqlite3.Connection
     add(conn, audio_sha256="b", created_at="2026-07-09T08:00:00Z")
     add(conn, audio_sha256="a", created_at="2026-07-02T08:00:00Z")
     assert [r["created_at"] for r in db.attempt_series(conn)] == [
-        "2026-07-02T08:00:00Z", "2026-07-09T08:00:00Z",
+        "2026-07-02T08:00:00Z",
+        "2026-07-09T08:00:00Z",
     ]
 
 
@@ -202,8 +260,9 @@ def test_the_series_is_ordered_by_time_not_by_insertion(conn: sqlite3.Connection
 # as a comment, because a later encoding change could reintroduce it silently.
 
 
-def spec_layers(frame) -> list[dict]:
-    return pv.score_chart(frame).to_dict()["spec"]["layer"]
+def spec_layers(frame: pd.DataFrame) -> list[dict[str, Any]]:
+    layers: list[dict[str, Any]] = pv.score_chart(frame).to_dict()["spec"]["layer"]
+    return layers
 
 
 def test_free_practice_is_never_drawn_as_a_line() -> None:
@@ -262,7 +321,7 @@ def test_an_empty_history_still_produces_a_chart() -> None:
 
 
 def test_days_since_the_benchmark_counts_only_benchmark_reads() -> None:
-    now = datetime(2026, 7, 20, 8, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 7, 20, 8, 0, tzinfo=UTC)
     history = rows(
         {"created_at": "2026-07-10T08:00:00Z", "reference_text": pv.BENCHMARK_PASSAGE},
         {"created_at": "2026-07-19T08:00:00Z", "reference_text": "free practice text"},
@@ -281,10 +340,14 @@ def test_both_stored_shapes_re_parse(conn: sqlite3.Connection) -> None:
     """A drill stores a JSON object, a paragraph a JSON array. Both have to come back."""
     drill = json.loads((FIXTURES / "sample_azure_response.json").read_text())
     paragraph = json.loads((FIXTURES / "sample_azure_continuous.json").read_text())
-    add(conn, mode=Mode.DRILL, azure_raw=drill, audio_sha256="d",
-        created_at="2026-07-01T08:00:00Z")
-    add(conn, mode=Mode.PARAGRAPH, azure_raw=paragraph, audio_sha256="p",
-        created_at="2026-07-02T08:00:00Z")
+    add(conn, mode=Mode.DRILL, azure_raw=drill, audio_sha256="d", created_at="2026-07-01T08:00:00Z")
+    add(
+        conn,
+        mode=Mode.PARAGRAPH,
+        azure_raw=paragraph,
+        audio_sha256="p",
+        created_at="2026-07-02T08:00:00Z",
+    )
 
     parsed = pv.parse_attempts(db.attempt_payloads(conn))
     assert [p.mode for p in parsed] == [Mode.DRILL, Mode.PARAGRAPH]
@@ -300,8 +363,9 @@ def test_a_corrupt_payload_is_skipped_rather_than_blanking_the_view(
     bad = add(conn, audio_sha256="bad", created_at="2026-07-01T08:00:00Z")
     add(conn, azure_raw=drill, audio_sha256="good", created_at="2026-07-02T08:00:00Z")
     # Truncated on the way to disk — the one shape `record_attempt` cannot produce itself.
-    conn.execute("UPDATE attempts SET azure_raw_json = ? WHERE id = ?",
-                 ('{"NBest": [{"Words": [', bad))
+    conn.execute(
+        "UPDATE attempts SET azure_raw_json = ? WHERE id = ?", ('{"NBest": [{"Words": [', bad)
+    )
 
     parsed = pv.parse_attempts(db.attempt_payloads(conn))
     assert [p.attempt_id for p in parsed] == [2]
@@ -344,11 +408,21 @@ def test_the_words_the_app_flags_are_the_words_that_are_counted(real_drill) -> N
 def test_a_weak_phoneme_with_no_alternate_is_kept_as_its_own_bucket() -> None:
     """What final-cluster simplification looks like: weakened, not swapped for something."""
     attempt = pv.ParsedAttempt(
-        attempt_id=1, created_at="2026-07-01T08:00:00Z", mode=Mode.DRILL,
-        reference_text="asked", benchmark=False,
-        words=[{"word": "asked", "accuracy": 55.0, "error_type": "Mispronunciation",
-                "delivery_error_types": [], "syllables": [],
-                "phonemes": [{"phoneme": "t", "score": 30.0, "nbest": []}]}],
+        attempt_id=1,
+        created_at="2026-07-01T08:00:00Z",
+        mode=Mode.DRILL,
+        reference_text="asked",
+        benchmark=False,
+        words=[
+            {
+                "word": "asked",
+                "accuracy": 55.0,
+                "error_type": "Mispronunciation",
+                "delivery_error_types": [],
+                "syllables": [],
+                "phonemes": [{"phoneme": "t", "score": 30.0, "nbest": []}],
+            }
+        ],
     )
     frame = pv.flagged_phonemes([attempt])
     assert list(frame["label"]) == [f"/t/ → {pv.UNCLEAR}"]
@@ -357,32 +431,51 @@ def test_a_weak_phoneme_with_no_alternate_is_kept_as_its_own_bucket() -> None:
 def test_a_weak_phoneme_in_an_unflagged_word_is_not_counted() -> None:
     """The ranking follows `is_flagged`; a clean word's phoneme scores are not faults."""
     attempt = pv.ParsedAttempt(
-        attempt_id=1, created_at="2026-07-01T08:00:00Z", mode=Mode.DRILL,
-        reference_text="fine", benchmark=False,
-        words=[{"word": "fine", "accuracy": 100.0, "error_type": "None",
-                "delivery_error_types": [], "syllables": [],
-                "phonemes": [{"phoneme": "f", "score": 10.0, "nbest": []}]}],
+        attempt_id=1,
+        created_at="2026-07-01T08:00:00Z",
+        mode=Mode.DRILL,
+        reference_text="fine",
+        benchmark=False,
+        words=[
+            {
+                "word": "fine",
+                "accuracy": 100.0,
+                "error_type": "None",
+                "delivery_error_types": [],
+                "syllables": [],
+                "phonemes": [{"phoneme": "f", "score": 10.0, "nbest": []}],
+            }
+        ],
     )
     assert pv.flagged_phonemes([attempt]).empty
 
 
 def flagged(word: str, phoneme: str, produced: str) -> dict:
-    return {"word": word, "accuracy": 50.0, "error_type": "Mispronunciation",
-            "delivery_error_types": [], "syllables": [],
-            "phonemes": [{"phoneme": phoneme, "score": 40.0,
-                          "nbest": [{"phoneme": produced, "score": 95.0}]}]}
+    return {
+        "word": word,
+        "accuracy": 50.0,
+        "error_type": "Mispronunciation",
+        "delivery_error_types": [],
+        "syllables": [],
+        "phonemes": [
+            {"phoneme": phoneme, "score": 40.0, "nbest": [{"phoneme": produced, "score": 95.0}]}
+        ],
+    }
 
 
 def attempt(index: int, words: list[dict], *, benchmark: bool = False) -> pv.ParsedAttempt:
     return pv.ParsedAttempt(
-        attempt_id=index, created_at=f"2026-07-{index:02d}T08:00:00Z", mode=Mode.DRILL,
-        reference_text=pv.BENCHMARK_PASSAGE if benchmark else "free", benchmark=benchmark,
+        attempt_id=index,
+        created_at=f"2026-07-{index:02d}T08:00:00Z",
+        mode=Mode.DRILL,
+        reference_text=pv.BENCHMARK_PASSAGE if benchmark else "free",
+        benchmark=benchmark,
         words=words,
     )
 
 
 def test_recurring_across_attempts_outranks_repeating_within_one() -> None:
-    """"Flagged most often" is a question about sessions, not about token counts.
+    """ "Flagged most often" is a question about sessions, not about token counts.
 
     Otherwise one long paragraph that repeats a word would head the list ahead of a fault
     that has come back every single time.
@@ -390,8 +483,9 @@ def test_recurring_across_attempts_outranks_repeating_within_one() -> None:
     parsed = [
         attempt(1, [flagged("thin", "θ", "t")]),
         attempt(2, [flagged("thin", "θ", "t")]),
-        attempt(3, [flagged("very", "v", "w"), flagged("vowel", "v", "w"),
-                    flagged("value", "v", "w")]),
+        attempt(
+            3, [flagged("very", "v", "w"), flagged("vowel", "v", "w"), flagged("value", "v", "w")]
+        ),
     ]
     frame = pv.flagged_phonemes(parsed)
     assert list(frame["label"])[0] == "/θ/ → /t/"
@@ -428,8 +522,11 @@ def _capture_row(attempt_id: int = 99) -> dict:
         "mode": Mode.PARAGRAPH.value,
         "reference_text": f"{rhythm.BASELINE_CAPTURE_MARKER} en-US-BrianNeural",
         "recognised_text": "each morning i read these same words out loud",
-        "pron_score": 92.0, "accuracy": 93.0, "fluency": 90.0,
-        "completeness": 98.0, "prosody": 89.5,
+        "pron_score": 92.0,
+        "accuracy": 93.0,
+        "fluency": 90.0,
+        "completeness": 98.0,
+        "prosody": 89.5,
         "azure_raw_json": "{}",
     }
 
@@ -462,8 +559,12 @@ def test_spoken_attempts_keeps_everything_else() -> None:
 
 def _benchmark_attempt(attempt_id: int, when: str, words: list[dict]) -> pv.ParsedAttempt:
     return pv.ParsedAttempt(
-        attempt_id=attempt_id, created_at=when, mode=Mode.PARAGRAPH,
-        reference_text=pv.BENCHMARK_PASSAGE, benchmark=True, words=words,
+        attempt_id=attempt_id,
+        created_at=when,
+        mode=Mode.PARAGRAPH,
+        reference_text=pv.BENCHMARK_PASSAGE,
+        benchmark=True,
+        words=words,
     )
 
 
@@ -475,10 +576,12 @@ def _fixture_words() -> list[dict]:
 
 def test_rhythm_frame_plots_benchmark_reads(fixtures_dir) -> None:
     words = _fixture_words()
-    frame = pv.rhythm_frame([
-        _benchmark_attempt(1, "2026-08-01T09:00:00Z", words),
-        _benchmark_attempt(2, "2026-08-08T09:00:00Z", words),
-    ])
+    frame = pv.rhythm_frame(
+        [
+            _benchmark_attempt(1, "2026-08-01T09:00:00Z", words),
+            _benchmark_attempt(2, "2026-08-08T09:00:00Z", words),
+        ]
+    )
     assert list(frame.columns) == list(pv.RHYTHM_COLUMNS)
     assert len(frame) == 2
     assert frame["npvi"].iloc[0] == pytest.approx(55.85, abs=0.01)
@@ -487,8 +590,12 @@ def test_rhythm_frame_plots_benchmark_reads(fixtures_dir) -> None:
 def test_free_practice_is_left_out_of_the_rhythm_chart() -> None:
     """nPVI moves with the text. A chart mixing passages would show which was harder."""
     free = pv.ParsedAttempt(
-        attempt_id=3, created_at="2026-08-01T09:00:00Z", mode=Mode.PARAGRAPH,
-        reference_text="something else entirely", benchmark=False, words=_fixture_words(),
+        attempt_id=3,
+        created_at="2026-08-01T09:00:00Z",
+        mode=Mode.PARAGRAPH,
+        reference_text="something else entirely",
+        benchmark=False,
+        words=_fixture_words(),
     )
     assert len(pv.rhythm_frame([free])) == 0
 
@@ -532,11 +639,20 @@ def test_the_rhythm_axis_is_not_pinned_to_zero() -> None:
 
 def _syllable_attempt(word: str, syllables, attempt_id: int = 1):
     return pv.ParsedAttempt(
-        attempt_id=attempt_id, created_at="2026-08-10T00:00:00Z", mode=Mode.PARAGRAPH,
-        reference_text="anything", benchmark=False,
-        words=[{"word": word, "accuracy": 70.0, "error_type": "Mispronunciation",
+        attempt_id=attempt_id,
+        created_at="2026-08-10T00:00:00Z",
+        mode=Mode.PARAGRAPH,
+        reference_text="anything",
+        benchmark=False,
+        words=[
+            {
+                "word": word,
+                "accuracy": 70.0,
+                "error_type": "Mispronunciation",
                 "syllables": [{"syllable": s, "score": score} for s, score in syllables],
-                "phonemes": []}],
+                "phonemes": [],
+            }
+        ],
     )
 
 
@@ -546,19 +662,16 @@ def test_a_single_syllable_word_has_no_stress_to_misplace() -> None:
 
 
 def test_a_weak_syllable_in_a_multi_syllable_word_is_recorded() -> None:
-    frame = pv.weak_syllables([
-        _syllable_attempt("weather", [("wɛð", 100.0), ("ɚ", 30.0)], attempt_id=n)
-        for n in (1, 2)
-    ])
+    frame = pv.weak_syllables(
+        [_syllable_attempt("weather", [("wɛð", 100.0), ("ɚ", 30.0)], attempt_id=n) for n in (1, 2)]
+    )
     assert list(frame["word"]) == ["weather"]
     assert list(frame["syllable"]) == ["ɚ"]
     assert list(frame["attempts"]) == [2]
 
 
 def test_a_word_whose_syllables_all_score_well_is_left_alone() -> None:
-    frame = pv.weak_syllables([
-        _syllable_attempt("weather", [("wɛð", 100.0), ("ɚ", 90.0)])
-    ])
+    frame = pv.weak_syllables([_syllable_attempt("weather", [("wɛð", 100.0), ("ɚ", 90.0)])])
     assert not len(frame)
 
 
@@ -567,21 +680,34 @@ def test_the_weak_syllable_cut_is_the_one_the_coaching_report_uses() -> None:
     import fallback_coach
 
     just_under = fallback_coach.SYLLABLE_RED - 0.1
-    frame = pv.weak_syllables([
-        _syllable_attempt("weather", [("wɛð", 100.0), ("ɚ", just_under)])
-    ])
+    frame = pv.weak_syllables([_syllable_attempt("weather", [("wɛð", 100.0), ("ɚ", just_under)])])
     assert len(frame) == 1
 
 
 # --- Perception blocks --------------------------------------------------------------------------
 
 
-def _trial(block_id: str, correct: bool, *, alternatives: int = 2, novel: bool = True,
-           when: str = "2026-08-15T00:00:00Z", review: bool = False):
-    return {"block_id": block_id, "created_at": when, "item": "/θ/ → /s/",
-            "word": "think", "voice": "v", "novel": int(novel),
-            "alternatives": alternatives, "answered": "think", "correct": int(correct),
-            "review": int(review)}
+def _trial(
+    block_id: str,
+    correct: bool,
+    *,
+    alternatives: int = 2,
+    novel: bool = True,
+    when: str = "2026-08-15T00:00:00Z",
+    review: bool = False,
+):
+    return {
+        "block_id": block_id,
+        "created_at": when,
+        "item": "/θ/ → /s/",
+        "word": "think",
+        "voice": "v",
+        "novel": int(novel),
+        "alternatives": alternatives,
+        "answered": "think",
+        "correct": int(correct),
+        "review": int(review),
+    }
 
 
 def test_an_empty_history_gives_an_empty_frame_with_its_columns() -> None:
@@ -606,10 +732,12 @@ def test_the_chance_floor_follows_the_stored_alternatives() -> None:
 
 
 def test_blocks_are_separate_rows() -> None:
-    frame = pv.perception_frame([
-        _trial("b1", True, when="2026-08-10T00:00:00Z"),
-        _trial("b2", False, when="2026-08-11T00:00:00Z"),
-    ])
+    frame = pv.perception_frame(
+        [
+            _trial("b1", True, when="2026-08-10T00:00:00Z"),
+            _trial("b2", False, when="2026-08-11T00:00:00Z"),
+        ]
+    )
     assert len(frame) == 2
 
 
@@ -656,10 +784,12 @@ def test_cold_attempts_drops_the_shadowed_ones() -> None:
 
 def test_cold_attempts_still_drops_the_tts_baseline_capture() -> None:
     """The two exclusions compose rather than replacing one another."""
-    kept = pv.cold_attempts(rows(
-        {"shadowed": 0},
-        {"reference_text": f"{rhythm.BASELINE_CAPTURE_MARKER} en-US-BrianNeural"},
-    ))
+    kept = pv.cold_attempts(
+        rows(
+            {"shadowed": 0},
+            {"reference_text": f"{rhythm.BASELINE_CAPTURE_MARKER} en-US-BrianNeural"},
+        )
+    )
     assert [row["id"] for row in kept] == [1]
 
 
@@ -682,9 +812,11 @@ def test_a_shadowed_free_practice_read_stays_in_the_cloud() -> None:
 def test_the_last_benchmark_read_means_the_last_cold_one() -> None:
     """A week of shadowing must not report the benchmark as freshly read while the
     unassisted series quietly went stale."""
-    now = datetime(2026, 7, 10, 8, 0, 0, tzinfo=timezone.utc)
-    both = rows({"created_at": "2026-07-01T08:00:00Z", "shadowed": 0},
-                {"created_at": "2026-07-09T08:00:00Z", "shadowed": 1})
+    now = datetime(2026, 7, 10, 8, 0, 0, tzinfo=UTC)
+    both = rows(
+        {"created_at": "2026-07-01T08:00:00Z", "shadowed": 0},
+        {"created_at": "2026-07-09T08:00:00Z", "shadowed": 1},
+    )
     assert pv.days_since_benchmark(both, now=now) == 9
 
 
@@ -695,20 +827,29 @@ def shadow_rows(*records: dict) -> list[dict]:
     """Attempts on the benchmark passage with controllable fluency, prosody and provenance."""
     out = []
     for index, record in enumerate(records, start=1):
-        base = {"id": index, "created_at": f"2026-07-{index:02d}T08:00:00Z",
-                "mode": "paragraph", "reference_text": pv.BENCHMARK_PASSAGE,
-                "pron_score": 80.0, "accuracy": 85.0, "fluency": 70.0, "prosody": 60.0,
-                "shadowed": 0}
+        base = {
+            "id": index,
+            "created_at": f"2026-07-{index:02d}T08:00:00Z",
+            "mode": "paragraph",
+            "reference_text": pv.BENCHMARK_PASSAGE,
+            "pron_score": 80.0,
+            "accuracy": 85.0,
+            "fluency": 70.0,
+            "prosody": 60.0,
+            "shadowed": 0,
+        }
         base.update(record)
         out.append(base)
     return out
 
 
 def test_a_shadowed_read_is_paired_with_a_cold_read_of_the_same_passage() -> None:
-    frame = pv.shadow_pairs(shadow_rows(
-        {"fluency": 70.0, "prosody": 60.0},
-        {"fluency": 78.0, "prosody": 69.0, "shadowed": 1},
-    ))
+    frame = pv.shadow_pairs(
+        shadow_rows(
+            {"fluency": 70.0, "prosody": 60.0},
+            {"fluency": 78.0, "prosody": 69.0, "shadowed": 1},
+        )
+    )
     deltas = dict(zip(frame["metric"], frame["delta"]))
     assert deltas == {"Fluency": pytest.approx(8.0), "Prosody": pytest.approx(9.0)}
 
@@ -723,11 +864,13 @@ def test_only_fluency_and_prosody_are_compared() -> None:
 def test_the_pair_is_the_nearest_cold_read_either_side() -> None:
     """Requiring the cold read to come first would throw away every pair from the first
     weeks — exactly the weeks the narrowing question is about."""
-    frame = pv.shadow_pairs(shadow_rows(
-        {"created_at": "2026-07-01T08:00:00Z", "fluency": 50.0},
-        {"created_at": "2026-07-10T08:00:00Z", "fluency": 75.0, "shadowed": 1},
-        {"created_at": "2026-07-11T08:00:00Z", "fluency": 70.0},
-    ))
+    frame = pv.shadow_pairs(
+        shadow_rows(
+            {"created_at": "2026-07-01T08:00:00Z", "fluency": 50.0},
+            {"created_at": "2026-07-10T08:00:00Z", "fluency": 75.0, "shadowed": 1},
+            {"created_at": "2026-07-11T08:00:00Z", "fluency": 70.0},
+        )
+    )
     fluency = frame[frame["metric"] == "Fluency"].iloc[0]
     assert fluency["cold_id"] == 3
     assert fluency["delta"] == pytest.approx(5.0)
@@ -737,10 +880,12 @@ def test_the_pair_is_the_nearest_cold_read_either_side() -> None:
 def test_a_pair_across_different_passages_is_never_made() -> None:
     """The whole comparison rests on holding the text still — a delta across two passages
     measures text difficulty, which is what the benchmark exists to avoid."""
-    frame = pv.shadow_pairs(shadow_rows(
-        {"reference_text": "a different passage entirely"},
-        {"shadowed": 1},
-    ))
+    frame = pv.shadow_pairs(
+        shadow_rows(
+            {"reference_text": "a different passage entirely"},
+            {"shadowed": 1},
+        )
+    )
     assert frame.empty
 
 

@@ -46,8 +46,14 @@ def word_of(*phonemes: tuple[str, float, float]) -> dict:
     }
 
 
-def stream(durations: list[float], *, symbol: str = "æ", separator: str = "t",
-           separator_ms: float = 50.0, gap_before: dict[int, float] | None = None) -> dict:
+def stream(
+    durations: list[float],
+    *,
+    symbol: str = "æ",
+    separator: str = "t",
+    separator_ms: float = 50.0,
+    gap_before: dict[int, float] | None = None,
+) -> dict:
     """A word of alternating vowels and consonants with the given vowel durations.
 
     Consonants sit between the vowels because that is what a real reading looks like and what
@@ -112,9 +118,7 @@ def test_adjacent_vowels_merge_into_one_interval() -> None:
     down; merged, it is one 100 ms interval.
     """
     seam = sa.FRAME_TICKS / TICKS_PER_MS
-    merged = rhythm.vocalic_intervals(
-        [word_of(("ɚ", 0.0, 50.0), ("ʌ", 50.0 + seam, 50.0))]
-    )
+    merged = rhythm.vocalic_intervals([word_of(("ɚ", 0.0, 50.0), ("ʌ", 50.0 + seam, 50.0))])
     assert merged == [[100.0 + seam]]  # span, not 50 + 50
 
 
@@ -137,8 +141,12 @@ def test_the_vowel_predicate_covers_every_symbol_in_every_fixture(fixtures_dir) 
     measurement, so this asserts the coverage rather than the classification.
     """
     seen: set[str] = set()
-    for name in ("sample_azure_response.json", "sample_azure_continuous.json",
-                 "bad_delivery_capture.json", "synthetic_delivery_faults.json"):
+    for name in (
+        "sample_azure_response.json",
+        "sample_azure_continuous.json",
+        "bad_delivery_capture.json",
+        "synthetic_delivery_faults.json",
+    ):
         payload = json.loads((fixtures_dir / name).read_text())
         for utterance in payload if isinstance(payload, list) else [payload]:
             for word in utterance["NBest"][0].get("Words") or []:
@@ -252,7 +260,7 @@ def test_the_same_recording_scores_the_same_through_either_mode(fixtures_dir) ->
     assert rhythm.npvi(words).npvi == pytest.approx(55.26, abs=0.01)
 
 
-# --- The baseline -----------------------------------------------------------------------------------
+# --- The baseline ---------------------------------------------------------------------------------
 
 
 def test_a_missing_baseline_is_a_state_not_an_error(tmp_path) -> None:
@@ -271,12 +279,17 @@ def test_a_captured_baseline_is_measured_and_keeps_its_provenance(tmp_path, fixt
     """The voice is carried because a different voice is a different baseline."""
     payload = json.loads((fixtures_dir / "sample_azure_response.json").read_text())
     path = tmp_path / "benchmark_tts_baseline.json"
-    path.write_text(json.dumps({
-        "voice": "en-US-BrianNeural",
-        "captured_at": "2026-08-19T00:00:00Z",
-        "reference_text": "",
-        "payloads": [payload],
-    }), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            {
+                "voice": "en-US-BrianNeural",
+                "captured_at": "2026-08-19T00:00:00Z",
+                "reference_text": "",
+                "payloads": [payload],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     captured = rhythm.baseline(path)
     assert captured is not None

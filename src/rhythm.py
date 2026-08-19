@@ -63,11 +63,13 @@ uploaded from a phone is not comparable to one recorded in the browser.
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any
 
 import phoneme_reference
 import speech_analyzer
@@ -111,7 +113,7 @@ BASELINE_CAPTURE_MARKER = "[tts rhythm baseline capture]"
 
 def is_baseline_capture(reference_text: str | None) -> bool:
     """Whether a stored attempt is the TTS baseline capture rather than a spoken reading."""
-    return bool(reference_text) and reference_text.startswith(BASELINE_CAPTURE_MARKER)
+    return reference_text is not None and reference_text.startswith(BASELINE_CAPTURE_MARKER)
 
 
 @dataclass(frozen=True)
@@ -124,9 +126,9 @@ class Rhythm:
     """
 
     npvi: float | None
-    pairs: int          # adjacent differences actually averaged
-    intervals: int      # vocalic intervals found
-    runs: int           # stretches of speech the pauses cut the reading into
+    pairs: int  # adjacent differences actually averaged
+    intervals: int  # vocalic intervals found
+    runs: int  # stretches of speech the pauses cut the reading into
 
     @property
     def measured(self) -> bool:
@@ -151,8 +153,7 @@ def _phonemes_in_time_order(words: Iterable[Mapping[str, Any]]) -> list[Mapping[
         phoneme
         for word in words
         for phoneme in (word.get("phonemes") or [])
-        if phoneme.get("offset_ticks") is not None
-        and phoneme.get("duration_ticks") is not None
+        if phoneme.get("offset_ticks") is not None and phoneme.get("duration_ticks") is not None
     ]
     return sorted(timed, key=lambda p: p["offset_ticks"])
 
@@ -197,8 +198,7 @@ def vocalic_intervals(words: Sequence[Mapping[str, Any]]) -> list[list[float]]:
     for phoneme in _phonemes_in_time_order(words):
         start, length = phoneme["offset_ticks"], phoneme["duration_ticks"]
         gap_ms = (
-            None if previous_end is None
-            else (start - previous_end) / speech_analyzer.TICKS_PER_MS
+            None if previous_end is None else (start - previous_end) / speech_analyzer.TICKS_PER_MS
         )
 
         if gap_ms is not None and gap_ms > PAUSE_BREAK_MS:
@@ -249,11 +249,9 @@ def npvi(words: Sequence[Mapping[str, Any]]) -> Rhythm:
     total = sum(
         abs(first - second) / ((first + second) / 2)
         for run in runs
-        for first, second in zip(run, run[1:])
+        for first, second in itertools.pairwise(run)
     )
-    return Rhythm(
-        npvi=100.0 * total / pairs, pairs=pairs, intervals=intervals, runs=len(runs)
-    )
+    return Rhythm(npvi=100.0 * total / pairs, pairs=pairs, intervals=intervals, runs=len(runs))
 
 
 # --- The baseline ---------------------------------------------------------------------------
@@ -309,9 +307,10 @@ def _read_baseline(path: Path) -> Baseline | None:
             voice=str(captured.get("voice") or "unknown"),
             captured_at=str(captured.get("captured_at") or "unknown"),
         )
-    except Exception:  # noqa: BLE001 — a corrupt baseline is a missing one, not a crash
-        logger.warning("Baseline at %s could not be read; treating it as absent", path,
-                       exc_info=True)
+    except Exception:  # a corrupt baseline is a missing one, not a crash
+        logger.warning(
+            "Baseline at %s could not be read; treating it as absent", path, exc_info=True
+        )
         return None
 
 

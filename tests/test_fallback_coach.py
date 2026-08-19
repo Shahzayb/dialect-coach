@@ -37,8 +37,16 @@ def phoneme(symbol: str, score: float, *nbest: tuple[str, float]) -> dict:
     }
 
 
-def word(text: str, accuracy=None, error_type="None", phonemes=None, syllables=None,
-         delivery=None, break_length=None, monotone_confidence=None) -> dict:
+def word(
+    text: str,
+    accuracy=None,
+    error_type="None",
+    phonemes=None,
+    syllables=None,
+    delivery=None,
+    break_length=None,
+    monotone_confidence=None,
+) -> dict:
     return {
         "word": text,
         "accuracy": accuracy,
@@ -46,7 +54,8 @@ def word(text: str, accuracy=None, error_type="None", phonemes=None, syllables=N
         "error_source": "azure",
         "delivery_error_types": delivery or [],
         "prosody_detail": {
-            "break_length_ms": break_length, "monotone_confidence": monotone_confidence,
+            "break_length_ms": break_length,
+            "monotone_confidence": monotone_confidence,
         },
         "syllables": syllables or [],
         "phonemes": phonemes or [],
@@ -74,14 +83,21 @@ def test_the_delivery_faults_travel_as_their_own_section() -> None:
     is a property of a span and not of a word — and because it is what the model is asked
     to answer separately from the substitutions.
     """
-    words = [word("thursday", 88.0, delivery=["Monotone"], monotone_confidence=0.82),
-             word("clouds", 95.0)]
+    words = [
+        word("thursday", 88.0, delivery=["Monotone"], monotone_confidence=0.82),
+        word("clouds", 95.0),
+    ]
     section = fc.compact(assessment(words), Mode.PARAGRAPH)["delivery_faults"]
-    assert section == [{
-        "fault": "Monotone", "words": ["thursday"], "runs": [["thursday"]],
-        "break_length_ms_max": None, "break_length_ms_mean": None,
-        "monotone_confidence_mean": 0.82,
-    }]
+    assert section == [
+        {
+            "fault": "Monotone",
+            "words": ["thursday"],
+            "runs": [["thursday"]],
+            "break_length_ms_max": None,
+            "break_length_ms_mean": None,
+            "monotone_confidence_mean": 0.82,
+        }
+    ]
 
 
 def test_a_clean_attempt_sends_an_empty_delivery_section(drill: sa.Assessment) -> None:
@@ -96,7 +112,7 @@ def test_only_flagged_words_survive_compaction(drill: sa.Assessment) -> None:
 
 
 def test_no_substitution_is_claimed_when_azures_own_best_guess_is_the_target() -> None:
-    """"brought" in the fixture: /b/ scores 37 but the top alternate is /b/ itself."""
+    """ "brought" in the fixture: /b/ scores 37 but the top alternate is /b/ itself."""
     subject = word("brought", 41.0, phonemes=[phoneme("b", 37.0, ("b", 100.0), ("ə", 53.0))])
     compacted = fc.compact(assessment([subject]), Mode.DRILL)
     assert compacted["flagged_words"][0]["substitutions"] == []
@@ -105,21 +121,33 @@ def test_no_substitution_is_claimed_when_azures_own_best_guess_is_the_target() -
 
 def test_one_produced_sound_smeared_over_two_targets_counts_once() -> None:
     """The fixture's "thursday" returns /tʃ/ at 100 for both its /z/ and its /d/."""
-    subject = word("thursday", 34.0, phonemes=[
-        phoneme("z", 2.0, ("tʃ", 100.0)),
-        phoneme("d", 0.0, ("tʃ", 100.0)),
-    ])
-    substitutions = fc.compact(assessment([subject]), Mode.DRILL)["flagged_words"][0]["substitutions"]
+    subject = word(
+        "thursday",
+        34.0,
+        phonemes=[
+            phoneme("z", 2.0, ("tʃ", 100.0)),
+            phoneme("d", 0.0, ("tʃ", 100.0)),
+        ],
+    )
+    substitutions = fc.compact(assessment([subject]), Mode.DRILL)["flagged_words"][0][
+        "substitutions"
+    ]
     assert len(substitutions) == 1
     assert substitutions[0]["score"] == 0.0, "the worse of the run is the one kept"
 
 
 def test_two_different_substitutions_in_one_word_both_survive() -> None:
-    subject = word("thursday", 34.0, phonemes=[
-        phoneme("θ", 41.0, ("s", 100.0)),
-        phoneme("ɝ", 0.0, ("æ", 100.0)),
-    ])
-    substitutions = fc.compact(assessment([subject]), Mode.DRILL)["flagged_words"][0]["substitutions"]
+    subject = word(
+        "thursday",
+        34.0,
+        phonemes=[
+            phoneme("θ", 41.0, ("s", 100.0)),
+            phoneme("ɝ", 0.0, ("æ", 100.0)),
+        ],
+    )
+    substitutions = fc.compact(assessment([subject]), Mode.DRILL)["flagged_words"][0][
+        "substitutions"
+    ]
     assert [(s["expected"], s["produced"]) for s in substitutions] == [("θ", "s"), ("ɝ", "æ")]
 
 
@@ -160,8 +188,9 @@ def test_every_fix_names_the_words_it_came_from(drill: sa.Assessment) -> None:
 
 def test_the_practice_plan_names_words_from_this_attempt(drill: sa.Assessment) -> None:
     report = fc.build(drill, Mode.DRILL)
-    assert any(word in report.practice_plan
-               for fix in report.priority_fixes for word in fix.affected_words)
+    assert any(
+        word in report.practice_plan for fix in report.priority_fixes for word in fix.affected_words
+    )
 
 
 def test_the_same_attempt_produces_the_same_report(drill: sa.Assessment) -> None:
@@ -187,10 +216,14 @@ def test_a_substitution_spanning_more_words_outranks_a_worse_isolated_one() -> N
 def test_a_coachable_pair_outranks_alignment_noise_at_the_same_spread() -> None:
     """An unwritten pair can only be named; a written-up one can be practised."""
     words = [
-        word("thursday", 34.0, phonemes=[
-            phoneme("d", 0.0, ("tʃ", 100.0)),      # no entry: alignment noise
-            phoneme("θ", 41.0, ("s", 100.0)),      # written up, and worse for the listener
-        ]),
+        word(
+            "thursday",
+            34.0,
+            phonemes=[
+                phoneme("d", 0.0, ("tʃ", 100.0)),  # no entry: alignment noise
+                phoneme("θ", 41.0, ("s", 100.0)),  # written up, and worse for the listener
+            ],
+        ),
     ]
     fixes = fc.build(assessment(words), Mode.DRILL).priority_fixes
     assert (fixes[0].expected_phoneme, fixes[0].produced_phoneme) == ("θ", "s")
@@ -232,8 +265,10 @@ def test_every_delivery_fault_gets_its_own_drill_naming_the_span() -> None:
     This is issue #9's exit criterion as a unit test — a fault in the data produces advice
     that names the span, with no key and no network anywhere near it.
     """
-    words = [word("thursday", 88.0, delivery=["UnexpectedBreak"], break_length=900.0),
-             word("clouds", 90.0, delivery=["Monotone"], monotone_confidence=0.81)]
+    words = [
+        word("thursday", 88.0, delivery=["UnexpectedBreak"], break_length=900.0),
+        word("clouds", 90.0, delivery=["Monotone"], monotone_confidence=0.81),
+    ]
     drills = fc.build(assessment(words), Mode.PARAGRAPH).delivery_drills
 
     assert [d.fault for d in drills] == ["UnexpectedBreak", "Monotone"]
@@ -271,7 +306,24 @@ def test_a_long_span_is_quoted_as_the_phrase_that_was_said() -> None:
     drill has to quote a stretch the speaker actually said, which means the longest
     contiguous run.
     """
-    span = "once i get back to my desk i will call the team to check on the".split()
+    span = [
+        "once",
+        "i",
+        "get",
+        "back",
+        "to",
+        "my",
+        "desk",
+        "i",
+        "will",
+        "call",
+        "the",
+        "team",
+        "to",
+        "check",
+        "on",
+        "the",
+    ]
     words = [word("i", 90.0, delivery=["Monotone"]), word("gap", 95.0)]
     words += [word(w, 90.0, delivery=["Monotone"]) for w in span]
 
@@ -296,10 +348,12 @@ def test_a_quoted_stretch_is_cut_off_before_it_becomes_a_reading_exercise() -> N
 def test_two_stretches_either_side_of_a_clean_word_are_not_joined() -> None:
     """Synthetic. Quoting across the gap would put words in the learner's mouth that they
     never said next to each other."""
-    words = [word("stayed", 90.0, delivery=["Monotone"]),
-             word("warm", 95.0),
-             word("and", 90.0, delivery=["Monotone"]),
-             word("clear", 90.0, delivery=["Monotone"])]
+    words = [
+        word("stayed", 90.0, delivery=["Monotone"]),
+        word("warm", 95.0),
+        word("and", 90.0, delivery=["Monotone"]),
+        word("clear", 90.0, delivery=["Monotone"]),
+    ]
     fault = fc.compact(assessment(words), Mode.PARAGRAPH)["delivery_faults"][0]
 
     assert fault["runs"] == [["stayed"], ["and", "clear"]]
@@ -322,9 +376,11 @@ def test_a_clean_attempt_gets_no_delivery_drills(drill: sa.Assessment) -> None:
 
 def test_the_delivery_drills_are_the_same_bytes_on_a_second_build() -> None:
     """Synthetic. Nothing in this coach is allowed to be non-deterministic."""
-    words = [word("thursday", 88.0, delivery=["UnexpectedBreak"]),
-             word("clouds", 90.0, delivery=["Monotone"]),
-             word("thunder", 90.0, delivery=["MissingBreak"])]
+    words = [
+        word("thursday", 88.0, delivery=["UnexpectedBreak"]),
+        word("clouds", 90.0, delivery=["Monotone"]),
+        word("thunder", 90.0, delivery=["MissingBreak"]),
+    ]
     first = fc.build(assessment(words), Mode.PARAGRAPH).model_dump()
     second = fc.build(assessment(words), Mode.PARAGRAPH).model_dump()
     assert first == second
@@ -345,10 +401,16 @@ def test_a_weak_stressed_syllable_is_called_out(drill: sa.Assessment) -> None:
 
 
 def test_a_swallowed_final_cluster_gets_the_cluster_note() -> None:
-    subject = word("asked", 40.0, phonemes=[
-        phoneme("æ", 90.0), phoneme("s", 90.0), phoneme("k", 90.0),
-        phoneme("t", 10.0, ("d", 100.0)),
-    ])
+    subject = word(
+        "asked",
+        40.0,
+        phonemes=[
+            phoneme("æ", 90.0),
+            phoneme("s", 90.0),
+            phoneme("k", 90.0),
+            phoneme("t", 10.0, ("d", 100.0)),
+        ],
+    )
     fix = fc.build(assessment([subject]), Mode.DRILL).priority_fixes[0]
     assert pr.FINAL_CLUSTER_NOTE in fix.articulation
 
