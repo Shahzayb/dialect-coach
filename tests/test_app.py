@@ -1596,6 +1596,7 @@ def test_a_shadow_target_does_not_appear_in_the_three_slots(run_app, shadow_synt
     retire a sound the recordings are still flagging."""
     import practice_queue
 
+    seed_flagged_history()
     conn = db.connect(os.environ["DB_PATH"])
     app_module.record_shadow_session(
         conn, "Benchmark", app_module.PRESETS[Mode.PARAGRAPH][
@@ -1607,7 +1608,17 @@ def test_a_shadow_target_does_not_appear_in_the_three_slots(run_app, shadow_synt
     app = run_app()
     assert not app.exception
     headings = " ".join(m.value for m in app.markdown)
-    assert f"Working on (0 of {utils.MAX_ACTIVE_TARGETS})" in headings
+    # The promoted targets are counted; the shadowing passage sitting beside them is not, and
+    # it gets its own section rather than a card in this list.
+    conn = db.connect(os.environ["DB_PATH"])
+    expected = len([
+        r for r in db.targets(conn, state=practice_queue.ACTIVE)
+        if practice_queue.promotable(str(r["kind"]))
+    ])
+    conn.close()
+    assert expected, "the seeded history promoted nothing, so this proves nothing"
+    assert f"Working on ({expected} of {utils.MAX_ACTIVE_TARGETS})" in headings
+    assert practice_queue.KIND_LABELS[practice_queue.SHADOW] not in headings
 
 
 def test_backing_out_of_a_session_returns_to_today(run_app) -> None:
@@ -1745,3 +1756,27 @@ def test_leaving_a_shadow_session_takes_its_result_with_it(run_app, shadow_synth
     assert not app.exception
     assert app.session_state["last_key"] is None
     assert app.session_state[app_module.RESULT_OWNER_KEY] is None
+
+
+def test_a_shadow_row_alone_still_reads_as_an_empty_queue(run_app, shadow_synthesis) -> None:
+    """Found live: a queue holding nothing but a shadowing passage is still an empty queue.
+
+    A shadow row is a standing practice, not something the recordings promoted, so letting it
+    make `targets` non-empty answered "what am I doing today?" with *"nothing due, they are all
+    on the review schedule"* about targets that had never been promoted at all — and captioned
+    the empty list *"everything promoted so far has graduated"*.
+    """
+    conn = db.connect(os.environ["DB_PATH"])
+    app_module.record_shadow_session(
+        conn, "Benchmark", app_module.PRESETS[Mode.PARAGRAPH][
+            list(app_module.PRESETS[Mode.PARAGRAPH])[0]
+        ], now=datetime(2026, 8, 19, tzinfo=timezone.utc),
+    )
+    conn.close()
+
+    app = run_app()
+    assert not app.exception
+    said = " ".join(i.value for i in app.info) + " ".join(c.value for c in app.caption)
+    assert "Nothing to practise yet" in said
+    assert "everything promoted so far has graduated" not in said
+    assert not any("Nothing due today" in s.value for s in app.success)

@@ -1725,7 +1725,12 @@ def render_today(conn: sqlite3.Connection, job: "AssessJob | None" = None,
     now = datetime.now(timezone.utc)
     apply_decisions(conn, targets, still_flagged, now=now)
 
-    if not targets:
+    # Promoted targets only. A shadowing passage is a standing practice, not something the
+    # recordings promoted, so a queue holding nothing BUT one is still an empty queue — and
+    # falling through here would answer "what am I doing today?" with "nothing due, they are
+    # all on the review schedule" about targets that were never promoted in the first place.
+    promoted = [t for t in targets if practice_queue.promotable(str(t["kind"]))]
+    if not promoted:
         if fingerprint[1] == 0:
             st.info(
                 "Nothing to practise yet, and that is the honest answer rather than a "
@@ -1749,7 +1754,7 @@ def render_today(conn: sqlite3.Connection, job: "AssessJob | None" = None,
         render_shadow_offer(conn, targets, now=now)
         return
 
-    ready = practice_queue.due(targets, now=now)
+    ready = practice_queue.due(promoted, now=now)
     # Split by kind rather than by "not stress": a shadowing passage is also not stress, and
     # handing one to `start_block` would look for a substitution it does not have.
     trainable = [
@@ -1797,7 +1802,6 @@ def render_today(conn: sqlite3.Connection, job: "AssessJob | None" = None,
     # Shadowing is excluded from both lists on purpose. It is not one of the three slots — it
     # is never promoted into one and never graduates out of one — so counting it against
     # MAX_ACTIVE_TARGETS would retire a sound the recordings are still flagging.
-    promoted = [t for t in targets if practice_queue.promotable(str(t["kind"]))]
     active = [t for t in promoted if str(t["state"]) == practice_queue.ACTIVE]
     graduated = [t for t in promoted if str(t["state"]) == practice_queue.GRADUATED]
 
@@ -2494,7 +2498,8 @@ def render_shadow_comparison(conn: sqlite3.Connection, rows: Any) -> None:
         st.caption(
             "Shadowed but never read cold, so there is nothing to compare: "
             + ", ".join(f"*{name}*" for name in orphans)
-            + ". Read one of them on the Practice tab without the model."
+            + (". Read it on the Practice tab without the model." if len(orphans) == 1
+               else ". Read one of them on the Practice tab without the model.")
         )
 
     if frame.empty:
