@@ -533,3 +533,33 @@ def test_a_flat_rhythm_and_a_jagged_one_are_different_pictures() -> None:
     jagged = accent_charts.rhythm_frame([[40.0, 140.0] * 4])
     assert flat["duration_ms"].std() == pytest.approx(0.0)
     assert jagged["duration_ms"].std() > 40.0
+
+
+def test_the_model_voices_actually_collapse_onto_one_line() -> None:
+    """The chart says "averaged across voices at each instant". It has to be true.
+
+    Each voice is tracked on its own 10 ms grid and then warped onto the user's clock, which
+    lands its frames on arbitrary floats. Without a shared bucket the chart's
+    `median(semitones)` groups by an x value that is unique per voice per frame, aggregates
+    nothing, and draws a line zigzagging between eight voices — which reads as a wildly
+    unstable reference contour rather than as the tendency it claims to be.
+    """
+    anchors = [accent_charts.Anchor("one", 0.0, 0.0), accent_charts.Anchor("two", 1.0, 1.0)]
+    # Three voices on the same grid, offset the way three real trackers are, and an octave
+    # apart so a failure to average is visible in the values and not only in the row count.
+    tracks = [
+        [(index * 0.01 + offset, hz) for index in range(50)]
+        for offset, hz in ((0.000, 100.0), (0.003, 200.0), (0.007, 150.0))
+    ]
+    frame = accent_charts.pitch_frame(
+        [(index * 0.01, 120.0) for index in range(50)], tracks, anchors
+    )
+    model = frame[frame["series"] == "General American model"]
+
+    assert len(model) == 150
+    assert model["time_s"].nunique() <= 51, (
+        f"{model['time_s'].nunique()} distinct x values for 150 rows — the voices never "
+        f"share a group, so nothing is averaged"
+    )
+    biggest = model.groupby("time_s").size().max()
+    assert biggest == 3, f"at most {biggest} voice(s) landed in one group"

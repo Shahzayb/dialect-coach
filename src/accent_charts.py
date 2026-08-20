@@ -536,6 +536,15 @@ def to_user_clock(model_time_s: float, anchors: Sequence[Anchor]) -> float | Non
 
 PITCH_COLUMNS: tuple[str, ...] = ("series", "time_s", "semitones", "hz")
 
+# The grid the model voices are collapsed onto before they are averaged. Each voice is tracked
+# on its own 10 ms grid and then warped onto the user's clock, which lands its frames on
+# arbitrary floats — so without a shared bucket the chart's `median(semitones)` groups by an x
+# value that is unique per voice per frame, aggregates nothing, and draws a line zigzagging
+# between eight voices instead of the tendency across them. 10 ms because that is the pitch
+# step itself: no real resolution is lost, and `app._target_contour` rounds the same way, so
+# the contour the chart shows and the contour the resynthesis applies come off one grid.
+MODEL_GRID_S = 0.01
+
 
 def pitch_frame(
     user_track: Sequence[tuple[float, float]],
@@ -579,7 +588,9 @@ def pitch_frame(
             rows.append(
                 {
                     "series": model_label,
-                    "time_s": mapped,
+                    # Quantised so several voices land in ONE aggregation group. See
+                    # `MODEL_GRID_S` — without this the averaging below is a no-op.
+                    "time_s": round(mapped / MODEL_GRID_S) * MODEL_GRID_S,
                     "semitones": _semitones(hz, model_median),
                     "hz": hz,
                 }
