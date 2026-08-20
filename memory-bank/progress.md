@@ -149,6 +149,26 @@ second promotes it to the queue as a `vowel` target with its evidence.
 
 ## Known issues
 
+- **`ranked_gaps` and `findings_by_instrument` still score against Hillenbrand only.** Both
+  call `reference_positions(reference_set)` with the default `source=REFERENCE_PUBLISHED`,
+  while the rhoticity chart draws its targets from `model_reference`. For the men's set the
+  chart marks /ɝ/ at 498 Hz and the table under it quotes 298 Hz, and the six other rhotics
+  get a real per-vowel target on the chart against Hillenbrand's /ɝ/ in every table row. The
+  measured reference was bought precisely to fix that; wiring it through changes what every
+  table on the page says, so it is a decision rather than a patch.
+- **The vowel geometry never reaches either coach.** Nothing in `src/` calls
+  `fallback_coach.with_geometry` or `vowel_measure.ranked_gaps` — `compact()`'s
+  `"vowel_geometry": []` is what `ai_coach.coach` and `fallback_coach.build` actually see. So
+  `_checked_bridging_phrases` returns early, `bridging_phrases` iterates nothing, and
+  `app.render_bridging_phrases` never renders: no bridging phrase, no one-click drill, no queue
+  promotion. `vowel_reference.PRE_FORTIS_PAIRS` and `STRESS_SHIFT_PAIRS` are likewise written
+  and read by no consumer. All of it is covered by tests, which is why it stayed invisible.
+- **`_correct_worst_vowel` picks and shifts in raw hertz.** It ranks tokens by the hertz gap
+  between the speaker's F2 and a model voice's mean, so vocal-tract length dominates the
+  choice: a speaker whose tract is longer than the model-set average has every F2 low, and the
+  "worst" vowel is whichever carries the largest anatomical offset. Every other ranking in the
+  chunk works in z-units for exactly this reason.
+
 **A real `.env` can silently undo the 180-second paragraph ceiling.** The default moved from
 120 to 180 for shadowing, but a `.env` written before that change still says 120 and wins —
 check the live file, not just `utils._DEFAULTS`.
@@ -204,6 +224,15 @@ is unreachable from the running app. `app.py`'s `if entry.attempt_id:` treats id
 - **Testing a formant tracker against a three-formant synthetic vowel.** It under-determines
   the five-pole model Praat fits below a 5 kHz ceiling, producing a spurious ~1700 Hz-wide
   peak between F1 and F2. The test signal needs as many resonances as real speech.
+- **Praat's `Extract part` with an EMPTY time range.** `Extract part 0.0 0.0` returns the
+  whole sound, not nothing — verified against the pinned 0.4.7. Any splice built by extracting
+  a before/middle/after triple has to skip the parts that do not exist, or a span touching
+  either edge of the clip silently concatenates the entire recording back in.
+- **Negating a delta because the quantity is a difference rather than a formant.** F3−F2's
+  delta is `target − produced` exactly like every other delta in `vowel_measure`, so it feeds
+  `instruction_for` unchanged. The flip is easy to argue yourself into and it inverts the
+  advice: it told a speaker whose r-colouring had not arrived to release the bunching. Both
+  directions of both instruments now have a named test.
 
 ## Standing preferences
 
