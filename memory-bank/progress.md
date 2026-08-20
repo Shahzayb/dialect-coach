@@ -2,232 +2,69 @@
 
 ## Current focus
 
-The measurement engine behind the project's headline goal: sounding less accented. Azure's
-diagnosis is CATEGORICAL — this phoneme is /θ/ or /t/, scored 0-100 — and accent is CONTINUOUS. A
-vowel scoring 78 while drifting toward the target and one scoring 78 while drifting away look
-identical to Azure. This chunk measures the gradient part: where vowels actually sit, how they
-move, how long they last, how loud they are, and how far the unstressed ones reduce. Needs the
-timing data from v0.6.0. Costs two calibration recordings, roughly 90 seconds each — two, not one,
-and the reason is in THE NOISE FLOOR below.
+Building the app one chunk at a time. The diagnosis is legible and audible, the coaching
+layer turns it into something to practise, the record-and-assess surface behaves under
+repeated and impatient clicking, the scores and error metrics for milestone v0.3.0 are built
+and verified live, the prosody score comes with a drill attached (v0.4.0), and the stored
+history is shown back over time on a fixed benchmark passage (v0.5.0). Azure's timing data
+survives the parser and turns into a rhythm measurement, nPVI, against a same-pipeline TTS
+baseline (v0.6.0) — the de-risking step for every later accent measurement. **The app trains
+rather than only diagnosing (v0.7.0)**: a perception trainer built on High Variability
+Phonetic Training, and a practice queue that persists a small target set. **It practises
+against a model in real time (v0.8.0)** — shadowing, with a pre-registered acceptance test
+written down before the data existed. **The tooling is enforced rather than intended
+(v0.9.0)** — `src/` layout, ruff, mypy and CI, deliberately placed after the feature work and
+**before** the audio measurement chunks, so the strictness was switched on before the most
+numerically delicate code in the project got written.
 
-SETTLE THE DEPENDENCY FIRST, BEFORE ANYTHING ELSE IN THE CHUNK, and record the measured build
-time in the plan file whichever wins:
-- praat-parselmouth 0.4.7 ships NO linux-aarch64 wheel. cp312 wheels exist for manylinux x86_64
-  and i686 and for macOS arm64, but not linux arm64. This project's container is aarch64 Linux on
-  Apple Silicon, so pip install there downloads the source tarball and compiles Praat from C++:
-  a large build, a C++ toolchain in the image, a much bigger layer. Route one is a multi-stage
-  Docker build compiling in a builder stage so the toolchain never ships in the final image.
-  Praat's Burg formant analysis is the reference implementation the published tables were built
-  with. Note the inversion: on an Apple Silicon host .venv, parselmouth installs from a macOS
-  arm64 wheel instantly, so for this one feature the venv path is easier than Docker.
-- Route two is scipy plus hand-rolled LPC: pre-emphasis 0.97, Hamming window, resample to twice
-  the formant ceiling, LPC order about 2 + fs/1000 AT THE RESAMPLED RATE, roots -> angles ->
-  frequencies, filtered by bandwidth and range. About forty lines, noisier than Burg, adds one
-  wheel instead of a compiler. F0 needs an autocorrelation or cepstral tracker on top.
-- librosa is NOT recommended: good pyin F0 out of the box but no formants at all, so it solves the
-  easy half, leaves the hard half, and pulls the largest dependency tree.
+**The accent itself is now measured, not inferred (v0.10.0).** Azure's diagnosis is
+categorical — this phoneme is /θ/ or /t/, scored out of a hundred — and an accent is
+continuous. A vowel scoring 78 while drifting toward the target and one scoring 78 while
+drifting away are identical to Azure and opposite findings to a learner. Four instruments from
+one pass over the recording: vowel **position** in Lobanov space, **trajectory** from 20% to
+80%, **rhoticity** as F3−F2, and **duration and reduction**. Every finding renders as the same
+four-column table, with a signed delta and the articulatory instruction it implies in every
+row. The measurement runs inside the assessment request, and recordings are now kept so a
+changed normalisation scheme is a re-derivation rather than a request that the passage be read
+again.
 
-ROUTE ONE IS RECOMMENDED, AND THE REASON IS NOT ACCURACY — IT IS v0.11.0. Parselmouth is not only
-an analyser. It exposes Praat's Manipulation object: PSOLA resynthesis, PitchTier replacement,
-DurationTier time-scaling, and formant shifting. v0.11.0's modified-self-voice surface — playing
-the user their OWN recording with the corrected pitch contour or the corrected vowel — is built
-directly on those calls and is nearly free once parselmouth is present. Route two analyses and
-cannot resynthesise, so choosing it to save a Docker layer silently deletes half of the next
-milestone. If route two wins anyway, SAY IN THE PLAN FILE that v0.11.0's manipulation surfaces
-are deferred and what would be needed to restore them.
-Verify all of the above against PyPI and the running container rather than trusting this summary.
-
-SETTLE THE STRESS LEXICON TOO, SAME PLACE, SAME RIGOUR. Azure returns syllable spans and scores
-but NO LEXICAL STRESS MARKS — there is no field that says which syllable of "computer" is
-stressed. Reduction and stress placement cannot be measured without that, so it is a dependency,
-not a detail. Options: a CMU Pronouncing Dictionary wheel (ARPABET with 0/1/2 stress digits, pure
-data, no compiler, needs an ARPABET -> Azure-IPA mapping table written once into
-phoneme_reference); a g2p package (heavier, usually drags nltk and a model download); or hand-
-annotating stress only for the fixed calibration passage and the fixed drill inventory (free,
-offline, permanent, and covers every scripted surface — but returns nothing for Mode C). Verify
-what is actually on PyPI. If the third option wins, the reduction measures are SCRIPTED-ONLY and
-that limit must be stated on the surface, not discovered later.
-
-CRITICAL ARCHITECTURAL FACT, do not design around the wrong model: the user's audio is DELETED at
-the end of each assessment request — audio_utils.temp_wav removes the temp file in a finally
-block, by design, and no recording is ever persisted. So this measurement CANNOT be a later pass
-over stored history. It must run INSIDE the assessment request, while the audio is still in
-memory. Two consequences to state in the plan file: every attempt recorded before this chunk ships
-is permanently unmeasurable, and the calibration passage must therefore be read AFTER this lands.
-
-FIRST, RESOLVE A CONTRADICTION IN THE MEMORY BANK, because this chunk and v1.0.0's privacy
-disclosure both rest on it. memory-bank/projectbrief.md — which declares itself the tiebreaker —
-says "audio kept on disk but never committed" and "Recordings may be kept locally, with the path
-and hash in the database". The code says otherwise and matches the paragraph above. One of the two
-is stale. Decide which, fix that file, and note the decision in the plan file BEFORE writing any
-measurement code: if audio were in fact retainable, the whole "must run inside the request"
-constraint dissolves and this chunk is designed wrong.
-
-PIPELINE: slice each vowel from the WAV using the phoneme offsets -> measure F1/F2/F3 at the 25%,
-50% and 75% points, the segment's duration in ms, and its RMS intensity in dB, plus an F0 track
-over the utterance -> Lobanov z-score normalise across the speaker's own vowel inventory ->
-compare against published General American formant means.
-
-FOUR INSTRUMENTS, NOT ONE. Formant position is the one everybody builds and it is a quarter of an
-accent. Build all four in this chunk, because all four fall out of the same slice-and-measure loop
-and retro-fitting any of them means re-recording that this project's deleted-audio design makes
-impossible:
-- POSITION — F1/F2 in Lobanov space against the GA reference. Where the vowel sits.
-- TRAJECTORY — the 25% -> 75% movement. Whether a diphthong is a diphthong.
-- RHOTICITY — F3, and specifically F3 minus F2. THE HIGHEST-VALUE SINGLE NUMBER IN THIS CHUNK for
-  a General American target, and the one the original pipeline measured and then never used.
-  American /ɹ ɝ ɚ ɔɹ ɑɹ ɪɹ ɛɹ ʊɹ/ are defined acoustically by a steeply lowered F3 approaching F2;
-  a non-rhotic or weakly rhotic production leaves F3 high and separated. It is the loudest,
-  cleanest, most correctable accent marker available and it costs one extra column.
-- DURATION AND REDUCTION — vowel length in ms and how far unstressed vowels collapse toward the
-  speaker's own schwa. Three sub-measures, all from data already in the row:
-  * TENSE/LAX RATIO: /i/ against /ɪ/, /u/ against /ʊ/, /eɪ/ against /ɛ/. In GA the contrast is
-    carried by quality AND length together; a learner who gets the formants right and the length
-    wrong still sounds wrong.
-  * PRE-FORTIS CLIPPING: the same vowel is markedly shorter before a voiceless coda than before a
-    voiced one — this length difference, not the consonant's own voicing, is the main cue that
-    separates "bat" from "bad" in American English. Measure the ratio; a learner producing no
-    clipping produces minimal pairs that do not land.
-  * REDUCTION: compute the speaker's OWN schwa centroid from unstressed syllables, then measure
-    the mean Lobanov distance of unstressed vowels from it. Under-reduction — unstressed vowels
-    held too peripheral, too long, too loud — is one of the strongest and most trainable accent
-    markers in English, and it is invisible to every phoneme-level score Azure returns.
-
-STRESS PLACEMENT is the composite of the last two plus F0 and intensity: an English stressed
-syllable is longer, louder, higher or more pitch-moved, and has an unreduced vowel. Score all four
-components separately and report them separately. A stress error reported as one number is exactly
-the vague advice this project exists to delete — "your stress is off" is useless, "the second
-syllable is 40 ms longer and 3 dB louder than the first, and GA puts it the other way round" is
-an instruction.
-
-THE TRAPS THAT DECIDE WHETHER THE NUMBERS MEAN ANYTHING:
-- MEASURE AT POINTS, NEVER AVERAGE ACROSS THE SEGMENT. The edges are contaminated by
-  coarticulation with neighbouring consonants and an averaged diphthong lands in the middle of
-  nowhere. The three-point sample also makes trajectory fall out for free: a monophthong is the
-  case where the 25% and 75% points coincide.
-- MATCH THE MEASUREMENT POINTS TO THE REFERENCE'S OWN POINTS. Hillenbrand et al. report steady-
-  state values and a separate trajectory measurement taken at fixed proportions of vowel duration
-  that are NOT necessarily the 25/75 used here. Look up which proportions the table actually used
-  when you look up the values, and either adopt them or record the offset. Comparing a 25/75
-  sample against a 20/80 reference is a small systematic bias and it lands hardest on the
-  diphthongs that v0.11.0's acceptance test depends on.
-- THE LPC CEILING IS THE CLASSIC FORMANT ERROR: it must match vocal tract length, roughly 5000 Hz
-  for a typical adult male voice and 5500 Hz for a typical adult female one. Getting it wrong
-  shifts every value. Derive it from the measured median F0 rather than assuming, expose it as a
-  setting, and RECORD WHICH VALUE PRODUCED EACH STORED MEASUREMENT so old rows stay interpretable.
-  Treat the F0-derived guess as a WEAK estimator — F0 and vocal tract length correlate loosely,
-  not tightly — so also sanity-check it by sweeping the ceiling across a range on the calibration
-  audio and preferring the value that minimises within-vowel-category formant variance.
-- THE CEILING AND THE LPC ORDER ARE ONE DECISION, NOT TWO. This is where route two goes wrong
-  silently: "order 2 + fs/1000, 18 at 16 kHz" analyses the full 8 kHz band, which IS a ceiling of
-  8000 Hz and quietly overrides the 5000/5500 setting above. The rule applies after resampling.
-  Resample to twice the ceiling (10 kHz for 5000, 11 kHz for 5500), then the order is about 12 —
-  roughly two coefficients per expected formant plus two for spectral tilt. An order-18 analysis
-  at 16 kHz will invent extra poles inside the vowel's first two formants and split one formant
-  into two, which looks like a plausible measurement and is not one. Assert the relationship in
-  code rather than leaving both as independent settings.
-- REJECT RATHER THAN GUESS. Discard any segment shorter than about 40-50 ms (too few pitch periods
-  for a stable estimate), unvoiced or with no reliable F0 in its middle, or one where the speaker
-  produced a DIFFERENT VOWEL ENTIRELY — its formants are a valid measurement of the wrong target
-  and will quietly poison the cluster. That token belongs in the phoneme diagnosis, not the
-  baseline.
-- NORMALISATION IS NOT OPTIONAL. Formants scale with vocal tract length and raw Hz cannot be
-  compared between speakers; comparing a male speaker's F1/F2 to a female synthetic voice's
-  without normalising produces a chart that is confidently and entirely wrong. Use Lobanov
-  z-scores (per-speaker mean and SD across the vowel inventory).
-- LOBANOV IS SENSITIVE TO INVENTORY BALANCE, AND THE OBVIOUS IMPLEMENTATION IS THE WRONG ONE.
-  Take the mean and SD over PER-VOWEL-CATEGORY MEANS, never over the raw token pool. Any natural
-  passage over-samples some vowels, and a token-weighted centroid is dragged toward whichever
-  vowel happened to occur most, tilting every z-score in the inventory. The error is invisible on
-  inspection — the chart still looks like a vowel chart — so assert it in a test with a
-  deliberately unbalanced token set.
-- GATE ON RECORDING QUALITY. Formant estimation degrades badly with room reverb and a poor mic.
-  The Azure payload's top-level SNR is ALREADY parsed into overall_scores as snr_db and
-  snr_db_min by speech_analyzer._snr — read those, do not re-read the payload, and gate on
-  snr_db_min because quality is governed by the worst segment. When it is low say the measurement
-  is unreliable instead of drawing a confident dot. Before the first calibration read, have the
-  user record five seconds, report the measured SNR, and say plainly whether this room and mic can
-  support a vowel measurement at all.
-- REPORT HOW MANY TOKENS each vowel's position is based on. A point built from two tokens and one
-  built from twenty must not look the same.
-- TAG THE SPEECH STYLE ON EVERY ATTEMPT FROM DAY ONE. Read speech is hyperarticulated;
-  spontaneous speech is systematically more reduced and more centralised. They are different
-  measurement populations and pooling them makes a register change look like a regression toward
-  the middle of the vowel space. v0.12.0 adds spontaneous speech, but the tag has to exist BEFORE
-  it, because audio is deleted and an untagged token can never be reclassified. attempt_tags
-  already takes a free-text tag with no migration — write 'read' or 'spontaneous' there beside
-  'shadowed', and make every baseline and every trend query filter on it.
-
-THE NOISE FLOOR, AND THIS IS WHY CALIBRATION IS RECORDED TWICE. A vowel centroid moves between
-sessions from mic placement, room, posture, time of day and vocal warm-up, with no learning
-whatsoever. Without knowing how big that movement is, the progress view will render noise as
-progress — against a brief whose entire goal is "see that drilling it worked". So: record the
-calibration passage TWICE in one sitting, at least ten minutes apart, same mic, same room. The
-per-vowel displacement between the two runs IS the measurement noise floor. Store it beside the
-baseline. THEREAFTER NO MOVEMENT SMALLER THAN THAT BAND MAY BE REPORTED AS CHANGE — render it as
-"within measurement noise", every time, including when it is in the flattering direction.
-
-REFERENCE TARGETS — pick one per surface and label it; never average them. Published General
-American formant means (Hillenbrand et al. 1995, adult male and adult female sets), Lobanov
-normalised the same way as the speaker's data, are what the NUMBERS are measured against — look
-the table up when writing it, do NOT type the values from memory. The Azure TTS voice measured
-through the same pipeline is what the EAR is trained on. The two do not coincide, and imitating
-the voice can move a token AWAY from the published mean while sounding better. Say which reference
-each surface uses, on that surface.
-
-KNOW WHAT THE PUBLISHED TABLE IS AND IS NOT. It is upper-Midwest speakers recorded in the early
-1990s. Two consequences worth writing into vowel_reference.py as comments rather than discovering
-later: the low-back /ɑ/-/ɔ/ distinction has continued to merge across most of the US since, so a
-confident "your /ɔ/ is wrong" may be flagging a change the reference predates; and GA /u/ has
-fronted, so a modern native production sits higher in F2 than the 1995 mean. Where the reference
-is known to be behind the language, WIDEN THE TOLERANCE BAND rather than reporting a deviation
-that no listener would hear.
-
-THE OUTPUT CONTRACT — every accent surface in this project, here and in every later chunk, renders
-its findings as a Markdown table with EXACTLY these four column headers, in this order:
-
-| Acoustic Feature | User Realization | Target Realization | Delta / Adjustment Needed |
-
-Rules that make the table worth having:
-- The feature column NAMES THE PHONEME IN AZURE'S IPA, plus the Wells lexical-set keyword, plus
-  the metric: "/eɪ/ FACE — F2 travel 25%->75%", "/ɝ/ NURSE — F3-F2 distance". IPA alone is
-  unreadable at a glance; the keyword alone is imprecise; the metric alone is not a sound.
-- The two middle columns carry NUMBERS WITH UNITS — Hz, z-units, ms, dB, semitones — and the user
-  column carries its token count. Never a score, never a percentage, never a verdict.
-- The fourth column carries the SIGNED delta AND the articulatory instruction it implies. A delta
-  with no instruction is a measurement; an instruction with no delta is the vague advice this
-  project exists to delete. Both, in every row.
-- One row per measured feature. A rejected token gets a row too, with the rejection reason in the
-  fourth column, so a thin table is visibly thin rather than silently short.
-
-Worked shape, for the fixture:
-
-| Acoustic Feature | User Realization | Target Realization | Delta / Adjustment Needed |
-|---|---|---|---|
-| /i/ FLEECE — F2 (Lobanov z) | +1.12 (n=14) | +1.94 | −0.82 → tongue further front, lips spread |
-| /eɪ/ FACE — F2 travel 25→75% | 180 Hz | 620 Hz | Monophthongised; glide, do not hold |
-| /ɝ/ NURSE — F3−F2 | 980 Hz | 310 Hz | +670 Hz → no r-colouring; bunch the tongue |
-| /æ/ TRAP — duration before voiced coda | 118 ms | 205 ms | +87 ms → lengthen before /d z g/ |
-| /ə/ unstressed — distance from schwa centroid | 0.94 z (n=31) | 0.30 z | −0.64 → under-reduced |
-
-STORAGE, additive, no migration: speaker_baseline (per-vowel means and SDs from the calibration
-run, the noise-floor band from the paired run, the LPC ceiling used, the speech-style tag, when it
-was measured; one current row, history kept) and vowel_measurements (one row per token: attempt
-id, vowel, three-point formants F1/F2/F3, duration ms, RMS dB, stressed/unstressed, the token's
-Azure score, the recording's snr_db_min, the LPC ceiling used, the speech-style tag, and whether
-it was accepted or rejected and why). Store RAW measurements, never only derived positions —
-normalisation schemes and reference tables will change, and re-deriving must never require
-re-recording. This is also why F3, intensity and the stress flag are columns from day one even
-though nothing reads them until v0.11.0: a column costs nothing, a re-recording is impossible.
-
-EXIT: two calibration reads produce a stored baseline AND a stored noise floor; every measurement
-is reproducible from stored rows; every accent surface renders the four-column table with IPA-
-labelled features and signed deltas; F3-based rhoticity, vowel duration and unstressed reduction
-each produce a number, not a placeholder; the pipeline refuses rather than guesses when tokens are
-too few to normalise; a movement smaller than the noise floor renders as "within measurement
-noise". Milestone v0.10.0 closed.
+**The chunk's real work was refusing to produce confident nonsense.** The pipeline discards a
+token that is too short, unvoiced, or a different vowel entirely, and says so in a row of its
+own. It refuses to normalise below eight categories rather than drawing a vowel chart from a
+handful of words. It refuses a reference set rather than guessing one, and refuses a
+calibration built from two back-to-back reads. And the noise floor — the displacement between
+two reads of the same passage taken ten minutes apart, with no learning possible in between —
+means **no movement smaller than that band is ever reported as change**, including when it is
+in the flattering direction. Without that number, a progress view is a machine for rendering
+microphone placement as improvement.
 
 ## Releases
+
+**v0.10.0 — 2026-08-20.** The accent measurement engine. Five new modules (`acoustics`,
+`vowel_reference`, `stress_lexicon`, `vowel_measure`, `accent_view`), a fourth **Accent** tab,
+three additive tables, and audio kept on disk for the first time. Dependencies were settled
+against primary sources before any code: `praat-parselmouth` 0.4.7 publishes **no
+linux-aarch64 wheel at any Python version** (all 100 files enumerated), so the arm64 container
+compiles Praat in a builder stage — **measured at 100 s for the compile and 265 s for the whole
+image**, far cheaper than 535 `.cpp` files suggested. Taken anyway for v0.11.0's sake, with one
+correction that chunk needs: parselmouth binds **no `Manipulation` class**, so resynthesis goes
+through the untyped `parselmouth.praat.call`. `cmudict` supplies the lexical stress Azure does
+not return, measured at 128/128 calibration-passage words and 101/101 fixture words.
+`vowel_reference.py` is **generated** from Hillenbrand's `vowdata.dat`, so no formant value is
+ever typed from memory — which immediately corrected three of the brief's own numbers: the
+reference samples at **20/50/80%, not 25/75** (adopted, so the bias is zero), GA /eɪ/ F2 travel
+is ~140 Hz rather than 620, and pre-fortis clipping has **no published target at all** because
+every Hillenbrand stimulus ends in a voiced /d/. The table covers 12 vowels, so ten of the
+categories the benchmark passage carries report position with an honest blank target. **The
+memory-bank contradiction the chunk opened with resolved against its own premise**:
+`techContext.md` records the user lifting the no-stored-audio rule on 2026-08-19, so
+`projectbrief.md` was current and two code docstrings still asserting the old rule were the
+stale text. Two defects were found by running it rather than reasoning about it — a vowel chart
+with no colour legend (altair merges layered legends, so `legend=None` on one layer removed
+both), and a test-harness cache key collision that surfaced as thirteen unrelated failures.
+732 tests, all offline. **The live half is outstanding and needs a human at a microphone**: no
+calibration read exists yet, so the baseline and noise floor have been proven on synthetic
+audio and not on a voice.
 
 **v0.9.0 — 2026-08-20.** The tooling chunk: source moved under `src/` (#17), ruff format and
 lint (#15), mypy (#18), and GitHub Actions (#16), as one chunk because all four touch the same
@@ -295,43 +132,42 @@ below still open, on the user's explicit instruction (fix-after rather than fix-
 
 ## Next concrete step
 
-**Read the benchmark passage — cold, and then shadowed.** The progress view ships with its
-headline series empty — that is not a defect, it is the first day. Four or five reads spread
-over a month are what make the chart worth looking at, and the first one also settles whether
-196 words really lands inside 60-90 seconds at an actual reading pace (the attempt's own
-`audio_seconds` says; the TTS baseline took 61.8 s, and a human reads it slower). Until then
-the only thing on screen is the free-practice cloud, which is exactly the thing that cannot be
-read as progress.
+**Check the room, then read the benchmark passage twice.** In that order, and both on the
+Accent tab. The room check costs five seconds of the Azure allowance and answers the question
+that decides whether any of the rest is worth recording: below about 15 dB SNR the formant
+estimates describe the room rather than the speaker.
 
-Four things now depend on it rather than one. The rhythm chart plots benchmark reads only,
-because nPVI moves with the text as much as with the speaker, and the first read is the first
-number that can be set against the TTS baseline's 58.45. **The practice queue is the third,
-and it is the one that changes what a read is for**: targets are promoted from sounds flagged
-across separate attempts, so until there are real attempts the queue has nothing to schedule
-and the Today tab correctly offers nothing. Reading the passage is now what starts the whole
-loop, not only what fills a chart.
+Then the two calibration reads, **at least ten minutes apart in one sitting, same microphone,
+same room**. That produces the first real baseline and the first real noise floor — and the
+noise floor is the number everything downstream depends on, because until it exists no
+movement anywhere in the app can honestly be called progress. The synthetic figure the tests
+produce (0.09 z) says nothing about a human voice.
 
-**Shadowing is the fourth, and it needs the cold read specifically.** A shadowed read with
-nothing to sit against says nothing at all — the comparison surface correctly reports "no cold
-read of this passage yet" rather than inventing a partner. So the order matters: read it cold
-first, then shadow it on headphones, and the first honest pair exists. That pair is also the
-first real test of the pre-registered finding above, and of whether the recording survives the
-press-record-then-press-play sequence in a real browser, which no test can answer.
+Those two reads also do double duty: they are the benchmark passage, so they start the
+progress trajectory and the rhythm series at the same time, and they give the practice queue
+its first real evidence to promote from. One sitting starts four things at once.
 
-**Then do some blocks.** The trainer has been run, not used. The graduation rule (90% across
-two completed blocks) has never fired on real listening, the spaced-review schedule has never
-come round, and whether a perception gain shows up in the Azure scores is the question the
-whole chunk is a bet on. Same shape as the benchmark's 30-day check: only weeks of real use
-answer it, and neither is a merge gate.
+**Then the shadowed read**, which still has no cold partner to sit against, and **then some
+perception blocks** — the graduation rule has never fired on real listening. Both remain
+calendar items rather than merge gates.
 
-**Then Mode C (unscripted speech)** — free speech scored on vocabulary, grammar and
-topic, not just a script. Blocked on a real question, not busywork:
-`enable_content_assessment_with_topic` does not exist in SDK 1.51.1 despite the master plan
-citing it (see Dead ends below), so Mode C's content scoring needs another route found and
-verified before it can be planned. `UNSCRIPTED_TWO_PASS` is defined and priced by
-`budget.passes_for` but unread by any recognition code yet.
+**Then Mode C (unscripted speech)**, still blocked on the same real question:
+`enable_content_assessment_with_topic` does not exist in SDK 1.51.1 (see Dead ends), so its
+content scoring needs another route found and verified before it can be planned. The
+speech-style tag now exists ahead of it, which was the point of adding it in v0.10.0.
 
 ## Active plan
+
+`plans/2026-08-20_accent-measurement-engine.md` — **built and complete offline; the live half
+cannot be closed without a human at a microphone.** Every exit criterion is met structurally
+and demonstrated on synthetic audio: two reads produce a stored baseline and a stored noise
+floor, measurements are reproducible from stored rows, the four-column table renders with
+IPA-labelled features and signed deltas, F3-based rhoticity and vowel duration and unstressed
+reduction each produce a number, the pipeline refuses when tokens are too few, and a movement
+smaller than the band renders as "within measurement noise". What no test can answer is
+whether a real room and a real microphone clear the SNR gate, and what the noise floor
+actually is for this speaker — the synthetic figure of 0.09 z is a property of the synthesiser,
+not of a voice.
 
 `plans/2026-08-19_shadowing-practice-flow.md` — **built and complete offline; the live half is
 outstanding and cannot be closed without a human at a microphone.** Open as
@@ -662,6 +498,25 @@ illustration and not evidence. Whether a real shadowed read beats a real cold on
 the gap really closes, needs weeks of real reads on headphones. Same shape as the benchmark's
 30-day check and the perception trainer's "has been run, not used".
 
+**The accent is measured, on its own tab (v0.10.0).** The Accent tab holds a five-second room
+check, the two-read calibration flow, the vowel chart against the published General American
+means, and the noise floor stated in words with what it forbids. Every assessment also renders
+a four-column table under its result: the phoneme in Azure's IPA plus its Wells keyword plus
+the metric, the numbers with units and a token count, and a signed delta carrying the
+articulatory instruction it implies.
+
+Verified offline, end to end, in a browser against a seeded synthetic calibration: two reads
+seventeen minutes apart produced a stored baseline over twelve vowel categories, a noise floor
+of 0.09 z, a correctly oriented vowel chart (both axes reversed — a vowel chart is a schematic
+of the mouth, not an ordinary scatter), and the per-vowel band table through the same
+four-column renderer as everything else. The formant pipeline recovers ten synthesised vowels
+with known formants to within 4%.
+
+**What has not been verified is the only thing that matters next**: no human has read the
+calibration passage. The baseline, the noise floor and the SNR gate have been exercised on
+synthesised audio, which has no room, no microphone and no vocal warm-up — the three things
+the noise floor exists to measure.
+
 ## Known issues
 
 **The 8 code-review findings from 2026-08-18 are all fixed** (2026-08-19, in the
@@ -753,6 +608,18 @@ itself now re-reads both stored shapes, so wiring it up is all that is left). `a
 - **`enable_content_assessment_with_topic`** is not in SDK 1.51.1 despite the master plan
   citing it for Mode C. Do not plan Mode C's content scoring around it without checking
   first.
+- **Planning v0.11.0 against a typed `parselmouth.Manipulation` class.** It does not exist —
+  the bindings are Sound, Pitch, Formant, Intensity, Spectrum and friends. PSOLA resynthesis,
+  PitchTier replacement and DurationTier time-scaling are reachable only through the untyped
+  `parselmouth.praat.call(...)`. Checked in the 0.4.7 source tree, not assumed.
+- **Fetching the Hillenbrand vowel data from its canonical URL.** `homepages.wmich.edu` now
+  presents a certificate for `CN=redirect.wmich.edu`, so every fetch fails verification. Use
+  the `santiagobarreda/hillenbrand_et_al_1995` mirror, packaged with the author's permission.
+- **Testing a formant tracker against a three-formant synthetic vowel.** It under-determines
+  the five-pole model Praat fits below a 5 kHz ceiling, so the analyser spends the spare pole
+  on a spurious ~1700 Hz-wide peak between F1 and F2 and every higher formant shifts down a
+  slot. The test signal has to have as many resonances as real speech or it tests the wrong
+  thing.
 
 ## Standing preferences
 
@@ -786,6 +653,12 @@ itself now re-reads both stored shapes, so wiring it up is all that is left). `a
 - 2026-08-17 — A local database is now in scope. The brief previously ruled out stored
   history entirely; SQLite is the chosen engine, and `projectbrief.md` was updated on the
   user's instruction. What gets stored is still open.
+- 2026-08-20 — **Audio is kept on disk**, acting on the permission granted on 2026-08-19 and
+  never used. Not so a measurement can be deferred — the accent measurement still runs inside
+  the assessment request — but so that one can be **re-derived**: normalisation schemes and
+  reference tables will change, and re-deriving must never require a re-recording. The two
+  code docstrings that had gone on asserting the lifted "no stored audio" rule were corrected;
+  `projectbrief.md` was right all along.
 - 2026-08-18 — What the database stores is settled: **both raw API responses, verbatim**,
   on the user's instruction. The monthly usage meter is derived from that same table, so
   `.usage.json` and `BUDGET_STATE_PATH` were dropped rather than kept as a second store

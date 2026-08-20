@@ -361,6 +361,21 @@ app's own History panel, or its `Recorded attempt` log lines, instead.
   Running locally does not change this — the APIs are remote either way. Creating an Azure
   **S0** resource by mistake is the only way this project costs money.
 - Target locale is **en-US** — prosody assessment supports nothing else.
+- **`praat-parselmouth` has no linux-aarch64 wheel**, so the arm64 container compiles Praat
+  from source (~100 s) in a builder stage. Verified against PyPI by enumerating all 100
+  published files for 0.4.7, not by sampling. On an Apple Silicon host `.venv` it installs
+  from a macOS arm64 wheel instantly — the inversion is real: for this one dependency the
+  venv path is easier than Docker.
+- **parselmouth binds no `Manipulation` class.** PSOLA resynthesis, PitchTier replacement and
+  DurationTier time-scaling — everything v0.11.0's modified-self-voice surface needs — are
+  reachable only through the untyped `parselmouth.praat.call(...)`. Do not plan that chunk
+  against a typed object API.
+- **Azure returns no lexical stress.** Syllable spans and scores, but no field saying which
+  syllable is stressed, so reduction and stress placement need CMUdict and are unmeasurable
+  without it.
+- **The canonical Hillenbrand host serves an invalid certificate.**
+  `homepages.wmich.edu` presents `CN=redirect.wmich.edu`; the vowel data comes from the
+  `santiagobarreda/hillenbrand_et_al_1995` mirror instead.
 - **`enable_content_assessment_with_topic` does not exist in SDK 1.51.1.** The master plan
   says it arrived in 1.33; it is on neither `PronunciationAssessmentConfig` nor the module.
   Mode C's content scoring has to find another route — verify before planning that chunk.
@@ -815,8 +830,153 @@ synthesiser's rhythm is its own, and the UI says so.
   comparable to one recorded in the browser, and the number is trustworthy over time only if
   the recording format is held still. Stated in `rhythm.py` and in the UI caption.
 
-**Audio on disk is now permitted but not built.** The user lifted the "no stored audio" rule on
-2026-08-19: recordings may be kept on disk, never committed, with the path and hash in the
-database. Nothing in v0.6.0 needed it, so no column was added and `SCHEMA_VERSION` stays 1 — a
-schema v2 would be this project's first real migration and belongs to the chunk that needs it.
-The only audio landing on disk today is the baseline WAV under the gitignored `audio/`.
+**Audio on disk was permitted here and is built in v0.10.0.** The user lifted the "no stored
+audio" rule on 2026-08-19: recordings may be kept on disk, never committed, with the path and
+hash in the database. Nothing in v0.6.0 needed it. The accent measurement did, so `attempt_audio`
+now carries the path and digest — still additively, so `SCHEMA_VERSION` is still 1 and this
+project still has no migration path. See *Accent measurement* below for why keeping matters
+(re-derivation, not deferral) and for the two code docstrings that went on asserting the old
+rule for a year of commits after it was lifted.
+
+### Accent measurement
+
+Landed 2026-08-20 (milestone v0.10.0). The gradient measurement Azure's categorical phoneme
+scores cannot express: a vowel scoring 78 while drifting toward the target and one scoring 78
+while drifting away are the same number to Azure and opposite findings to a learner.
+
+**Five new modules**, on the boundary the project already uses. `acoustics.py` is the only one
+that imports parselmouth and knows nothing about English; `vowel_measure.py` holds the
+phonetics, exactly as `rhythm.py` sits against `speech_analyzer.py`; `accent_view.py` is
+pandas/altair with no Streamlit, like `progress_view.py`. `vowel_reference.py` is **generated**
+and `stress_lexicon.py` wraps CMUdict.
+
+**praat-parselmouth, and the build that was feared and measured.** 0.4.7 publishes no
+linux-aarch64 wheel at any Python version — all 100 published files enumerated against PyPI,
+not sampled — so this arm64 container compiles Praat from the 22.5 MB sdist through
+scikit-build. Measured cold on the host: **55.9 s for the toolchain, 100.0 s for the compile,
+265 s for the whole image**, producing a 9.9 MB wheel; the image went 1.47 GB → 1.68 GB. That
+is far cheaper than 535 `.cpp` files suggested, and it is cached afterwards. The Dockerfile is
+multi-stage so the C++ toolchain never ships. One transient failure worth recognising: the
+first attempt died at 62 s with `DeadlineExceeded` on `load metadata for python:3.12-slim`,
+which is a registry lookup timing out and not a compile problem.
+
+**Route one was chosen for v0.11.0, not for accuracy — and the brief's reason for it is wrong
+in a way that matters.** parselmouth exposes **no `Manipulation` binding**: the typed classes
+are Sound, Pitch, Formant, Intensity, Spectrum and friends. Manipulation, PitchTier and
+DurationTier are reachable only through the untyped, string-dispatched
+`parselmouth.praat.call(...)`, with the Praat sources bundled in the sdist. **Plan v0.11.0's
+modified-self-voice surface against `praat.call`, not against a typed object API that does not
+exist.** Checked in the 0.4.7 source tree.
+
+A bonus that settles one of the classic traps structurally: Praat's Burg API takes
+`maximum_formant` and `max_number_of_formants` and derives the resampling rate and the
+coefficient count itself, so the ceiling and the LPC order **cannot** be set inconsistently.
+Route two (scipy + hand-rolled LPC) leaves that entirely to the caller, where "order 2 +
+fs/1000, so 18 at 16 kHz" quietly analyses the full 8 kHz band and splits one formant into two.
+
+**Three of the brief's own numbers were corrected by the primary source.** The reference is
+Hillenbrand et al. (1995), taken from `vowdata.dat` — and **the canonical host
+`homepages.wmich.edu` no longer serves valid TLS** (it presents a cert for
+`CN=redirect.wmich.edu`), so the data comes from the `santiagobarreda/hillenbrand_et_al_1995`
+mirror, packaged with Hillenbrand's permission. `scripts/build_vowel_reference.py` generates
+`vowel_reference.py` from it, so **no formant value in this project is ever typed from memory**.
+
+- **The sampling points are 20/50/80% of vowel duration, not 25/75.** That is the file's own
+  header. Adopted rather than offset-corrected, so the bias is zero rather than documented.
+- **The table covers 12 vowels.** There is no published mean for /aɪ aʊ ɔɪ ə ɚ ɑɹ ɔɹ ɛɹ ɪɹ ʊɹ/
+  — ten of the categories `BENCHMARK_COVERAGE` deliberately carries. Those report position with
+  an honest blank target.
+- **Its durations are citation-form `/hVd/` in isolation** (/i/ is 244 ms for men), so only
+  ratios transfer to connected speech. And because every stimulus ends in a voiced /d/,
+  **pre-fortis clipping has no published target at all** — it is scored against the TTS voice
+  through the same pipeline, and the row says so.
+- The brief's illustrative "/eɪ/ F2 travel 620 Hz" is not what the data says: **+140 Hz (men),
+  +179 Hz (women)**. Its "/ɝ/ F3−F2 310 Hz" was close — the derived figures are 298/339.
+- /ɑ/–/ɔ/ and /u/ carry a **widened tolerance band**, because the low-back merger has spread
+  and GOOSE has fronted since 1995 and the tool must not confidently flag a change the
+  reference predates.
+
+**CMUdict for lexical stress, because Azure returns none.** There is no field saying which
+syllable of "computer" is stressed — verified against every fixture. `cmudict` 1.1.3 is pure
+ARPABET data with no nltk and no compiler. Alignment is by counting vowels on both sides: the
+stress digit **is** the vowel test in ARPABET, and `R` carries none, which is what makes
+Azure's single `ɑɹ` line up against CMUdict's `AA1 R`. Measured, not assumed: **128/128 unique
+words of the calibration passage, and 101/101 words across the committed fixtures**. The plan
+predicted 100/101 from a first-variant-only analysis; considering all pronunciations rescues
+*our*, whose first listing is the two-vowel `AW1 ER0` but which also has `AW1 R` and `AA1 R`.
+`AH0`/`ER0` are CMUdict's schwa and /ɚ/, so **the digit must be read before the symbol is
+mapped** or the reduction signal is destroyed.
+
+**Where the measurement runs, and why the audio is kept anyway.** Inside the assessment
+request, in `app.run_assessment_job`, while `wav_bytes` is in memory — a second pass over
+stored files would re-do work for nothing. Keeping the audio buys **re-derivation**: when the
+normalisation scheme or the reference table changes, stored recordings are measured again
+rather than the passage being read again. Two docstrings asserting the lifted rule
+(`audio_utils.temp_wav` calling deletion "a project constraint", `db.py` saying "the brief
+rules that out") were the stale text and are corrected; `projectbrief.md` was right and was not
+edited. **Every attempt recorded before v0.10.0 is permanently unmeasurable.**
+
+**Three additive tables**, so `SCHEMA_VERSION` is still 1: `attempt_audio` (content-addressed
+by the digest `attempts` already stored), `speaker_baseline` (one current row, history kept,
+because a re-calibration changes the space every stored z-score lives in) and
+`vowel_measurements` (raw hertz at all three points, plus F3, intensity and the stress flag from
+day one even though only v0.11.0 reads some of them — a column costs nothing and a re-recording
+is impossible).
+
+**Decisions that are easy to get wrong and were measured rather than reasoned about:**
+
+- **Lobanov averages per-vowel-category means, never the raw token pool.** A natural passage
+  over-samples badly — the benchmark passage yields 50 tokens of one vowel and 5 of another —
+  and a token-weighted centroid is dragged toward whichever vowel occurred most, tilting every
+  z-score. The error is invisible on inspection: the chart still looks like a vowel chart. A
+  test asserts it against a deliberately unbalanced set.
+- **A z-score is relative to whatever inventory produced it.** A speaker normalised over 22
+  categories is not comparable to a reference normalised over 12, so the speaker is normalised
+  over the reference's own twelve.
+- **Both calibration reads are normalised through the FIRST read's centroid.** Normalise each
+  through its own and Lobanov absorbs the between-session drift, the noise floor comes out
+  flatteringly small, and a flatteringly small band is precisely what licenses reporting noise
+  as progress.
+- **The formant ceiling is swept, not derived from f0.** F0 and vocal tract length correlate
+  loosely, so the conventional 5000/5500 guess only bounds a sweep that picks whichever ceiling
+  minimises within-vowel-category dispersion. The winner is stored on the baseline **and on
+  every measurement row**, so old rows stay interpretable after a re-calibration.
+- **`alignment_db` checks that the phoneme offsets point where v0.6.0 warned they might not.**
+  Vowels are the loudest thing in speech, so the claimed spans are compared against **the
+  complement of those spans** — not the whole recording, which the vowels themselves dominate
+  and which collapsed a real 20 dB separation to 2.5.
+- **Intensity is dBFS**, because there is no calibrated microphone and "how loud was that
+  vowel" has no absolute answer. It is only ever compared within one recording.
+
+**Ground truth, since the offline suite has no audio.** Vowels are synthesised with known
+F1/F2/F3 and the pipeline recovers all ten within **4%**, most within 2%. **Five formants, not
+three** — a three-formant signal under-determines a five-pole model, and Praat spends the spare
+pole on a spurious peak measured at a **1692 Hz bandwidth** between F1 and F2, which shifts every
+higher formant down a slot. The bandwidth filter refuses it, which is the intended behaviour
+and is now its own test.
+
+**Two defects found by running it rather than by reasoning about it:**
+
+- The vowel chart shipped its first browser check **with no colour legend**, so there was no way
+  to tell your own vowels from the target's. Altair merges a layered chart's legends, so
+  `legend=None` on the label layer removed the merged one; the size legend survived, which made
+  the loss easy to miss.
+- `isolated_db` cleared `st.cache_resource` but **not `st.cache_data`**, and the progress view
+  and practice queue key their cached reads on `db.attempt_fingerprint` — `(highest id, row
+  count)`. Two test modules that each seed two attempts produce the **identical** key against
+  different databases. It surfaced as thirteen unrelated practice-queue failures with an empty
+  targets table and no hint of a caching cause. The fixture now lives once in `conftest` and
+  clears both.
+
+**The output contract.** Every accent surface renders findings as a Markdown table with exactly
+four columns — `Acoustic Feature | User Realization | Target Realization | Delta / Adjustment
+Needed` — through one renderer in `accent_view.to_markdown`, with a test on the headers. The
+feature names the phoneme in Azure's IPA **plus** the Wells lexical-set keyword **plus** the
+metric; the middle columns carry units and the user column carries its token count; the fourth
+carries a signed delta **and** the articulatory instruction it implies. Rejected tokens get rows
+too, grouped by (vowel, reason) with a count, so a thin table is visibly thin rather than
+silently short.
+
+**The noise floor is the point of reading the passage twice.** Stored beside the baseline, and
+nothing smaller than the band is ever reported as change — including when it moves the
+flattering way. Two back-to-back reads are refused, with the reason on screen.
