@@ -2062,7 +2062,7 @@ def render_accent_charts(conn: sqlite3.Connection) -> None:
 
     # 4. Pitch.
     st.markdown("### Intonation — your contour against the model's")
-    render_pitch_overlay(conn, int(attempt_id))
+    render_pitch_overlay(conn, int(attempt_id), measurement, modelled)
 
     # 5. Duration.
     st.markdown("### Vowel length")
@@ -2097,7 +2097,9 @@ def stored_audio_bytes(conn: sqlite3.Connection, attempt_id: int) -> bytes | Non
         return None
 
 
-def render_pitch_overlay(conn: sqlite3.Connection, attempt_id: int) -> None:
+def render_pitch_overlay(
+    conn: sqlite3.Connection, attempt_id: int, measurement: Any, modelled: Mapping[str, Any]
+) -> None:
     """Two contours on one time axis, plus the resynthesis that makes the gap audible."""
     attempt = db.get_attempt(conn, attempt_id)
     if attempt is None:
@@ -2156,7 +2158,9 @@ def render_pitch_overlay(conn: sqlite3.Connection, attempt_id: int) -> None:
         rows,
         "No pitch could be tracked in this recording.",
     )
-    render_resynthesis(wav_bytes, user_track, model_tracks, anchors, attempt_id)
+    render_resynthesis(
+        wav_bytes, user_track, model_tracks, anchors, attempt_id, measurement, modelled
+    )
 
 
 def _words_for(
@@ -2246,6 +2250,8 @@ def render_resynthesis(
     model_tracks: Sequence[Sequence[tuple[float, float]]],
     anchors: Sequence[Any],
     attempt_id: int,
+    measurement: Any,
+    modelled: Mapping[str, Any],
 ) -> None:
     """Your own voice with the model's intonation, played after your own voice unchanged.
 
@@ -2261,13 +2267,33 @@ def render_resynthesis(
         return
 
     key = f"resynth_{attempt_id}"
-    if st.button("Apply the model's intonation to my recording", key=f"{key}_go"):
-        target = _target_contour(model_tracks, anchors)
+    # In the brief's order of value: intonation is the one that lands hardest, timing makes
+    # under-reduction audible, and the single-vowel shift is the narrowest and most fragile.
+    intonation, timing, vowel = st.columns(3)
+
+    def run(label: str, build: Any) -> None:
         try:
-            st.session_state[key] = accent_resynth.corrected_pitch(wav_bytes, target)
+            st.session_state[key] = build()
         except accent_resynth.ResynthesisError as exc:
             st.session_state.pop(key, None)
             st.warning(str(exc), icon="🎚️")
+
+    if intonation.button("Native intonation", key=f"{key}_pitch"):
+        run(
+            "pitch",
+            lambda: accent_resynth.corrected_pitch(
+                wav_bytes, _target_contour(model_tracks, anchors)
+            ),
+        )
+    if timing.button("Native vowel lengths", key=f"{key}_timing"):
+        run(
+            "timing",
+            lambda: accent_resynth.corrected_timing(
+                wav_bytes, _duration_stretches(measurement, modelled)
+            ),
+        )
+    if vowel.button("Fix one vowel", key=f"{key}_vowel"):
+        run("vowel", lambda: _correct_worst_vowel(wav_bytes, measurement, modelled))
 
     result = st.session_state.get(key)
     if result is None:
@@ -2278,8 +2304,52 @@ def render_resynthesis(
     st.audio(wav_bytes, format="audio/wav")
     st.caption(f"**2. {result.label}**")
     st.audio(result.audio, format="audio/wav")
-    if result.capped:
+    if result.note:
         st.info(result.note, icon="🎚️")
+
+
+def _duration_stretches(
+    measurement: Any, modelled: Mapping[str, Any]
+) -> list[tuple[float, float, float]]:
+    """(start, end, ratio) per vowel, toward the model's connected-speech durations.
+
+    Against the MODEL table and never the published one: Hillenbrand's durations are
+    citation-form words read in isolation, so stretching a vowel toward one of those would
+    make every vowel in the clip roughly three times too long — a demonstration of the
+    reference's artefact rather than of the speaker's timing.
+    """
+    stretches: list[tuple[float, float, float]] = []
+    for token in measurement.accepted:
+        target = modelled.get(token.vowel)
+        if target is None or not target.duration_ms or not token.duration_ms:
+            continue
+        stretches.append((token.start_s, token.end_s, target.duration_ms / token.duration_ms))
+    return stretches
+
+
+def _correct_worst_vowel(wav_bytes: bytes, measurement: Any, modelled: Mapping[str, Any]) -> Any:
+    """Shift the single worst-placed vowel token and leave the rest of the clip untouched.
+
+    The worst token, not the worst category: the point of this surface is that everything
+    either side is bit-identical, so it has to act on one span of audio.
+    """
+    worst = None
+    worst_gap = 0.0
+    for token in measurement.accepted:
+        target = modelled.get(token.vowel)
+        if target is None or target.f2_hz is None or token.at50.f2 is None:
+            continue
+        gap = abs(target.f2_hz - token.at50.f2)
+        if gap > worst_gap:
+            worst, worst_gap = (token, target), gap
+    if worst is None:
+        raise accent_resynth.ResynthesisError(
+            "No vowel in this recording has both a measurement and a target to move toward."
+        )
+    token, target = worst
+    return accent_resynth.corrected_vowel(
+        wav_bytes, token.start_s, token.end_s, float(token.at50.f2), float(target.f2_hz)
+    )
 
 
 def _target_contour(

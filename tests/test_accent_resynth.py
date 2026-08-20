@@ -276,3 +276,26 @@ def test_semitones_are_relative_and_hertz_free() -> None:
     assert accent_resynth.semitones(110.0, 100.0) == pytest.approx(
         accent_resynth.semitones(220.0, 200.0)
     )
+
+
+# --- The ordering rule, as the app enforces it -------------------------------------------------
+
+
+def test_the_app_plays_the_original_before_the_modified_clip() -> None:
+    """A modified clip heard alone teaches nothing — there is nothing to difference it against.
+
+    Asserted against the source rather than a rendered page because Streamlit's `AppTest` does
+    not expose audio widgets. What matters is the ORDER of the two `st.audio` calls and that
+    both are labelled, and that is visible right here.
+    """
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parent.parent / "src" / "app.py").read_text("utf-8")
+    body = source[source.index("def render_resynthesis(") :]
+    body = body[: body.index("\ndef _duration_stretches")]
+
+    original = body.index("ORIGINAL_LABEL")
+    modified = body.index("result.label")
+    assert original < modified, "the modified clip is offered before the original"
+    assert body.index("st.audio(wav_bytes") < body.index("st.audio(result.audio")
+    assert "OWN_VOICE_NOTICE" in body, "the surface does not say it is the user's own voice"
