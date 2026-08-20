@@ -145,11 +145,15 @@ def vowel_chart(frame: pd.DataFrame) -> alt.LayerChart | alt.FacetChart:
             alt.Tooltip("n:Q", title="tokens"),
         ],
     )
+    # The label layer repeats the colour encoding **without** `legend=None`. Altair merges a
+    # layered chart's legends, so suppressing it on one layer suppresses the merged legend
+    # entirely — which is how this shipped its first browser check with no way to tell your
+    # own vowels from the target's. The size legend was there; the one that mattered was not.
     text = base.mark_text(dy=-12, fontSize=11).encode(
         x=alt.X("f2_z:Q", scale=alt.Scale(reverse=True, zero=False)),
         y=alt.Y("f1_z:Q", scale=alt.Scale(reverse=True, zero=False)),
         text="vowel:N",
-        color=alt.Color("series:N", legend=None),
+        color=alt.Color("series:N", title=None),
     )
     return alt.layer(points, text).properties(height=420)
 

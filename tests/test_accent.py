@@ -364,3 +364,22 @@ def test_the_baseline_renders_a_chart_and_states_what_the_band_forbids(
     # The per-vowel band table goes through the same four-column renderer as everything else.
     assert "| Acoustic Feature | User Realization |" in markdown
     assert "between-read displacement" in markdown
+
+
+def test_the_chart_keeps_a_series_legend() -> None:
+    """Without it there is no way to tell your own vowels from the target's.
+
+    Regression, found in the browser rather than in a test: altair merges a layered chart's
+    legends, so `legend=None` on the label layer removed the merged colour legend for both.
+    The size legend survived, which made the loss easy to miss — the chart still looked
+    finished and simply did not say which dots were whose.
+    """
+    positions = vowel_measure.reference_positions("men")
+    frame = accent_view.vowel_frame(positions, positions)
+    spec = accent_view.vowel_chart(frame).to_dict()
+    for layer in spec["layer"]:
+        colour = layer["encoding"]["color"]
+        assert colour["field"] == "series"
+        assert colour.get("legend") is not None or "legend" not in colour, (
+            "a layer suppressing the colour legend suppresses the merged one"
+        )

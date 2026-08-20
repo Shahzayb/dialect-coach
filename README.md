@@ -71,6 +71,10 @@ container start if present.
 | `DB_PATH` | no | Local history file (default `./data/coach.db`) |
 | `OFFLINE_MODE` | no | Replay a committed fixture; no network calls at all |
 | `OFFLINE_FIXTURE` | dev | Which fixture `OFFLINE_MODE` replays. `bad_delivery_capture.json` is a real reading done badly on purpose; `synthetic_delivery_faults.json` is hand-built and is the only one carrying a pausing fault |
+| `GA_REFERENCE_SET` | for accent | `men` or `women`. **No default and never an average** — formants scale with vocal tract length, so the wrong set is wrong by about the size of the effect. Vowel position is not scored until it is set |
+| `KEEP_AUDIO`, `AUDIO_DIR` | no | Keep recordings on disk so a measurement can be re-derived without re-recording (default on, `./audio/attempts`) |
+| `LPC_CEILING_HZ` | dev | Override the formant ceiling stored on the baseline. Normally empty — it is established once by a sweep and then held still |
+| `CALIBRATION_GAP_MINUTES` | no | Minimum gap between the two calibration reads (default 10). Their displacement is the measurement noise floor |
 
 See `.env.example` for the full annotated list.
 
@@ -86,8 +90,18 @@ Azure's now, Gemini's once coaching lands — alongside the scores and the recog
 Keeping the responses whole means a later change of mind about what to show is a re-parse,
 not a re-recording that spends quota again.
 
-**No audio is stored**, only a SHA-256 of it, which is enough to recognise a repeat
-attempt. The database is gitignored; a committed one is a leaked one.
+**Recordings are kept on disk since v0.10.0**, under a gitignored `audio/` directory, with
+only the path and a SHA-256 in the database. They are content-addressed by that digest, so
+re-reading the same passage with byte-identical audio stores one file.
+
+That is not so the accent measurement can be deferred — it runs inside the assessment
+request, while the audio is in memory. It is so a measurement can be **re-derived**:
+normalisation schemes and reference tables will change, and when they do the stored audio is
+measured again instead of you being asked to read the calibration passage again. Roughly
+2.9 MB per 90-second read. Set `KEEP_AUDIO=false` to go back to deleting; attempts recorded
+before v0.10.0 have no audio and can never be measured.
+
+The database is gitignored; a committed one is a leaked one. So is `audio/`.
 
 The monthly usage meter is derived from that table rather than a separate counter file, so
 the two cannot drift apart.
@@ -153,6 +167,64 @@ docker compose run --rm app python scripts/seed_progress_history.py
 Then `DB_PATH=data/seed_demo.db make up`. It writes to `data/seed_demo.db`, refuses to touch
 your configured `DB_PATH`, and spends nothing.
 
+## Measuring an accent
+
+The **Accent** tab measures the part a pronunciation score cannot express. Azure's diagnosis
+is categorical — this phoneme is /θ/ or /t/, scored out of a hundred — and an accent is
+continuous: a vowel scoring 78 while drifting toward the target and one scoring 78 while
+drifting away are the same number to Azure and opposite findings to you.
+
+Four measurements, all from one pass over the recording:
+
+| | |
+|---|---|
+| **Position** | where each vowel sits, F1/F2 in Lobanov z-space |
+| **Trajectory** | F2 movement from 20% to 80% of the vowel — whether a diphthong is a diphthong |
+| **Rhoticity** | F3−F2. The single most useful number here: /ɝ/ sits near 300 Hz in the reference where every other vowel sits between 546 and 1613 |
+| **Duration and reduction** | tense/lax and pre-fortis ratios, and how far unstressed vowels collapse toward your own schwa |
+
+Findings always render as the same four-column table — feature, what you did, what the
+target is, and the signed delta **with the articulatory instruction it implies**. A delta
+with no instruction is a measurement; an instruction with no delta is vague advice.
+
+### Calibrating, and why the passage is read twice
+
+Before anything can be scored, read the benchmark passage **twice in one sitting, at least
+ten minutes apart**, on the same microphone in the same room.
+
+A vowel centroid moves between sessions from microphone placement, room, posture, time of
+day and vocal warm-up, with no learning at all. The displacement between those two reads
+**is** that noise floor. Without it the progress view would render exactly that wander as
+progress — against a project whose whole goal is seeing that drilling something worked.
+Afterwards, **no movement smaller than the band is ever reported as change**, including when
+it moves the flattering way. Two back-to-back reads are refused: they measure a microphone
+holding still, and the band would come out flatteringly small.
+
+There is a five-second **room check** first. Formant estimation degrades badly with reverb
+and a poor microphone, and being told your vowels are wrong when the real finding is that
+the room is wrong wastes a calibration read.
+
+### What the reference is, and is not
+
+`GA_REFERENCE_SET` picks the men's or women's set from Hillenbrand et al. (1995). It has no
+default and there is never an average of the two — formants scale with vocal tract length,
+so the wrong set is wrong by about the size of the thing being measured.
+
+Three things worth knowing before trusting a number:
+
+- **It covers 12 vowels.** There is no published mean for /aɪ aʊ ɔɪ ə ɚ ɑɹ ɔɹ ɛɹ ɪɹ ʊɹ/, so
+  those report your position with an honest blank target rather than an invented one.
+- **Its durations are citation-form `/hVd/` words read in isolation**, so only *ratios*
+  transfer to connected speech. Absolute milliseconds are never compared against it. Nothing
+  in it ends in a voiceless consonant, so pre-fortis clipping has no published target at all.
+- **It is upper-Midwest speech from the early 1990s.** The low-back /ɑ/–/ɔ/ merger has spread
+  and GOOSE has fronted since, so those carry a deliberately widened tolerance band rather
+  than flagging a change the reference predates.
+
+The published means are what the **numbers** are measured against; the synthesised voice you
+practise with is what your **ear** is trained on. They do not coincide, and each surface says
+which it used.
+
 ## Testing
 
 ```bash
@@ -212,8 +284,11 @@ key from a project with no billing account attached returns `429` rather than a 
 
 Be clear-eyed about this rather than reassured:
 
-- Audio is **not stored** anywhere, but it **is transmitted to Azure** for processing.
-  There is no local-only mode that still scores pronunciation.
+- Audio is **transmitted to Azure** for processing. There is no local-only mode that still
+  scores pronunciation.
+- Audio is also **kept on this machine** since v0.10.0, under a gitignored `audio/`
+  directory — see *What gets stored*. It is never committed and never uploaded anywhere
+  other than Azure, and `KEEP_AUDIO=false` turns it off.
 - Azure Speech logging can be disabled in the resource's settings, under
   [data logging](https://learn.microsoft.com/azure/ai-services/speech-service/logging-audio-transcription).
 - Coaching is **opt-in per attempt**: the report is written by the offline coach, free,
