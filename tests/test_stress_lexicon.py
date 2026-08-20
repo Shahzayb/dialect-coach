@@ -189,7 +189,10 @@ def test_azure_vowels_reads_only_the_vocalic_phonemes() -> None:
     word = {
         "word": "weather",
         "phonemes": [
-            {"phoneme": "w"}, {"phoneme": "ɛ"}, {"phoneme": "ð"}, {"phoneme": "ɚ"},
+            {"phoneme": "w"},
+            {"phoneme": "ɛ"},
+            {"phoneme": "ð"},
+            {"phoneme": "ɚ"},
         ],
     }
     assert stress_lexicon.azure_vowels(word) == ["ɛ", "ɚ"]

@@ -79,7 +79,7 @@ check_untyped_defs = true
 # Third-party packages that ship no type information. Each is a native or data-science SDK
 # whose absence of stubs is upstream's decision, not something this project can fix.
 [[tool.mypy.overrides]]
-module = ["azure.*", "pydub.*", "pandas.*"]
+module = ["azure.*", "pydub.*", "pandas.*", "parselmouth.*"]
 ignore_missing_imports = true
 
 # progress_view builds altair charts, and altair's builders compose into a union
@@ -111,6 +111,11 @@ module = [
     "phoneme_reference",
     "tts",
     "rhythm",
+    "acoustics",
+    "vowel_reference",
+    "stress_lexicon",
+    "vowel_measure",
+    "accent_view",
     "fallback_coach",
     "ai_coach",
     "progress_view",

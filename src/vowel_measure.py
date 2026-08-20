@@ -47,6 +47,7 @@ import math
 import statistics
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 import acoustics
 import phoneme_reference
@@ -164,8 +165,7 @@ class Measurement:
     @property
     def marginal(self) -> bool:
         return (
-            self.snr_db_min is not None
-            and SNR_UNRELIABLE_DB <= self.snr_db_min < SNR_MARGINAL_DB
+            self.snr_db_min is not None and SNR_UNRELIABLE_DB <= self.snr_db_min < SNR_MARGINAL_DB
         )
 
     def quality_note(self) -> str:
@@ -194,7 +194,7 @@ class Measurement:
 # --- Extraction ------------------------------------------------------------------------------
 
 
-def _vowel_segments(words: Sequence[Mapping[str, object]]) -> list[tuple[int, str, str, Segment]]:
+def _vowel_segments(words: Sequence[Mapping[str, Any]]) -> list[tuple[int, str, str, Segment]]:
     """(word index, word, vowel, span) for every timed vocalic phoneme, in time order.
 
     Offsets are ticks from the start of the **audio stream**, which for the file-backed
@@ -205,7 +205,7 @@ def _vowel_segments(words: Sequence[Mapping[str, object]]) -> list[tuple[int, st
     found: list[tuple[int, str, str, Segment]] = []
     for index, word in enumerate(words):
         text = str(word.get("word") or "")
-        for phoneme in word.get("phonemes") or []:  # type: ignore[union-attr]
+        for phoneme in word.get("phonemes") or []:
             if not isinstance(phoneme, dict):
                 continue
             symbol = phoneme_reference.normalise(phoneme.get("phoneme"))
@@ -217,13 +217,18 @@ def _vowel_segments(words: Sequence[Mapping[str, object]]) -> list[tuple[int, st
                 continue
             start = float(offset) / _TICKS_PER_SECOND
             found.append(
-                (index, text, symbol, Segment(symbol, start, start + float(duration) / _TICKS_PER_SECOND))
+                (
+                    index,
+                    text,
+                    symbol,
+                    Segment(symbol, start, start + float(duration) / _TICKS_PER_SECOND),
+                )
             )
     found.sort(key=lambda item: item[3].start_s)
     return found
 
 
-def _produced_vowel(phoneme: Mapping[str, object]) -> str | None:
+def _produced_vowel(phoneme: Mapping[str, Any]) -> str | None:
     """The vowel Azure's best alternate says was actually produced, when it differs.
 
     None when the best alternate agrees with the target, or when the alternate is not a vowel
@@ -232,7 +237,7 @@ def _produced_vowel(phoneme: Mapping[str, object]) -> str | None:
     expected = phoneme_reference.normalise(phoneme.get("phoneme"))
     alternates = [
         alternate
-        for alternate in (phoneme.get("nbest") or [])  # type: ignore[union-attr]
+        for alternate in (phoneme.get("nbest") or [])
         if isinstance(alternate, dict) and alternate.get("phoneme")
     ]
     if not alternates:
@@ -247,9 +252,9 @@ def _produced_vowel(phoneme: Mapping[str, object]) -> str | None:
     return produced
 
 
-def _coda_voiceless(word: Mapping[str, object], position: int) -> bool | None:
+def _coda_voiceless(word: Mapping[str, Any], position: int) -> bool | None:
     """Whether the consonant right after this vowel, inside the same word, is voiceless."""
-    phonemes = word.get("phonemes") or []  # type: ignore[union-attr]
+    phonemes = word.get("phonemes") or []
     for phoneme in list(phonemes)[position + 1 :]:
         if not isinstance(phoneme, dict):
             continue
@@ -282,8 +287,7 @@ def alignment_db(analysis: acoustics.Analysis, segments: Sequence[Segment]) -> f
     inside = [
         level
         for segment in segments
-        if (level := acoustics.rms_dbfs(analysis.sound, segment.start_s, segment.end_s))
-        is not None
+        if (level := acoustics.rms_dbfs(analysis.sound, segment.start_s, segment.end_s)) is not None
     ]
     if not inside:
         return None
@@ -296,7 +300,7 @@ def alignment_db(analysis: acoustics.Analysis, segments: Sequence[Segment]) -> f
 
 
 def extract(
-    words: Sequence[Mapping[str, object]],
+    words: Sequence[Mapping[str, Any]],
     wav_bytes: bytes,
     *,
     ceiling_hz: float | None = None,
@@ -365,11 +369,22 @@ def extract(
         if reason:
             tokens.append(
                 Token(
-                    vowel=symbol, word=word_text, word_index=word_index,
-                    start_s=segment.start_s, end_s=segment.end_s, duration_ms=duration_ms,
-                    at20=empty, at50=empty, at80=empty, rms_dbfs=None, f0_hz=None,
-                    stress=stress, azure_score=_as_float(score), coda_voiceless=coda,
-                    accepted=False, rejected_reason=reason,
+                    vowel=symbol,
+                    word=word_text,
+                    word_index=word_index,
+                    start_s=segment.start_s,
+                    end_s=segment.end_s,
+                    duration_ms=duration_ms,
+                    at20=empty,
+                    at50=empty,
+                    at80=empty,
+                    rms_dbfs=None,
+                    f0_hz=None,
+                    stress=stress,
+                    azure_score=_as_float(score),
+                    coda_voiceless=coda,
+                    accepted=False,
+                    rejected_reason=reason,
                 )
             )
             continue
@@ -379,19 +394,32 @@ def extract(
         accepted = at50.usable
         tokens.append(
             Token(
-                vowel=symbol, word=word_text, word_index=word_index,
-                start_s=segment.start_s, end_s=segment.end_s, duration_ms=duration_ms,
-                at20=at20, at50=at50, at80=at80,
+                vowel=symbol,
+                word=word_text,
+                word_index=word_index,
+                start_s=segment.start_s,
+                end_s=segment.end_s,
+                duration_ms=duration_ms,
+                at20=at20,
+                at50=at50,
+                at80=at80,
                 rms_dbfs=acoustics.rms_dbfs(analysis.sound, segment.start_s, segment.end_s),
                 f0_hz=analysis.f0_at(middle),
-                stress=stress, azure_score=_as_float(score), coda_voiceless=coda,
-                accepted=accepted, rejected_reason="" if accepted else REJECT_NO_FORMANTS,
+                stress=stress,
+                azure_score=_as_float(score),
+                coda_voiceless=coda,
+                accepted=accepted,
+                rejected_reason="" if accepted else REJECT_NO_FORMANTS,
             )
         )
 
     return Measurement(
-        tokens=tuple(tokens), ceiling_hz=float(ceiling_hz), snr_db_min=snr_db_min,
-        style=style, ceiling_choice=choice, alignment_db=alignment,
+        tokens=tuple(tokens),
+        ceiling_hz=float(ceiling_hz),
+        snr_db_min=snr_db_min,
+        style=style,
+        ceiling_choice=choice,
+        alignment_db=alignment,
     )
 
 
@@ -399,10 +427,10 @@ def _as_float(value: object) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
 
-def _phoneme_index(word: Mapping[str, object], symbol: str, position: int) -> int:
+def _phoneme_index(word: Mapping[str, Any], symbol: str, position: int) -> int:
     """Index of the `position`-th vocalic phoneme matching `symbol` inside a word."""
     seen = -1
-    for index, phoneme in enumerate(word.get("phonemes") or []):  # type: ignore[union-attr]
+    for index, phoneme in enumerate(word.get("phonemes") or []):
         if not isinstance(phoneme, dict):
             continue
         entry = phoneme_reference.lookup(phoneme.get("phoneme"))
@@ -414,9 +442,9 @@ def _phoneme_index(word: Mapping[str, object], symbol: str, position: int) -> in
     return -1
 
 
-def _phoneme_at(word: Mapping[str, object], symbol: str, position: int) -> Mapping[str, object]:
+def _phoneme_at(word: Mapping[str, Any], symbol: str, position: int) -> Mapping[str, Any]:
     index = _phoneme_index(word, symbol, position)
-    phonemes = list(word.get("phonemes") or [])  # type: ignore[union-attr]
+    phonemes = list(word.get("phonemes") or [])
     return phonemes[index] if 0 <= index < len(phonemes) else {}
 
 
@@ -485,7 +513,9 @@ def category_means(
             f1=_mean_of(point.f1 for point in points),
             f2=_mean_of(point.f2 for point in points),
             f3=_mean_of(point.f3 for point in points),
-            b1=None, b2=None, b3=None,
+            b1=None,
+            b2=None,
+            b3=None,
         )
     return means
 
@@ -606,14 +636,20 @@ def positions(
             f1=_mean_of(token.at50.f1 for token in group),
             f2=_mean_of(token.at50.f2 for token in group),
             f3=_mean_of(token.at50.f3 for token in group),
-            b1=None, b2=None, b3=None,
+            b1=None,
+            b2=None,
+            b3=None,
         )
         f1_z, f2_z, f3_z = normaliser.z(mean)
         found[vowel] = VowelPosition(
             vowel=vowel,
             n=len(group),
-            f1_hz=mean.f1, f2_hz=mean.f2, f3_hz=mean.f3,
-            f1_z=f1_z, f2_z=f2_z, f3_z=f3_z,
+            f1_hz=mean.f1,
+            f2_hz=mean.f2,
+            f3_hz=mean.f3,
+            f1_z=f1_z,
+            f2_z=f2_z,
+            f3_z=f3_z,
             duration_ms=_mean_of(token.duration_ms for token in group),
             f2_travel_hz=_mean_of(token.f2_travel for token in group),
             f3_minus_f2_hz=_mean_of(token.f3_minus_f2 for token in group),
@@ -633,9 +669,14 @@ def reference_positions(reference_set: str) -> dict[str, VowelPosition]:
         )
         f1_z, f2_z, f3_z = normaliser.z(point)
         found[symbol] = VowelPosition(
-            vowel=symbol, n=entry.n,
-            f1_hz=entry.at50.f1, f2_hz=entry.at50.f2, f3_hz=entry.at50.f3,
-            f1_z=f1_z, f2_z=f2_z, f3_z=f3_z,
+            vowel=symbol,
+            n=entry.n,
+            f1_hz=entry.at50.f1,
+            f2_hz=entry.at50.f2,
+            f3_hz=entry.at50.f3,
+            f1_z=f1_z,
+            f2_z=f2_z,
+            f3_z=f3_z,
             duration_ms=entry.duration_ms,
             f2_travel_hz=entry.f2_travel,
             f3_minus_f2_hz=entry.at50.f3_minus_f2,
@@ -691,9 +732,7 @@ def reduction(tokens: Sequence[Token], normaliser: Normaliser) -> Reduction:
     def spread(points: Sequence[tuple[float, float]]) -> float | None:
         if not points:
             return None
-        return statistics.fmean(
-            math.hypot(f1 - centroid_f1, f2 - centroid_f2) for f1, f2 in points
-        )
+        return statistics.fmean(math.hypot(f1 - centroid_f1, f2 - centroid_f2) for f1, f2 in points)
 
     return Reduction(
         centroid_f1_z=centroid_f1,
@@ -903,9 +942,7 @@ def _centroid_distance(
         f1_z, f2_z, _ = normaliser.z(token.at50)
         if f1_z is None or f2_z is None:
             continue
-        distances.append(
-            math.hypot(f1_z - centroid.centroid_f1_z, f2_z - centroid.centroid_f2_z)
-        )
+        distances.append(math.hypot(f1_z - centroid.centroid_f1_z, f2_z - centroid.centroid_f2_z))
     return statistics.fmean(distances) if distances else None
 
 
@@ -954,12 +991,11 @@ def noise_floor(
         other = second.get(vowel)
         if other is None:
             continue
-        if None in (position.f1_z, position.f2_z, other.f1_z, other.f2_z):
+        one_f1, one_f2 = position.f1_z, position.f2_z
+        two_f1, two_f2 = other.f1_z, other.f2_z
+        if one_f1 is None or one_f2 is None or two_f1 is None or two_f2 is None:
             continue
-        displacements[vowel] = math.hypot(
-            float(other.f1_z) - float(position.f1_z),  # type: ignore[arg-type]
-            float(other.f2_z) - float(position.f2_z),  # type: ignore[arg-type]
-        )
+        displacements[vowel] = math.hypot(two_f1 - one_f1, two_f2 - one_f2)
     median = statistics.median(displacements.values()) if displacements else None
     return NoiseFloor(per_vowel=displacements, median_z=median, vowels=len(displacements))
 
@@ -1115,7 +1151,9 @@ def _position_instruction(
     else:
         # Higher F2 means a fronter vowel with spread lips.
         move = (
-            "tongue further front, lips spread" if delta > 0 else "tongue further back, lips rounder"
+            "tongue further front, lips spread"
+            if delta > 0
+            else "tongue further back, lips rounder"
         )
     return f"{_signed(delta, 'z', 2)} → {move}{caveat}"
 
@@ -1169,8 +1207,12 @@ def _rhoticity_findings(
         rhotic = vowel in {"ɝ", "ɚ"} or (entry is not None and entry.kind == "r-coloured")
         if not rhotic:
             continue
+        # /ɝ/ has a published mean; /ɚ/ and the /Vɹ/ sequences do not. Falling back to /ɝ/'s
+        # target is defensible because r-colouring is one articulatory gesture, but the row
+        # has to say that is what happened rather than imply the table covers the vowel.
         own = reference.get(vowel)
-        target_value = (own or nurse).f3_minus_f2_hz if (own or nurse) else None
+        against = own or nurse
+        target_value = against.f3_minus_f2_hz if against is not None else None
         source = "" if own else " (/ɝ/ target — no published mean for this vowel)"
         delta = _delta(target_value, position.f3_minus_f2_hz)
         if delta is None:
@@ -1381,3 +1423,259 @@ def findings(
     rows += _stress_findings(stress_contrasts(accepted, normaliser, centroid))
     rows += _rejection_findings(measurement.tokens)
     return rows
+
+
+# --- Storage shapes ---------------------------------------------------------------------------
+# Plain dicts, so `db.py` stays SQL-only and never imports this module's dataclasses. Round
+# trips are asserted in the tests: a baseline that cannot be read back is a re-calibration.
+
+
+def token_rows(measurement: Measurement) -> list[dict[str, Any]]:
+    """One dict per token, matching `vowel_measurements`' columns.
+
+    Rejected tokens are stored too. What was refused, and why, is evidence — it is what makes
+    a thin measurement visibly thin rather than silently short, and it is the only record that
+    a token existed at all once the reading is over.
+    """
+    return [
+        {
+            "vowel": token.vowel,
+            "word": token.word,
+            "word_index": token.word_index,
+            "start_s": token.start_s,
+            "duration_ms": token.duration_ms,
+            "f1_20": token.at20.f1,
+            "f2_20": token.at20.f2,
+            "f3_20": token.at20.f3,
+            "f1_50": token.at50.f1,
+            "f2_50": token.at50.f2,
+            "f3_50": token.at50.f3,
+            "f1_80": token.at80.f1,
+            "f2_80": token.at80.f2,
+            "f3_80": token.at80.f3,
+            "rms_dbfs": token.rms_dbfs,
+            "f0_hz": token.f0_hz,
+            "stressed": None if token.stressed is None else int(token.stressed),
+            "stress_digit": token.stress,
+            "azure_score": token.azure_score,
+            "coda_voiceless": (None if token.coda_voiceless is None else int(token.coda_voiceless)),
+            "snr_db_min": measurement.snr_db_min,
+            "lpc_ceiling_hz": measurement.ceiling_hz,
+            "style_tag": measurement.style,
+            "accepted": int(token.accepted),
+            "rejected_reason": token.rejected_reason,
+        }
+        for token in measurement.tokens
+    ]
+
+
+def positions_to_json(found: Mapping[str, VowelPosition]) -> dict[str, dict[str, Any]]:
+    return {
+        vowel: {
+            "n": position.n,
+            "f1_hz": position.f1_hz,
+            "f2_hz": position.f2_hz,
+            "f3_hz": position.f3_hz,
+            "f1_z": position.f1_z,
+            "f2_z": position.f2_z,
+            "f3_z": position.f3_z,
+            "duration_ms": position.duration_ms,
+            "f2_travel_hz": position.f2_travel_hz,
+            "f3_minus_f2_hz": position.f3_minus_f2_hz,
+            "rms_dbfs": position.rms_dbfs,
+        }
+        for vowel, position in found.items()
+    }
+
+
+def positions_from_json(blob: Mapping[str, Mapping[str, Any]]) -> dict[str, VowelPosition]:
+    return {
+        vowel: VowelPosition(
+            vowel=vowel,
+            n=int(entry.get("n") or 0),
+            f1_hz=_opt(entry.get("f1_hz")),
+            f2_hz=_opt(entry.get("f2_hz")),
+            f3_hz=_opt(entry.get("f3_hz")),
+            f1_z=_opt(entry.get("f1_z")),
+            f2_z=_opt(entry.get("f2_z")),
+            f3_z=_opt(entry.get("f3_z")),
+            duration_ms=_opt(entry.get("duration_ms")),
+            f2_travel_hz=_opt(entry.get("f2_travel_hz")),
+            f3_minus_f2_hz=_opt(entry.get("f3_minus_f2_hz")),
+            rms_dbfs=_opt(entry.get("rms_dbfs")),
+        )
+        for vowel, entry in blob.items()
+    }
+
+
+def normaliser_to_json(normaliser: Normaliser) -> dict[str, Any]:
+    return {
+        "f1_mean": normaliser.f1_mean,
+        "f1_sd": normaliser.f1_sd,
+        "f2_mean": normaliser.f2_mean,
+        "f2_sd": normaliser.f2_sd,
+        "f3_mean": normaliser.f3_mean,
+        "f3_sd": normaliser.f3_sd,
+        "categories": list(normaliser.categories),
+    }
+
+
+def normaliser_from_json(blob: Mapping[str, Any]) -> Normaliser:
+    return Normaliser(
+        f1_mean=float(blob["f1_mean"]),
+        f1_sd=float(blob["f1_sd"]),
+        f2_mean=float(blob["f2_mean"]),
+        f2_sd=float(blob["f2_sd"]),
+        f3_mean=_opt(blob.get("f3_mean")),
+        f3_sd=_opt(blob.get("f3_sd")),
+        categories=tuple(blob.get("categories") or ()),
+    )
+
+
+def noise_to_json(noise: NoiseFloor) -> dict[str, Any]:
+    return {
+        "per_vowel": dict(noise.per_vowel),
+        "median_z": noise.median_z,
+        "vowels": noise.vowels,
+    }
+
+
+def noise_from_json(blob: Mapping[str, Any]) -> NoiseFloor:
+    per_vowel = blob.get("per_vowel") or {}
+    return NoiseFloor(
+        per_vowel={str(k): float(v) for k, v in dict(per_vowel).items()},
+        median_z=_opt(blob.get("median_z")),
+        vowels=int(blob.get("vowels") or 0),
+    )
+
+
+def _opt(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _point_from_row(row: Mapping[str, Any], suffix: str) -> FormantPoint:
+    """One stored measurement point. Bandwidths are not stored — they gated acceptance at
+    measurement time and say nothing once a token has been accepted."""
+    return FormantPoint(
+        f1=_opt(row.get(f"f1_{suffix}")),
+        f2=_opt(row.get(f"f2_{suffix}")),
+        f3=_opt(row.get(f"f3_{suffix}")),
+        b1=None,
+        b2=None,
+        b3=None,
+    )
+
+
+def tokens_from_rows(rows: Iterable[Mapping[str, Any]]) -> list[Token]:
+    """Rebuild tokens from stored `vowel_measurements` rows.
+
+    This is what makes the stored rows worth storing. A change to the normalisation scheme or
+    the reference table is re-derived from here — the raw hertz, durations and stress flags are
+    all on the row — without asking anybody to read the passage again.
+    """
+    rebuilt: list[Token] = []
+    for row in rows:
+        stress = row.get("stress_digit")
+        coda = row.get("coda_voiceless")
+        rebuilt.append(
+            Token(
+                vowel=str(row.get("vowel") or ""),
+                word=str(row.get("word") or ""),
+                word_index=int(row.get("word_index") or 0),
+                start_s=float(row.get("start_s") or 0.0),
+                end_s=float(row.get("start_s") or 0.0)
+                + float(row.get("duration_ms") or 0.0) / 1000.0,
+                duration_ms=float(row.get("duration_ms") or 0.0),
+                at20=_point_from_row(row, "20"),
+                at50=_point_from_row(row, "50"),
+                at80=_point_from_row(row, "80"),
+                rms_dbfs=_opt(row.get("rms_dbfs")),
+                f0_hz=_opt(row.get("f0_hz")),
+                stress=None if stress is None else int(stress),
+                azure_score=_opt(row.get("azure_score")),
+                coda_voiceless=None if coda is None else bool(coda),
+                accepted=bool(row.get("accepted")),
+                rejected_reason=str(row.get("rejected_reason") or ""),
+            )
+        )
+    return rebuilt
+
+
+class CalibrationRefused(ValueError):
+    """The two reads cannot produce an honest baseline. Message is safe to show in the UI."""
+
+
+def calibrate(
+    first: Sequence[Token],
+    second: Sequence[Token],
+    *,
+    reference_set: str,
+    ceiling_hz: float,
+    style: str = "read",
+    attempt_ids: Sequence[int] = (),
+    measured_at: str = "",
+) -> Baseline:
+    """Turn two reads of the calibration passage into a baseline and a noise floor.
+
+    Both reads are normalised through the **first read's** centroid. That is the point: if
+    each were normalised through its own, Lobanov would absorb most of the between-session
+    movement into the normalisation itself and the noise floor would come out flatteringly
+    small — which would then license reporting noise as progress, the exact failure the two
+    reads exist to prevent.
+
+    The centroid is built over the reference table's own twelve categories, because a z-score
+    is relative to whatever inventory produced it and a speaker normalised over twenty-two
+    would not be comparable to a reference normalised over twelve.
+    """
+    if not first or not second:
+        raise CalibrationRefused(
+            "A baseline needs two readings of the calibration passage. One of them has no "
+            "usable vowel measurements."
+        )
+
+    normaliser = lobanov(list(first), categories=REFERENCE_CATEGORIES)
+    first_positions = positions(first, normaliser)
+    second_positions = positions(second, normaliser)
+
+    floor = noise_floor(first_positions, second_positions)
+    if floor.vowels < MIN_CATEGORIES:
+        raise CalibrationRefused(
+            f"Only {floor.vowels} vowel(s) could be compared across the two readings, and a "
+            f"noise floor needs {MIN_CATEGORIES}. Without it there is no way to tell a real "
+            f"change from a different microphone position, so no baseline is stored."
+        )
+
+    # The baseline's positions are the mean of the two reads, which is a better estimate of
+    # where the speaker sits than either read alone — and it is the pair that defines the
+    # band, so neither read gets to be "the" baseline.
+    merged: dict[str, VowelPosition] = {}
+    for vowel in sorted(set(first_positions) & set(second_positions)):
+        one, other = first_positions[vowel], second_positions[vowel]
+        merged[vowel] = VowelPosition(
+            vowel=vowel,
+            n=one.n + other.n,
+            f1_hz=_mean_of([one.f1_hz, other.f1_hz]),
+            f2_hz=_mean_of([one.f2_hz, other.f2_hz]),
+            f3_hz=_mean_of([one.f3_hz, other.f3_hz]),
+            f1_z=_mean_of([one.f1_z, other.f1_z]),
+            f2_z=_mean_of([one.f2_z, other.f2_z]),
+            f3_z=_mean_of([one.f3_z, other.f3_z]),
+            duration_ms=_mean_of([one.duration_ms, other.duration_ms]),
+            f2_travel_hz=_mean_of([one.f2_travel_hz, other.f2_travel_hz]),
+            f3_minus_f2_hz=_mean_of([one.f3_minus_f2_hz, other.f3_minus_f2_hz]),
+            rms_dbfs=_mean_of([one.rms_dbfs, other.rms_dbfs]),
+        )
+
+    combined = list(first) + list(second)
+    return Baseline(
+        positions=merged,
+        normaliser=normaliser,
+        noise=floor,
+        ceiling_hz=ceiling_hz,
+        reference_set=reference_set,
+        style=style,
+        reduction=reduction(combined, normaliser),
+        tokens=len([token for token in combined if token.accepted]),
+        attempt_ids=tuple(attempt_ids),
+        measured_at=measured_at,
+    )

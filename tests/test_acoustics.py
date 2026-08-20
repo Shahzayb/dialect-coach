@@ -5,9 +5,10 @@ from __future__ import annotations
 import math
 
 import pytest
-from conftest import SAMPLE_RATE, synth_noise, synth_vowel, to_wav_bytes
 
 import acoustics
+
+from conftest import SAMPLE_RATE, synth_noise, synth_vowel, to_wav_bytes
 
 # Hillenbrand's adult-male F1/F2/F3 means at the 50% point, which is what the pipeline is
 # ultimately asked to recover. Copied here as TEST INPUT, not as reference data — the real

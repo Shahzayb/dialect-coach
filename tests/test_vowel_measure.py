@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-from conftest import SAMPLE_RATE, synth_noise, synth_vowel, to_wav_bytes
 
-import acoustics
 import speech_analyzer
 import vowel_measure
 import vowel_reference
 from acoustics import FormantPoint
 from vowel_measure import Token
+
+from conftest import synth_noise, synth_vowel, to_wav_bytes
 
 TICKS = speech_analyzer.TICKS_PER_SECOND
 
@@ -71,8 +71,8 @@ def build_recording(spec, *, drift: float = 1.0):
                     "phoneme": symbol,
                     "score": 95.0,
                     "nbest": [{"phoneme": symbol, "score": 95.0}],
-                    "offset_ticks": int(round(cursor * TICKS)),
-                    "duration_ticks": int(round(seconds * TICKS)),
+                    "offset_ticks": round(cursor * TICKS),
+                    "duration_ticks": round(seconds * TICKS),
                     "start_s": cursor,
                     "end_s": cursor + seconds,
                 }
@@ -85,8 +85,8 @@ def build_recording(spec, *, drift: float = 1.0):
                 "error_type": "None",
                 "phonemes": entries,
                 "syllables": [],
-                "offset_ticks": int(round(word_start * TICKS)),
-                "duration_ticks": int(round((cursor - word_start) * TICKS)),
+                "offset_ticks": round(word_start * TICKS),
+                "duration_ticks": round((cursor - word_start) * TICKS),
                 "start_s": word_start,
                 "end_s": cursor,
             }
@@ -162,9 +162,7 @@ def test_a_segment_past_the_end_of_the_audio_is_rejected_not_clamped() -> None:
     wav, words = build_recording([("had", [("h", 60), ("æ", 200), ("d", 70)])])
     words[0]["phonemes"][1]["offset_ticks"] = int(999 * TICKS)
     result = vowel_measure.extract(words, wav, ceiling_hz=5000.0)
-    assert [token.rejected_reason for token in result.tokens] == [
-        vowel_measure.REJECT_OUT_OF_RANGE
-    ]
+    assert [token.rejected_reason for token in result.tokens] == [vowel_measure.REJECT_OUT_OF_RANGE]
 
 
 # --- Refusing rather than guessing -----------------------------------------------------------
@@ -222,9 +220,21 @@ def test_normalising_is_refused_below_the_floor_rather_than_approximated() -> No
 def _token(vowel: str, f1: float, f2: float) -> Token:
     point = FormantPoint(f1=f1, f2=f2, f3=2500.0, b1=50.0, b2=50.0, b3=50.0)
     return Token(
-        vowel=vowel, word=vowel, word_index=0, start_s=0.0, end_s=0.1, duration_ms=100.0,
-        at20=point, at50=point, at80=point, rms_dbfs=-20.0, f0_hz=120.0, stress=1,
-        azure_score=95.0, coda_voiceless=None, accepted=True,
+        vowel=vowel,
+        word=vowel,
+        word_index=0,
+        start_s=0.0,
+        end_s=0.1,
+        duration_ms=100.0,
+        at20=point,
+        at50=point,
+        at80=point,
+        rms_dbfs=-20.0,
+        f0_hz=120.0,
+        stress=1,
+        azure_score=95.0,
+        coda_voiceless=None,
+        accepted=True,
     )
 
 
@@ -241,9 +251,14 @@ def test_lobanov_averages_category_means_not_the_raw_token_pool() -> None:
     not. They must differ, and the implementation must produce the second.
     """
     vowels = {
-        "i": (340.0, 2338.0), "ɪ": (459.0, 1941.0), "ɛ": (592.0, 1774.0),
-        "æ": (613.0, 1863.0), "ɔ": (670.0, 1046.0), "u": (375.0, 971.0),
-        "ʊ": (483.0, 1208.0), "ɑ": (757.0, 1326.0),
+        "i": (340.0, 2338.0),
+        "ɪ": (459.0, 1941.0),
+        "ɛ": (592.0, 1774.0),
+        "æ": (613.0, 1863.0),
+        "ɔ": (670.0, 1046.0),
+        "u": (375.0, 971.0),
+        "ʊ": (483.0, 1208.0),
+        "ɑ": (757.0, 1326.0),
     }
     tokens = [_token(v, *hz) for v, hz in vowels.items() for _ in range(3)]
     tokens += [_token("ɑ", *vowels["ɑ"]) for _ in range(27)]  # /ɑ/ ends up with 30
@@ -271,9 +286,11 @@ def test_the_reference_is_normalised_over_its_own_twelve_categories() -> None:
     assert set(normaliser.categories) == vowel_measure.REFERENCE_CATEGORIES
 
     positions = vowel_measure.reference_positions("men")
-    assert positions["i"].f2_z > 1.0, "FLEECE should sit far front in z-space"
-    assert positions["u"].f2_z < -1.0, "GOOSE should sit far back"
-    assert positions["ɑ"].f1_z > 1.0, "LOT should sit far open"
+    fleece, goose, lot = positions["i"].f2_z, positions["u"].f2_z, positions["ɑ"].f1_z
+    assert fleece is not None and goose is not None and lot is not None
+    assert fleece > 1.0, "FLEECE should sit far front in z-space"
+    assert goose < -1.0, "GOOSE should sit far back"
+    assert lot > 1.0, "LOT should sit far open"
 
 
 def test_an_unknown_reference_set_is_refused_rather_than_averaged() -> None:
@@ -442,7 +459,9 @@ def test_a_movement_inside_the_noise_band_renders_as_measurement_noise(measured)
     # A deliberately enormous band, so every position lands inside it.
     floor = vowel_measure.NoiseFloor(per_vowel={}, median_z=99.0, vowels=0)
     rows = vowel_measure.findings(measured, normaliser, reference_set="men", noise=floor)
-    scored = [row for row in rows if "Lobanov z" in row.feature and "no published" not in row.target]
+    scored = [
+        row for row in rows if "Lobanov z" in row.feature and "no published" not in row.target
+    ]
     assert scored
     assert all(vowel_measure.WITHIN_NOISE in row.delta for row in scored)
 
@@ -452,13 +471,12 @@ def test_the_deltas_carry_a_sign_and_an_instruction(measured) -> None:
     normaliser = vowel_measure.lobanov(measured.accepted)
     rows = vowel_measure.findings(measured, normaliser, reference_set="men")
     scored = [
-        row for row in rows
-        if "Lobanov z" in row.feature and "no published" not in row.target
+        row for row in rows if "Lobanov z" in row.feature and "no published" not in row.target
     ]
     assert scored
     for row in scored:
         assert "→" in row.delta, row.delta
-        assert ("+" in row.delta or "−" in row.delta), row.delta
+        assert "+" in row.delta or "−" in row.delta, row.delta
 
 
 # --- Quality gating ------------------------------------------------------------------------------

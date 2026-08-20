@@ -45,10 +45,14 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = ROOT / "src" / "vowel_reference.py"
 
 SOURCE_URL = (
-    "https://raw.githubusercontent.com/santiagobarreda/hillenbrand_et_al_1995/main/"
-    "h95-alldata.zip"
+    "https://raw.githubusercontent.com/santiagobarreda/hillenbrand_et_al_1995/main/h95-alldata.zip"
 )
 MEMBER = "vowdata.dat"
+
+# One vowel's summary. `n` is a count and everything else is a mean that may be missing, so
+# the values really are heterogeneous — named rather than left as `dict[str, object]`, which
+# forced a cast at every read.
+Summary = dict[str, "int | float | None"]
 
 # Hillenbrand's two-letter vowel codes mapped onto the IPA symbols **Azure actually emits**,
 # which are rhotic and carry no length marks. The keys on the left are from the file's own
@@ -113,16 +117,18 @@ def _sd(values: Sequence[int]) -> float | None:
     return statistics.stdev(usable) if len(usable) > 1 else None
 
 
-def summarise(rows: list[tuple[str, str, list[int]]]) -> dict[str, dict[str, dict[str, object]]]:
+def summarise(
+    rows: list[tuple[str, str, list[int]]],
+) -> dict[str, dict[str, Summary]]:
     """Per-group, per-vowel means and SDs, keyed by Azure IPA."""
-    out: dict[str, dict[str, dict[str, object]]] = {name: {} for name in GROUPS.values()}
+    out: dict[str, dict[str, Summary]] = {name: {} for name in GROUPS.values()}
     for code, group in ((c, g) for c in GROUPS for g in [GROUPS[c]]):
         for ipa in ORDER:
             codes = [key for key, value in CODE_TO_IPA.items() if value == ipa]
             tokens = [numbers for grp, vowel, numbers in rows if grp == code and vowel in codes]
             if not tokens:
                 continue
-            entry: dict[str, object] = {
+            entry: Summary = {
                 # `n` counts tokens with a measurable F1 at the 50% point — the point every
                 # other figure is anchored to. Each individual mean is still taken over its
                 # own measurable subset, so a vowel whose F3 was often unmeasurable reports a
@@ -140,11 +146,11 @@ def summarise(rows: list[tuple[str, str, list[int]]]) -> dict[str, dict[str, dic
     return out
 
 
-def _number(value: object) -> str:
-    return "None" if value is None else f"{float(value):.1f}"
+def _number(value: float | None) -> str:
+    return "None" if value is None else f"{value:.1f}"
 
 
-def render(summary: dict[str, dict[str, dict[str, object]]], token_count: int) -> str:
+def render(summary: dict[str, dict[str, Summary]], token_count: int) -> str:
     """The emitted module. Prose first — the numbers are useless without the caveats."""
     generated = datetime.now(UTC).strftime("%Y-%m-%d")
     lines: list[str] = []
@@ -338,7 +344,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[reference] reading {args.source}")
     else:
         print(f"[reference] fetching {SOURCE_URL}")
-        with urllib.request.urlopen(SOURCE_URL, timeout=300) as response:  # noqa: S310
+        with urllib.request.urlopen(SOURCE_URL, timeout=300) as response:
             blob = response.read()
 
     with zipfile.ZipFile(io.BytesIO(blob)) as archive:

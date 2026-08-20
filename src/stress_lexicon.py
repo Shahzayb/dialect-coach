@@ -46,6 +46,7 @@ import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Any
 
 import phoneme_reference
 
@@ -139,10 +140,10 @@ def _syllables(phones: Sequence[str]) -> tuple[Syllable, ...]:
     return tuple(found)
 
 
-def azure_vowels(word: Mapping[str, object]) -> list[str]:
+def azure_vowels(word: Mapping[str, Any]) -> list[str]:
     """The vocalic phonemes of one normalised Azure word, in order, as IPA symbols."""
     symbols: list[str] = []
-    for phoneme in word.get("phonemes") or []:  # type: ignore[union-attr]
+    for phoneme in word.get("phonemes") or []:
         symbol = phoneme.get("phoneme") if isinstance(phoneme, dict) else None
         entry = phoneme_reference.lookup(symbol)
         if entry is not None and entry.kind in VOCALIC_KINDS:
@@ -183,13 +184,11 @@ def align(word_text: str | None, spoken_vowels: Sequence[str]) -> Alignment:
         )
 
     def agreement(entry: tuple[Syllable, ...]) -> int:
-        return sum(
-            1 for syllable, spoken in zip(entry, spoken_vowels) if syllable.vowel == spoken
-        )
+        return sum(1 for syllable, spoken in zip(entry, spoken_vowels) if syllable.vowel == spoken)
 
     return Alignment(word=word, syllables=max(matching, key=agreement))
 
 
-def align_word(word: Mapping[str, object]) -> Alignment:
+def align_word(word: Mapping[str, Any]) -> Alignment:
     """`align`, reading both sides out of one normalised Azure word."""
     return align(str(word.get("word") or ""), azure_vowels(word))

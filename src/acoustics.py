@@ -122,7 +122,7 @@ class BurgSettings:
     @property
     def lpc_order(self) -> int:
         """Coefficients Praat will fit: twice the formant count, by Praat's definition."""
-        return int(round(2 * self.max_formants))
+        return round(2 * self.max_formants)
 
     @property
     def analysis_rate_hz(self) -> float:
@@ -235,8 +235,8 @@ def rms_dbfs(sound: parselmouth.Sound, start_s: float, end_s: float) -> float | 
     """
     values = np.asarray(sound.values[0], dtype=np.float64)
     rate = sound.sampling_frequency
-    first = max(0, int(round(start_s * rate)))
-    last = min(values.size, int(round(end_s * rate)))
+    first = max(0, round(start_s * rate))
+    last = min(values.size, round(end_s * rate))
     if last <= first:
         return None
     window = values[first:last]
@@ -262,8 +262,8 @@ def rms_dbfs_excluding(
     rate = sound.sampling_frequency
     mask = np.ones(values.size, dtype=bool)
     for start_s, end_s in spans:
-        first = max(0, int(round(start_s * rate)))
-        last = min(values.size, int(round(end_s * rate)))
+        first = max(0, round(start_s * rate))
+        last = min(values.size, round(end_s * rate))
         if last > first:
             mask[first:last] = False
     outside = values[mask]
@@ -293,9 +293,7 @@ class Analysis:
             window_length=WINDOW_LENGTH_S,
             pre_emphasis_from=PRE_EMPHASIS_FROM_HZ,
         )
-        self._pitch = sound.to_pitch_ac(
-            pitch_floor=PITCH_FLOOR_HZ, pitch_ceiling=PITCH_CEILING_HZ
-        )
+        self._pitch = sound.to_pitch_ac(pitch_floor=PITCH_FLOOR_HZ, pitch_ceiling=PITCH_CEILING_HZ)
 
     @property
     def duration_s(self) -> float:
@@ -325,8 +323,12 @@ class Analysis:
             values.append(float(frequency) if ok else None)
             bandwidths.append(float(bandwidth) if ok else None)
         return FormantPoint(
-            f1=values[0], f2=values[1], f3=values[2],
-            b1=bandwidths[0], b2=bandwidths[1], b3=bandwidths[2],
+            f1=values[0],
+            f2=values[1],
+            f3=values[2],
+            b1=bandwidths[0],
+            b2=bandwidths[1],
+            b3=bandwidths[2],
         )
 
     def f0_at(self, time_s: float) -> float | None:
@@ -428,20 +430,23 @@ def sweep_ceiling(
     grouped: dict[str, list[Segment]] = {}
     for segment in segments:
         grouped.setdefault(segment.label, []).append(segment)
-    usable = {
-        label: items for label, items in grouped.items() if len(items) >= min_per_category
-    }
+    usable = {label: items for label, items in grouped.items() if len(items) >= min_per_category}
 
     suggested = suggested_ceiling(Analysis(sound, burg_settings(CEILING_TYPICAL_MALE)).f0_median())
     swept = tuple(float(value) for value in candidates)
     tokens = sum(len(items) for items in usable.values())
 
     if not usable:
-        logger.info("Ceiling sweep had no category with %d+ tokens; using the f0 guess.",
-                    min_per_category)
+        logger.info(
+            "Ceiling sweep had no category with %d+ tokens; using the f0 guess.", min_per_category
+        )
         return CeilingChoice(
-            ceiling_hz=suggested, score=None, suggested_hz=suggested,
-            categories=0, tokens=tokens, swept=swept,
+            ceiling_hz=suggested,
+            score=None,
+            suggested_hz=suggested,
+            categories=0,
+            tokens=tokens,
+            swept=swept,
         )
 
     best: tuple[float, float] | None = None
@@ -453,11 +458,14 @@ def sweep_ceiling(
                 measured = [
                     value
                     for segment in items
-                    if (value := (
-                        analysis.formants_at(segment.sample_times()[1]).f1
-                        if index == 0
-                        else analysis.formants_at(segment.sample_times()[1]).f2
-                    )) is not None
+                    if (
+                        value := (
+                            analysis.formants_at(segment.sample_times()[1]).f1
+                            if index == 0
+                            else analysis.formants_at(segment.sample_times()[1]).f2
+                        )
+                    )
+                    is not None
                 ]
                 if len(measured) < 2:
                     continue
@@ -472,10 +480,18 @@ def sweep_ceiling(
 
     if best is None:
         return CeilingChoice(
-            ceiling_hz=suggested, score=None, suggested_hz=suggested,
-            categories=len(usable), tokens=tokens, swept=swept,
+            ceiling_hz=suggested,
+            score=None,
+            suggested_hz=suggested,
+            categories=len(usable),
+            tokens=tokens,
+            swept=swept,
         )
     return CeilingChoice(
-        ceiling_hz=best[0], score=best[1], suggested_hz=suggested,
-        categories=len(usable), tokens=tokens, swept=swept,
+        ceiling_hz=best[0],
+        score=best[1],
+        suggested_hz=suggested,
+        categories=len(usable),
+        tokens=tokens,
+        swept=swept,
     )

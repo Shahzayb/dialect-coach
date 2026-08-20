@@ -331,8 +331,7 @@ WOMEN: Mapping[str, ReferenceVowel] = {
 # The two sets are kept apart and NEVER averaged. Formants scale with vocal tract
 # length; a mean of the men's and women's tables describes nobody. `GA_REFERENCE_SET`
 # selects one explicitly and `vowel_measure` refuses to score position until it does.
-REFERENCE_SETS: Mapping[str, Mapping[str, ReferenceVowel]] = {"men": MEN,
-                                                             "women": WOMEN}
+REFERENCE_SETS: Mapping[str, Mapping[str, ReferenceVowel]] = {"men": MEN, "women": WOMEN}
 
 
 # Where the 1995 reference is known to be behind the language, widen the band rather
@@ -384,4 +383,3 @@ def tense_lax_ratio(tense: str, lax: str, reference_set: str) -> float | None:
     if first.duration_ms is None or not second.duration_ms:
         return None
     return first.duration_ms / second.duration_ms
-
