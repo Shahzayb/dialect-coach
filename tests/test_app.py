@@ -31,19 +31,6 @@ REFERENCE = (
 )
 
 
-@pytest.fixture(autouse=True)
-def isolated_db(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A throwaway database per test, and no connection carried over from the last one.
-
-    get_connection is @st.cache_resource, which AppTest shares across runs — without the
-    clear, every test after the first would keep writing to the first test's database.
-    """
-    monkeypatch.setenv("DB_PATH", str(tmp_path / "coach.db"))
-    import streamlit as st
-
-    st.cache_resource.clear()
-
-
 @pytest.fixture
 def run_app(monkeypatch: pytest.MonkeyPatch):
     """Run app.py, overriding settings through monkeypatch so nothing leaks between tests."""

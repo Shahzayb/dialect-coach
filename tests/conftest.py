@@ -80,6 +80,27 @@ def offline_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAX_DURATION_SECONDS_UNSCRIPTED", "300")
 
 
+@pytest.fixture(autouse=True)
+def isolated_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A throwaway database per test, and no Streamlit cache carried over from the last one.
+
+    **Both caches, not just one.** `get_connection` is `@st.cache_resource`, so without that
+    clear every test after the first keeps writing to the first test's database. But
+    `@st.cache_data` matters just as much and is easier to miss: the progress view and the
+    practice queue key their cached reads on `db.attempt_fingerprint`, which is
+    `(highest attempt id, row count)`. Two different tests that each seed two attempts produce
+    the **identical** key against completely different databases, so the second silently
+    reads the first's results. That is not hypothetical — it surfaced as thirteen unrelated
+    practice-queue failures the moment a second module started seeding two attempts, and the
+    symptom was an empty targets table with no hint of a caching cause.
+    """
+    monkeypatch.setenv("DB_PATH", str(tmp_path / "coach.db"))
+    import streamlit as st
+
+    st.cache_resource.clear()
+    st.cache_data.clear()
+
+
 @pytest.fixture
 def fixtures_dir() -> Path:
     return FIXTURES
