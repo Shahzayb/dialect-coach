@@ -1372,7 +1372,7 @@ def _stress_findings(contrasts: Sequence[StressContrast], limit: int = 5) -> lis
     return found
 
 
-def _rejection_findings(tokens: Sequence[Token]) -> list[Finding]:
+def rejection_findings(tokens: Sequence[Token]) -> list[Finding]:
     """One row per (vowel, reason), carrying the count.
 
     Grouped rather than one row per token: a 90-second read can reject fifty tokens, and fifty
@@ -1421,7 +1421,7 @@ def findings(
     rows += _duration_findings(pre_fortis_ratios(accepted), "clipping")
     rows.append(_reduction_finding(centroid))
     rows += _stress_findings(stress_contrasts(accepted, normaliser, centroid))
-    rows += _rejection_findings(measurement.tokens)
+    rows += rejection_findings(measurement.tokens)
     return rows
 
 

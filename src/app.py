@@ -1508,7 +1508,7 @@ def render_result(conn: sqlite3.Connection, entry: CachedAttempt, source: Any) -
 
     render_delivery(assessment)
     render_rhythm(assessment, reference_text)
-    render_accent_table(entry)
+    render_accent_table(conn, entry)
 
 
 # --- The accent measurement surface ----------------------------------------------------------
@@ -1531,7 +1531,7 @@ def reference_set() -> str:
     return chosen if chosen in vowel_reference.REFERENCE_SETS else ""
 
 
-def render_accent_table(entry: CachedAttempt) -> None:
+def render_accent_table(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
     """The four-column table for one attempt, under its result."""
     measurement = entry.measurement
     st.subheader("Accent measurement")
@@ -1577,7 +1577,7 @@ def render_accent_table(entry: CachedAttempt) -> None:
         _render_rejections(measurement)
         return
 
-    baseline_row = _current_baseline_row()
+    baseline_row = db.current_baseline(conn)
     noise = (
         vowel_measure.noise_from_json(json.loads(baseline_row["noise_floor_json"]))
         if baseline_row is not None
@@ -1596,11 +1596,6 @@ def _render_rejections(measurement: Any) -> None:
     if not rejected:
         return
     st.markdown(accent_view.to_markdown(vowel_measure._rejection_findings(measurement.tokens)))
-
-
-def _current_baseline_row() -> Any:
-    conn = get_connection()
-    return db.current_baseline(conn)
 
 
 def calibration_reads(conn: sqlite3.Connection) -> list[sqlite3.Row]:
