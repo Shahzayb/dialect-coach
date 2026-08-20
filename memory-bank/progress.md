@@ -93,6 +93,44 @@ a pattern ("That is an observation, not a result — 3 pairs is the least this v
 a pattern"), which is the mechanism working as designed, not a defect. Too early to read
 anything into the direction; needs more pairs.
 
+**Why that pair went the wrong way — reported 2026-08-20.** The speaker cannot listen and
+speak at the same time, and said so unprompted the first time they used the surface. Slowing
+playback to 35% did not rescue it: echo is workable where simultaneous is not, at either
+speed. The read was on headphones, so Azure heard no synthesiser and the −5.4 prosody is a
+clean measurement of a degraded delivery rather than a mixture. Simultaneous shadowing is
+therefore harder for this speaker than a cold read — a mechanism for the sign being negative,
+not an excuse for it. Still one pair: `shadow_summary`'s 3-pair bar stands, and the
+pre-registered claim is on notice rather than refuted.
+
+**Third-read fatigue is ruled out as the cause, by the two reads before it.** Attempt 10 was
+the third read of the benchmark inside 23 minutes, so the obvious rival explanation is that
+the voice was simply tiring. The data rejects it — the two cold reads either side of that
+window are flat, and the drop arrives only with the shadowing:
+
+| attempt | time | pron | accuracy | fluency | prosody |
+|---|---|---|---|---|---|
+| 8 (cold) | 11:58 | 91.2 | 98.2 | 91.1 | 83.4 |
+| 9 (cold) | 12:10 | 91.1 | 98.0 | 91.4 | 83.5 |
+| 10 (**shadowed**) | 12:21 | 88.2 | 95.9 | 90.7 | **78.1** |
+
+Fatigue predicts a gradual decline across all three; prosody instead held at 83.4 → 83.5 and
+then fell 5.4. Note also that **accuracy fell 2.1 on the shadowed read** (98.0 → 95.9). The
+Progress surface cannot show that: `SHADOW_METRICS` compares fluency and prosody only, on the
+stated grounds that "shadowing trains delivery, not articulation". That rule assumes shadowing
+is neutral on articulation, and this pair is evidence it can be negative — worth revisiting if
+later pairs repeat it.
+
+**The ramp exists and nothing puts you on it.** The mode radio defaults to `SIMULTANEOUS`, so
+a first-time shadower meets the hardest combination — speak-along, full speed — with no ramp,
+though `SLOW_NOTE` already calls slow playback "the on-ramp" and echo is the gentler format.
+The deeper bind: **echo mode has no recorder at all** (`render_shadow` calls `st.audio_input`
+only in the simultaneous branch), so the mode this speaker can sustain captures nothing, while
+the mode that produces data is the one they have now failed at twice. The echo track is built
+clip-by-clip with each gap sized to its own phrase, so per-phrase segmentation of an echo
+recording is feasible if it is ever wanted. Direction deliberately left open on 2026-08-20 —
+the candidates were re-specifying the acceptance test around cold-read transfer, per-phrase
+assessment, or publishing only the metrics the format does not corrupt.
+
 **Accent measurement (v0.10.0).** The Accent tab holds a room check, a two-read calibration
 flow, a vowel chart against published General American means, and a stated noise floor. Every
 assessment also renders a four-column table — `Acoustic Feature | User Realization | Target
@@ -146,6 +184,12 @@ third of the way, everything else bit-identical). Built on `parselmouth.praat.ca
 `Manipulation` class does not exist. Every manipulation is capped and says so; the original
 always plays first, labelled; and the surface states it is the user's own voice modified.
 
+**Confirmed by ear on 2026-08-20.** In a manual session the six chart-and-table pairs rendered
+against attempt #10 (a real read, 138 tokens) with no console errors, the model's reading of
+that passage was captured live, and corrected pitch played back. The open question — whether a
+corrected-pitch clip still *sounds* like the speaker — is answered yes, by the speaker. That
+was the one claim the formant-preservation check could not settle.
+
 **The loop closes.** Ranked gaps travel to the coach as a `vowel_geometry` section alongside the
 phoneme payload, both coaches answer with a bridging phrase (a sentence forcing the vowel in
 varied consonant contexts, never a word list), and one click fills the practice textarea while a
@@ -163,17 +207,92 @@ second promotes it to the queue as a `vowel` target with its evidence.
   confirmed from a real capture (`tests/fixtures/bad_delivery_capture.json`); the other two
   are covered only by a hand-built synthetic fixture. A reading that actually provokes one
   would close this — halting delivery with run-together sentences did not.
+  **Third failed attempt on 2026-08-20** (attempt 12, "Workplace explanation", a passage
+  chosen for its long subordinate chain, read with a real stumble in it): both still 0, while
+  `Monotone` came back 28. Three deliberate attempts is enough to stop treating this as bad
+  luck and start treating it as a property of Azure's scoring — the synthetic fixture may be
+  the only thing that will ever exercise these two branches.
 
-- **No human has used the v0.11.0 surfaces.** The charts, the resynthesis players and the
-  one-click drill are proven against synthetic audio and an `AppTest` run, not against a voice.
-  In particular nobody has yet confirmed that a corrected-pitch clip *sounds* like their own
-  voice — the formant-preservation check says it should, and that is not the same thing.
+- **`Monotone` is now confirmed twice from real captures.** Attempt 12 returned one flat
+  stretch of 28 words at `SyllablePitchDeltaConfidence` 0.25 — about a third of the passage —
+  and `fallback_coach` wrote a coherent drill quoting the real span. The first live capture
+  was attempt 9. Both were second-or-later reads in a sitting.
+
+- **The one-click drill has not been used by a human.** The charts and the resynthesis
+  players now have (see below); the drill is still proven only against synthetic audio and an
+  `AppTest` run.
 - **The trajectory chart has never seen a real monophthongised diphthong.** The exit condition
   is proven on synthesised FACE vowels at 240 ms, where the distinction is 0.1 Hz against 72.
   Whether a learner's monophthongal /eɪ/ is distinguishable at real connected-speech durations,
   where boundary contamination is large, is **not** established — see the dead end below.
 
 ## Known issues
+
+**The Accent tab can render one reading's acoustics under another reading's label.** Caught
+live on 2026-08-20, minutes after attempt 12 was stored. The "Which reading?" selector showed
+`#10 · 138 tokens · Each morning I read these same words out` while the rhoticity table below
+it showed `/ɑɹ/ START 805 Hz (n=2)` and `/ɝ/ NURSE 866 Hz (n=1)` — **attempt 12's** figures,
+identical to the ones its own bridging phrases quoted. Selecting each attempt explicitly
+proves the pairing: #10 is 917 Hz (n=3) / 772 Hz (n=5), #12 is 805 Hz (n=2) / 866 Hz (n=1).
+The mismatch **survived switching tabs away and back**; it corrected only once the selector
+was actually operated, so this is not a one-frame paint glitch but a state that persists
+silently for as long as the widget is left alone.
+
+`measurement_for` is a clean query on `attempt_id` and is not at fault — whatever id the
+backend resolved, it fetched correctly. The disagreement is between what
+`st.selectbox("Which reading?", options=list(labels), key="accent_chart_attempt")`
+(`app.py:2043`) displays and what it returns on the render where `options` has just grown.
+There is no `index=`, so the default is positional, and a new attempt is prepended: the
+newest reading takes position 0, which the previous render's position 0 held. Do not fix this
+by reasoning about Streamlit's widget internals from memory — reproduce it first by storing a
+new attempt with the Accent tab already rendered.
+
+**Severity is high and the failure is silent.** This is the one surface whose entire purpose
+is comparing readings over time, it misattributes acoustics between them, and it fires exactly
+when a new attempt lands — the moment the user goes to look. Both halves of the screen look
+plausible on their own. The one visible tell is arithmetic: the label carries the attempt's
+`accepted` token count (138) while the table reported n=2 and n=1 per category, which a
+138-token read cannot produce. That invariant is checkable — the panel could refuse to draw
+when the selected label's token count and the loaded measurement's disagree, in the same
+spirit as every other refusal in `vowel_measure`.
+
+**A repeated word is reported as a phoneme substitution, and the advice is wrong.** Attempt
+12 (2026-08-20): the speaker stumbled and said "Wednesday" twice. The script-versus-heard
+diff handles it correctly, showing the second one italicised as heard-but-not-in-script. The
+flagged-word card for the same word does not — it renders **`wednesday — 6`** with
+**`/eɪ/ → sounded like /w/`**, because the `/eɪ/` ending the first "Wednes-day" aligned
+against the `/w/` onset of the second. Azure's payload is being read faithfully; the card
+turns it into "your /eɪ/ came out as /w/", which is a substitution that never happened, on
+the lowest-scoring word of the attempt (6/100). Two surfaces then tell contradictory stories
+about one word, and the card is the wrong one — against this project's own rule that a word
+Azure heard *differently* matters more than a low phoneme score. A disfluency needs to be
+recognised as a disfluency before `weakest_phoneme` is allowed to describe it; the diff
+already knows, so the signal exists.
+
+**The error-count badges put two different units side by side.** `render_error_counts`
+(`app.py:1067`) counts words for every badge, but "2 Mispronunciations" means two
+independently wrong words while "28 Monotone" means **one** flat stretch that spans 28 words
+— which is exactly how the Delivery panel below it words the same fault ("across the span",
+one confidence figure). Read together, the row implies the monotone problem is fourteen times
+the size of the articulation problem. Because prose comes in spans, the monotone badge will
+always be the largest number on the row and is structurally the least informative one.
+`1 monotone stretch (28 words)` would say the true thing.
+
+**The practice queue never rotates — one target monopolises the block slot forever.** Found
+by hand on 2026-08-20, after the user said they were tired of being given `/w/ → /v/`. Today
+renders a single block from `trainable[0]` (`app.py:3018`), `due()` sorts on
+`(active?, next_due)` and never on `last_seen` (`practice_queue.py:519`), and `next_due` is
+written back **only when the state changes or the item regressed** (`app.py:3458`). A block
+that leaves the target active — anything under the 90% graduation bar — writes `last_seen`
+alone. So `/w/ → /v/` still carries the `next_due` it was *added* with
+(2026-08-19T18:05:45Z) after two completed blocks at 75% and 80%, and a stable sort pins it
+at index 0 permanently. `/ɑ/ → /ɔ/` and `/i/ → /ɪ/` cannot be reached until it graduates,
+even though both carry more evidence than it does (4 tokens each against 2).
+**`last_seen` is written in two places and read in none** — it is the field this wants.
+Two candidate fixes: drop the condition at `app.py:3458` so an active item's `next_due`
+advances to now and it falls to the back; or order `due()` by `last_seen`, never-seen first.
+The second is preferable — under the first, ordering still rests on a timestamp whose meaning
+is "due now" for every active target. Left unfixed deliberately on 2026-08-20.
 
 **A real `.env` can silently undo the 180-second paragraph ceiling.** The default moved from
 120 to 180 for shadowing, but a `.env` written before that change still says 120 and wins —
