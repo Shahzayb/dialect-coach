@@ -299,3 +299,59 @@ def test_the_app_plays_the_original_before_the_modified_clip() -> None:
     assert original < modified, "the modified clip is offered before the original"
     assert body.index("st.audio(wav_bytes") < body.index("st.audio(result.audio")
     assert "OWN_VOICE_NOTICE" in body, "the surface does not say it is the user's own voice"
+
+
+# --- The two edges of the clip ----------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "start_s", "end_s"),
+    [
+        ("mid-utterance", 0.4, 0.7),
+        ("at the very start", 0.0, 0.3),
+        ("at the very end", SECONDS - 0.3, SECONDS),
+    ],
+)
+def test_correcting_a_vowel_never_lengthens_the_clip(
+    steady: bytes, name: str, start_s: float, end_s: float
+) -> None:
+    """**Praat reads an empty time range as "the whole sound".**
+
+    `Extract part 0.0 0.0` hands back the entire recording rather than nothing — verified
+    against the pinned 0.4.7 — so a vowel at either edge of the clip used to splice the whole
+    utterance in beside itself and the listener heard the sentence twice. That breaks the only
+    promise this surface makes: everything outside the vowel is bit-identical, so whatever you
+    hear change is the vowel.
+    """
+    result = accent_resynth.corrected_vowel(steady, start_s, end_s, 1500.0, 1800.0)
+    seconds = len(result.audio) / (SAMPLE_RATE * 2)
+    assert seconds == pytest.approx(SECONDS, abs=0.02), f"{name}: {seconds:.3f}s of audio"
+
+
+# --- One pitch analysis, however long the contour is -------------------------------------------
+
+
+def test_the_pitch_track_is_analysed_once_however_many_contour_points(
+    steady: bytes, monkeypatch
+) -> None:
+    """The contour has one point per 10 ms, and the recording is analysed ONCE for all of them.
+
+    Re-analysing inside the loop is O(points x duration): on the ~62 s benchmark passage that
+    is roughly 6,000 full analyses and about two minutes of arithmetic before any audio comes
+    back, in a Streamlit callback the user is sitting in front of. Counted rather than timed,
+    so the assertion says what is actually wrong instead of failing on a slow machine.
+    """
+    calls = 0
+    real = accent_resynth._pitch_of
+
+    def counted(sound):
+        nonlocal calls
+        calls += 1
+        return real(sound)
+
+    monkeypatch.setattr(accent_resynth, "_pitch_of", counted)
+
+    contour = [(index * 0.01, 2.0) for index in range(int(SECONDS / 0.01))]
+    assert len(contour) > 100, "the contour is too short to distinguish the two behaviours"
+    accent_resynth.corrected_pitch(steady, contour)
+    assert calls == 1, f"analysed the recording {calls} times for {len(contour)} contour points"

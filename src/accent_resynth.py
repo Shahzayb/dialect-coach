@@ -89,6 +89,13 @@ MIN_DURATION_SCALE = 1.0 / MAX_DURATION_SCALE
 # the way is audible as a direction without ever sounding like somebody else.
 MAX_FORMANT_FRACTION = 1.0 / 3.0
 
+# The shortest slice worth splicing back in. **Praat reads an EMPTY time range as "the whole
+# sound"** — `Extract part 0.0 0.0` returns the entire recording rather than nothing, verified
+# against 0.4.7 — so a vowel starting at 0 s would concatenate the whole utterance in front of
+# itself and the user would hear their sentence twice. Anything shorter than this is a fraction
+# of a sample period at the head or tail and is dropped instead, which is inaudible.
+_MIN_PART_S = 0.001
+
 # What the surface must say. Not decoration — a synthetic-sounding clip the user believes is a
 # native model is actively misleading, and this is the sentence that prevents it.
 OWN_VOICE_NOTICE = (
@@ -170,12 +177,23 @@ def _manipulation(sound: parselmouth.Sound) -> Any:
     )
 
 
-def _median_f0(sound: parselmouth.Sound) -> float | None:
-    pitch = sound.to_pitch(
+def _pitch_of(sound: parselmouth.Sound) -> Any:
+    """The pitch analysis, run ONCE per sound.
+
+    Hoisted into its own function because the alternative is the mistake this module already
+    made: `corrected_pitch` walks a contour with one point per 10 ms, and re-analysing the
+    whole recording inside that loop is O(points x duration). On the ~62 s benchmark passage
+    that is about 6,000 analyses and roughly two minutes of arithmetic to produce a clip the
+    caller is waiting on. One analysis, queried many times, is the same answer in 18 ms.
+    """
+    return sound.to_pitch(
         time_step=_TIME_STEP_S,
         pitch_floor=acoustics.PITCH_FLOOR_HZ,
         pitch_ceiling=acoustics.PITCH_CEILING_HZ,
     )
+
+
+def _median_f0(pitch: Any) -> float | None:
     voiced = pitch.selected_array["frequency"]
     voiced = voiced[voiced > 0]
     return float(np.median(voiced)) if voiced.size else None
@@ -183,12 +201,7 @@ def _median_f0(sound: parselmouth.Sound) -> float | None:
 
 def pitch_track(wav_bytes: bytes) -> list[tuple[float, float]]:
     """(time, hertz) for every voiced frame. What both the overlay and the correction read."""
-    sound = _sound(wav_bytes)
-    pitch = sound.to_pitch(
-        time_step=_TIME_STEP_S,
-        pitch_floor=acoustics.PITCH_FLOOR_HZ,
-        pitch_ceiling=acoustics.PITCH_CEILING_HZ,
-    )
+    pitch = _pitch_of(_sound(wav_bytes))
     frequencies = pitch.selected_array["frequency"]
     return [(float(time), float(hz)) for time, hz in zip(pitch.xs(), frequencies) if hz > 0]
 
@@ -232,7 +245,9 @@ def corrected_pitch(
             "first — without it there is nothing to correct toward."
         )
     sound = _sound(wav_bytes)
-    own_median = _median_f0(sound)
+    # Analysed once, outside the loop below. See `_pitch_of`.
+    pitch = _pitch_of(sound)
+    own_median = _median_f0(pitch)
     if own_median is None:
         raise ResynthesisError(
             "No pitch could be tracked in this recording, so there is no contour to replace. "
@@ -247,7 +262,7 @@ def corrected_pitch(
     for time_s, target_st in target:
         if not 0.0 <= time_s <= sound.duration:
             continue
-        own_hz = _hz_at(sound, time_s)
+        own_hz = _hz_at(pitch, time_s)
         own_st = semitones(own_hz, own_median) if own_hz else 0.0
         shift = target_st - own_st
         if abs(shift) > max_shift:
@@ -270,12 +285,8 @@ def corrected_pitch(
     )
 
 
-def _hz_at(sound: parselmouth.Sound, time_s: float) -> float | None:
-    pitch = sound.to_pitch(
-        time_step=_TIME_STEP_S,
-        pitch_floor=acoustics.PITCH_FLOOR_HZ,
-        pitch_ceiling=acoustics.PITCH_CEILING_HZ,
-    )
+def _hz_at(pitch: Any, time_s: float) -> float | None:
+    """One frame of an ALREADY-COMPUTED pitch analysis. Never analyses anything itself."""
     value = pitch.get_value_at_time(time_s)
     return None if value is None or math.isnan(value) or value <= 0 else float(value)
 
@@ -381,9 +392,7 @@ def corrected_vowel(
     # somewhere else and every formant below it shifts a slot — so a large shift stops being
     # measurable at the same time as it stops being convincing.
 
-    before = call(sound, "Extract part", 0.0, start_s, "rectangular", 1.0, "no")
     middle = call(sound, "Extract part", start_s, end_s, "rectangular", 1.0, "no")
-    after = call(sound, "Extract part", end_s, sound.duration, "rectangular", 1.0, "no")
     shifted = call(
         middle,
         "Change gender",
@@ -394,7 +403,18 @@ def corrected_vowel(
         1.0,  # pitch range factor: unchanged
         1.0,  # duration factor: unchanged
     )
-    joined = call([before, shifted, after], "Concatenate")
+
+    # Only the parts that actually exist — see `_MIN_PART_S`. A vowel at the very start or the
+    # very end of the recording has nothing on one side of it, and asking Praat for that empty
+    # span hands back the whole recording instead, which would break the one promise this
+    # surface makes: that everything outside the vowel is bit-identical.
+    parts = []
+    if start_s >= _MIN_PART_S:
+        parts.append(call(sound, "Extract part", 0.0, start_s, "rectangular", 1.0, "no"))
+    parts.append(shifted)
+    if sound.duration - end_s >= _MIN_PART_S:
+        parts.append(call(sound, "Extract part", end_s, sound.duration, "rectangular", 1.0, "no"))
+    joined = call(parts, "Concatenate") if len(parts) > 1 else shifted
 
     direction = "further front" if ratio > 1 else "further back or more rounded"
     return Resynthesis(
