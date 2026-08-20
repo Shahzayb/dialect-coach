@@ -1263,6 +1263,12 @@ WITHIN_NOISE = "Within measurement noise"
 # than like-for-like — the same class of mismatch caveat 3 forbids outright for durations.
 CITATION_CAVEAT = "(target is citation-form speech; treat as indicative)"
 
+# How far F3−F2 may sit from its target before the gap is worth an instruction. Inherited from
+# the threshold the pre-v0.11.0 code already used, now applied symmetrically: r-colouring
+# measured within this much of the target — in EITHER direction — is reported as being in the
+# band rather than converted into a gesture to change.
+RHOTICITY_TOLERANCE_HZ = 150.0
+
 
 def _feature(vowel: str, metric: str) -> str:
     keyword = phoneme_reference.keyword_for(vowel)
@@ -1473,14 +1479,19 @@ def _rhoticity_findings(
         delta = _delta(target_value, position.f3_minus_f2_hz)
         if delta is None:
             instruction = "Not measurable from this recording."
-        elif delta < -150:
-            instruction = f"{_signed(delta, 'Hz')} → r-colouring is strong enough"
+        elif abs(delta) <= RHOTICITY_TOLERANCE_HZ:
+            instruction = f"{_signed(delta, 'Hz')} → r-colouring is within the tolerance band"
         else:
-            # A POSITIVE delta means the target F3−F2 sits above the speaker's, i.e. the
-            # speaker is already more r-coloured than the target; a negative one means F3 is
-            # too high above F2 and the r-colouring is thin. `instruction_for` is keyed on
-            # F3 itself, so the sign is flipped: a too-wide F3−F2 asks for a LOWER F3.
-            move = vowel_reference.instruction_for(vowel, "F3", -delta)
+            # **`delta` is passed through UNCHANGED, and that is the whole point.** It is
+            # `target − produced` on F3−F2, and `Instruction.f3_raise` / `f3_lower` are keyed
+            # on the same convention: `f3_lower` is what to say when the target sits BELOW the
+            # speaker. A negative delta means the speaker's F3 sits further above F2 than the
+            # target's — r-colouring that has not arrived — and asks for a lower F3, which is
+            # `f3_lower`, "bunch the tongue". Negating first looks like it corrects for F3−F2
+            # being a difference rather than a formant. It does not: it inverts every
+            # r-colouring instruction on the surface, telling an under-rhotic speaker to
+            # release the bunching. Guarded by a test that names both directions.
+            move = vowel_reference.instruction_for(vowel, "F3", delta)
             instruction = (
                 f"{_signed(delta, 'Hz')} → {move}"
                 if move
@@ -1946,8 +1957,24 @@ def ranked_gaps(
         # Trajectory — how much of the glide is missing. A monophthongised diphthong is the
         # clearest single thing the charts show, so a shortfall here ranks on its own.
         entry = phoneme_reference.lookup(vowel)
-        if entry is not None and entry.kind == "diphthong" and target.f2_travel_hz:
-            produced_travel = abs(position.f2_travel_hz or 0.0)
+        # `n_trajectory` and an explicit None check, never `or 0.0`: a vowel whose tokens were
+        # all too short to measure a glide in has NO travel, and reading that absence as a
+        # 0 Hz glide manufactures the worst possible monophthongisation finding out of a
+        # measurement that was refused. `_trajectory_findings` says exactly that in the table
+        # and this has to agree with it — a gap that is not real must not become a drill. The
+        # sign guard is the same one for the same reason: a glide measured running the
+        # opposite way to the reference is the following segment leaking into the 80% window,
+        # not a shortfall to practise.
+        measured_travel = position.f2_travel_hz
+        if (
+            entry is not None
+            and entry.kind == "diphthong"
+            and target.f2_travel_hz
+            and position.n_trajectory > 0
+            and measured_travel is not None
+            and measured_travel * target.f2_travel_hz > 0
+        ):
+            produced_travel = abs(measured_travel)
             wanted = abs(target.f2_travel_hz)
             if produced_travel < wanted:
                 found[TRAJECTORY].append(
@@ -1960,11 +1987,13 @@ def ranked_gaps(
                             f"glides {produced_travel:.0f} Hz where General American glides "
                             f"{wanted:.0f} Hz — the diphthong is flattening toward a monophthong"
                         ),
-                        n=position.n,
+                        # The glide count, not the token count: only these tokens were long
+                        # enough to contribute a travel, so only these are the evidence.
+                        n=position.n_trajectory,
                         evidence={
                             "produced_travel_hz": round(produced_travel),
                             "target_travel_hz": round(wanted),
-                            "tokens": position.n,
+                            "tokens": position.n_trajectory,
                         },
                     )
                 )

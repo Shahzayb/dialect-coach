@@ -215,3 +215,152 @@ def test_the_rhythm_gap_names_the_direction_rather_than_only_the_size() -> None:
     assert vowel_measure.rhythm_gap(55.4, 55.0) is None, "sub-point noise is not a finding"
     assert vowel_measure.rhythm_gap(None, 55.0) is None
     assert vowel_measure.rhythm_gap(55.0, None) is None
+
+
+# --- The direction of the advice ---------------------------------------------------------------
+# The one place `vowel_measure` can produce confidently wrong advice, and the failure mode is
+# silent: an inverted instruction renders exactly like a correct one. Both directions of both
+# instruments are named here so a sign flip cannot pass review again.
+
+
+def position_at(vowel: str, f3_minus_f2: float) -> vowel_measure.VowelPosition:
+    """A minimal position carrying one number — the one the rhoticity row is built from."""
+    return vowel_measure.VowelPosition(
+        vowel=vowel,
+        n=4,
+        f1_hz=500.0,
+        f2_hz=1500.0,
+        f3_hz=1500.0 + f3_minus_f2,
+        f1_z=0.0,
+        f2_z=0.0,
+        f3_z=0.0,
+        duration_ms=140.0,
+        f2_travel_hz=0.0,
+        f3_minus_f2_hz=f3_minus_f2,
+        rms_dbfs=-20.0,
+        n_trajectory=4,
+    )
+
+
+def rhoticity_row(produced: float, target: float = 400.0) -> str:
+    rows = vowel_measure._rhoticity_findings(
+        {"ɝ": position_at("ɝ", produced)}, {"ɝ": position_at("ɝ", target)}
+    )
+    assert len(rows) == 1
+    return rows[0].delta
+
+
+def test_an_under_rhotic_speaker_is_told_to_bunch_and_never_to_release() -> None:
+    """F3 sitting well ABOVE F2 is r-colouring that has not arrived. Bunch the tongue.
+
+    The delta is `target − produced` on F3−F2, so a speaker wider than the target reads
+    negative. Negating it before the lookup — which is easy to talk yourself into, because
+    F3−F2 is a difference rather than a formant — selects `f3_raise` and tells exactly the
+    speaker who needs more r-colouring to release the bunching they have not got.
+    """
+    instruction = rhoticity_row(produced=900.0)
+    assert "more r-colouring" in instruction, instruction
+    assert "less r-colouring" not in instruction, instruction
+    assert "bunch" in instruction.lower(), instruction
+
+
+def test_an_over_rhotic_speaker_is_told_to_release_and_never_to_bunch() -> None:
+    """The mirror image, so the test cannot pass on a lookup that is constant either way."""
+    instruction = rhoticity_row(produced=100.0)
+    assert "less r-colouring" in instruction, instruction
+    assert "more r-colouring" not in instruction, instruction
+
+
+def test_r_colouring_near_the_target_is_reported_as_being_in_the_band() -> None:
+    """Neither direction is an instruction inside the tolerance, in EITHER direction."""
+    for produced in (400.0 - vowel_measure.RHOTICITY_TOLERANCE_HZ + 1.0, 400.0, 500.0):
+        instruction = rhoticity_row(produced=produced)
+        assert "tolerance band" in instruction, (produced, instruction)
+        assert "bunch" not in instruction.lower(), instruction
+        assert "release" not in instruction.lower(), instruction
+
+
+def test_a_glide_that_was_never_measurable_does_not_become_a_monophthong_gap(
+    inventory_normaliser,
+) -> None:
+    """`or 0.0` on a missing travel manufactures the worst finding the chart can report.
+
+    A vowel every one of whose tokens was too short for the 20% and 80% windows has NO travel.
+    `_trajectory_findings` refuses to instruct on that and says so in the table; the ranking
+    has to agree, because a gap that is not real must not become a drill.
+    """
+    short = _face_tokens(duration_ms=60.0)
+    measurement = vowel_measure.Measurement(
+        tokens=tuple(short), ceiling_hz=5000.0, snr_db_min=30.0, style="read"
+    )
+    position = vowel_measure.positions(short, inventory_normaliser, minimum=1)["eɪ"]
+    assert position.n_trajectory == 0, "fixture is not exercising the refused-glide case"
+    assert position.f2_travel_hz is None
+
+    gaps = vowel_measure.ranked_gaps(
+        measurement, inventory_normaliser, reference_set="men", minimum=1
+    )
+    assert not [gap for gap in gaps if gap.metric == vowel_measure.TRAJECTORY], (
+        "an unmeasured glide was ranked as a flattened one"
+    )
+
+    rows = vowel_measure.findings_by_instrument(
+        measurement, inventory_normaliser, reference_set="men", minimum=1
+    )[vowel_measure.TRAJECTORY]
+    assert any("reached" in row.delta and "ms" in row.delta for row in rows), rows
+
+
+def test_a_backwards_glide_is_not_ranked_as_a_shortfall(inventory_normaliser) -> None:
+    """The capture found FACE gliding −225 Hz where General American glides +140.
+
+    That is the 80% window landing in the following nasal, not a small glide, and "widen the
+    glide" is the wrong thing to say about it. The table refuses; so does the ranking.
+    """
+    # Travelling backwards by LESS than the target travels forwards, so the guard is the
+    # only thing standing between this and a ranked "the glide is 90 Hz short" gap.
+    backwards = _face_tokens(duration_ms=200.0, f2_start=2140.0, f2_end=2089.0)
+    measurement = vowel_measure.Measurement(
+        tokens=tuple(backwards), ceiling_hz=5000.0, snr_db_min=30.0, style="read"
+    )
+    position = vowel_measure.positions(backwards, inventory_normaliser, minimum=1)["eɪ"]
+    assert position.f2_travel_hz is not None and position.f2_travel_hz < 0
+
+    gaps = vowel_measure.ranked_gaps(
+        measurement, inventory_normaliser, reference_set="men", minimum=1
+    )
+    assert not [gap for gap in gaps if gap.metric == vowel_measure.TRAJECTORY]
+
+
+def _face_tokens(
+    *, duration_ms: float, f2_start: float = 2089.0, f2_end: float = 2089.0, count: int = 6
+) -> list[vowel_measure.Token]:
+    """FACE tokens with the travel and the length dialled in directly.
+
+    Built rather than synthesised because what is under test is the arithmetic on top of a
+    measurement, not the measurement — and a synthesised signal cannot be given a 60 ms
+    duration and a clean 20%/80% pair at the same time, which is the whole point of the floor.
+    """
+
+    def point(f2: float) -> vowel_measure.FormantPoint:
+        return vowel_measure.FormantPoint(f1=460.0, f2=f2, f3=2700.0, b1=50.0, b2=80.0, b3=120.0)
+
+    return [
+        vowel_measure.Token(
+            vowel="eɪ",
+            word="say",
+            word_index=index,
+            start_s=index * 0.5,
+            end_s=index * 0.5 + duration_ms / 1000.0,
+            duration_ms=duration_ms,
+            at20=point(f2_start),
+            at50=point((f2_start + f2_end) / 2),
+            at80=point(f2_end),
+            rms_dbfs=-20.0,
+            f0_hz=120.0,
+            stress=1,
+            azure_score=90.0,
+            coda_voiceless=False,
+            accepted=True,
+        )
+        for index in range(count)
+    ]
