@@ -544,6 +544,21 @@ class Normaliser:
             _z(point.f3, self.f3_mean, self.f3_sd),
         )
 
+    def hz(self, f1_z: float | None, f2_z: float | None) -> tuple[float | None, float | None]:
+        """`z` inverted: where a normalised position sits in THIS speaker's own hertz.
+
+        What it is for: a reference target is a position in z, and anything that has to act on
+        the audio — shifting a formant, naming a frequency — needs hertz. Reading the target's
+        hertz straight off the reference table would import the reference talker's vocal tract
+        along with the target, which is the error normalisation exists to prevent. Mapping the
+        target z back through the SPEAKER's own mean and SD asks the right question instead:
+        where would this speaker's F2 be if the vowel sat where the target sits.
+        """
+        return (
+            None if f1_z is None else f1_z * self.f1_sd + self.f1_mean,
+            None if f2_z is None else f2_z * self.f2_sd + self.f2_mean,
+        )
+
 
 def _z(value: float | None, mean: float | None, sd: float | None) -> float | None:
     if value is None or mean is None or sd is None or sd <= 0:
@@ -1714,6 +1729,32 @@ MEASUREMENT_INSTRUMENTS: tuple[str, ...] = (
 )
 
 
+def _hertz_reference(
+    reference_set: str, source: str, published: Mapping[str, VowelPosition]
+) -> Mapping[str, VowelPosition]:
+    """The table to score an instrument that compares HERTZ against, never z-units.
+
+    **Only some instruments may switch tables, and which ones is not a preference.** A z-score
+    is relative to the inventory that produced it: the speaker is normalised over
+    `REFERENCE_CATEGORIES`, the published table over its own twelve, and `model_reference` over
+    twenty-two. So position and trajectory — which compare z — have to stay on the published
+    table or the arrows are measured in two different spaces and every one of them is wrong.
+
+    F3−F2 is in hertz and carries no normalisation at all, so it can be scored against the
+    better table, and the measured one is plainly better here: Hillenbrand published a mean for
+    /ɝ/ alone, in citation-form /hVd/ words, while `model_reference` covers all seven r-coloured
+    categories in connected speech through this same pipeline. Rhoticity is the largest and most
+    correctable gap on the page for a General American target, and it was scored against a
+    stand-in for six of its seven vowels until v0.11.0.
+
+    Falls back to `published` when the measured table has nothing for this set, so a fresh clone
+    with no capture behind it still gets the row it always got.
+    """
+    if source == REFERENCE_PUBLISHED:
+        return published
+    return reference_positions(reference_set, source=source) or published
+
+
 def findings_by_instrument(
     measurement: Measurement,
     normaliser: Normaliser,
@@ -1721,6 +1762,7 @@ def findings_by_instrument(
     reference_set: str,
     noise: NoiseFloor | None = None,
     minimum: int = MIN_TOKENS_PER_CATEGORY,
+    rhoticity_source: str = REFERENCE_VOICE,
 ) -> dict[str, list[Finding]]:
     """The four-column rows for one measurement, split by which instrument produced them.
 
@@ -1729,6 +1771,9 @@ def findings_by_instrument(
     supplying the normalisation — see `plot_gate`. A single token is a legitimate point once
     the space it sits in was established elsewhere, provided its count travels with it, which
     `VowelPosition.n` guarantees.
+
+    `rhoticity_source` picks the table the F3−F2 rows are scored against, and **only** those
+    rows — see `_hertz_reference`.
     """
     accepted = measurement.accepted
     speaker = positions(accepted, normaliser, minimum=minimum)
@@ -1736,7 +1781,9 @@ def findings_by_instrument(
     centroid = reduction(accepted, normaliser)
 
     return {
-        RHOTICITY: _rhoticity_findings(speaker, reference),
+        RHOTICITY: _rhoticity_findings(
+            speaker, _hertz_reference(reference_set, rhoticity_source, reference)
+        ),
         POSITION: _position_findings(speaker, reference, noise),
         TRAJECTORY: _trajectory_findings(speaker, reference),
         DURATION: (
@@ -1756,6 +1803,7 @@ def findings(
     reference_set: str,
     noise: NoiseFloor | None = None,
     minimum: int = MIN_TOKENS_PER_CATEGORY,
+    rhoticity_source: str = REFERENCE_VOICE,
 ) -> list[Finding]:
     """Every four-column row for one measurement, in reading order.
 
@@ -1763,7 +1811,12 @@ def findings(
     because most callers want the whole table and should not have to know the keys.
     """
     grouped = findings_by_instrument(
-        measurement, normaliser, reference_set=reference_set, noise=noise, minimum=minimum
+        measurement,
+        normaliser,
+        reference_set=reference_set,
+        noise=noise,
+        minimum=minimum,
+        rhoticity_source=rhoticity_source,
     )
     rows: list[Finding] = []
     for instrument in INSTRUMENT_ORDER:
@@ -1903,6 +1956,7 @@ def ranked_gaps(
     noise: NoiseFloor | None = None,
     minimum: int = MIN_TOKENS_PER_CATEGORY,
     limit: int = GAPS_PER_METRIC,
+    rhoticity_source: str = REFERENCE_VOICE,
 ) -> list[Gap]:
     """What the geometry says is worth practising, worst first within each metric.
 
@@ -1913,21 +1967,27 @@ def ranked_gaps(
     accepted = measurement.accepted
     speaker = positions(accepted, normaliser, minimum=minimum)
     reference = reference_positions(reference_set)
+    # Hertz-only, and only for the rhoticity gaps below — the position and trajectory gaps are
+    # in z and must stay in the space the speaker was normalised into. See `_hertz_reference`.
+    rhotic_reference = _hertz_reference(reference_set, rhoticity_source, reference)
     centroid = reduction(accepted, normaliser)
 
     found: dict[str, list[Gap]] = {RHOTICITY: [], POSITION: [], TRAJECTORY: [], REDUCTION: []}
 
     for vowel, position in speaker.items():
+        # **Not `continue` on a missing published target.** Hillenbrand has a mean for /ɝ/ and
+        # for none of the other six r-coloured categories, so skipping here meant the rhoticity
+        # ranking could only ever fire on NURSE — while the measured table has all seven. The
+        # position and trajectory blocks guard on `target` themselves instead.
         target = reference.get(vowel)
-        if target is None:
-            continue
+        entry = phoneme_reference.lookup(vowel)
 
         # Position — the arrow's length, net of the band it has to clear to be real.
         # Bound to locals rather than tested as a tuple: `None not in (...)` is true at
         # runtime and invisible to the type checker, and the ignore it would otherwise need is
         # exactly the kind that goes stale without anyone noticing.
         one, two = position.f1_z, position.f2_z
-        aim_f1, aim_f2 = target.f1_z, target.f2_z
+        aim_f1, aim_f2 = (target.f1_z, target.f2_z) if target is not None else (None, None)
         if one is not None and two is not None and aim_f1 is not None and aim_f2 is not None:
             f1_delta, f2_delta = aim_f1 - one, aim_f2 - two
             arrow = math.hypot(f1_delta, f2_delta)
@@ -1956,7 +2016,6 @@ def ranked_gaps(
 
         # Trajectory — how much of the glide is missing. A monophthongised diphthong is the
         # clearest single thing the charts show, so a shortfall here ranks on its own.
-        entry = phoneme_reference.lookup(vowel)
         # `n_trajectory` and an explicit None check, never `or 0.0`: a vowel whose tokens were
         # all too short to measure a glide in has NO travel, and reading that absence as a
         # 0 Hz glide manufactures the worst possible monophthongisation finding out of a
@@ -1967,7 +2026,8 @@ def ranked_gaps(
         # not a shortfall to practise.
         measured_travel = position.f2_travel_hz
         if (
-            entry is not None
+            target is not None
+            and entry is not None
             and entry.kind == "diphthong"
             and target.f2_travel_hz
             and position.n_trajectory > 0
@@ -1998,13 +2058,16 @@ def ranked_gaps(
                     )
                 )
 
-        # Rhoticity — F3 sitting too far above F2 is r-colouring that is not arriving.
-        # /ɝ/ has a published mean; /ɚ/ and the /Vɹ/ sequences do not and fall back to it —
-        # the same substitution `_rhoticity_findings` makes, for the same reason: r-colouring
-        # is one articulatory gesture whatever vowel carries it.
+        # Rhoticity — F3 sitting too far above F2 is r-colouring that is not arriving. Scored
+        # against `rhotic_reference`, which is the MEASURED table by default: F3−F2 is in hertz
+        # and carries no normalisation, so it can use the table that actually covers all seven
+        # r-coloured categories. /ɝ/ still stands in for anything the chosen table lacks, on the
+        # same grounds `_rhoticity_findings` uses — r-colouring is one articulatory gesture
+        # whatever vowel carries it.
         rhotic = vowel in {"ɝ", "ɚ"} or (entry is not None and entry.kind == "r-coloured")
-        nurse = reference.get("ɝ")
-        against = target.f3_minus_f2_hz
+        rhotic_target = rhotic_reference.get(vowel)
+        nurse = rhotic_reference.get("ɝ")
+        against = rhotic_target.f3_minus_f2_hz if rhotic_target is not None else None
         if against is None and nurse is not None:
             against = nurse.f3_minus_f2_hz
         if rhotic and position.f3_minus_f2_hz is not None and against is not None:

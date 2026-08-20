@@ -364,3 +364,104 @@ def _face_tokens(
         )
         for index in range(count)
     ]
+
+
+# --- Which table scores which instrument -------------------------------------------------------
+
+
+def test_the_rhoticity_row_is_scored_against_the_measured_table_by_default() -> None:
+    """The chart drew its targets from `model_reference` and the table quoted Hillenbrand.
+
+    For the men's set that was a 200 Hz disagreement on /ɝ/ between a picture and the numbers
+    directly beneath it, and a /ɝ/ stand-in in every row for the six r-coloured categories the
+    published table has no mean for. F3−F2 is in hertz and carries no normalisation, so it can
+    use the table that actually covers them.
+    """
+    published = vowel_measure.reference_positions("men", source=vowel_measure.REFERENCE_PUBLISHED)
+    measured = vowel_measure._hertz_reference("men", vowel_measure.REFERENCE_VOICE, published)
+
+    assert measured is not published
+    for vowel in ("ɝ", "ɚ", "ɑɹ", "ɔɹ", "ɛɹ", "ɪɹ"):
+        entry = measured.get(vowel)
+        assert entry is not None and entry.f3_minus_f2_hz, f"/{vowel}/ has no measured target"
+    assert not published.get("ɑɹ"), "the fixture cannot show the difference"
+
+
+def test_position_is_never_scored_against_the_measured_table() -> None:
+    """A z-score is relative to the inventory that produced it.
+
+    The speaker is normalised over `REFERENCE_CATEGORIES` and `model_reference` over
+    twenty-two, so an arrow drawn between the two is measured in two different spaces. Only
+    the hertz instruments may switch, which is what `_hertz_reference` is named for.
+    """
+    published = vowel_measure.reference_positions("men")
+    assert (
+        vowel_measure._hertz_reference("men", vowel_measure.REFERENCE_PUBLISHED, published)
+        is published
+    )
+
+
+def test_a_rhotic_with_no_published_mean_can_still_be_ranked(inventory_normaliser) -> None:
+    """`ranked_gaps` used to `continue` on a missing published target before rhoticity ran.
+
+    Hillenbrand has a mean for /ɝ/ and none of the other six, so the rhoticity ranking could
+    only ever fire on NURSE however under-rhotic the rest of the reading was — while the
+    measured table covers all seven. START is the case: no published mean, a real measured one.
+    """
+    assert not vowel_measure.reference_positions("men").get("ɑɹ"), (
+        "the published table now has a START mean, so this no longer proves anything"
+    )
+    # F3 sitting 1200 Hz above F2 is r-colouring that has plainly not arrived.
+    tokens = _rhotic_tokens("ɑɹ", f2=1100.0, f3=2300.0)
+    measurement = vowel_measure.Measurement(
+        tokens=tuple(tokens), ceiling_hz=5000.0, snr_db_min=30.0, style="read"
+    )
+    ranked = vowel_measure.ranked_gaps(
+        measurement, inventory_normaliser, reference_set="men", minimum=1, limit=99
+    )
+    rhotics = [gap for gap in ranked if gap.metric == vowel_measure.RHOTICITY]
+    assert [gap.vowel for gap in rhotics] == ["ɑɹ"], ranked
+    assert rhotics[0].magnitude > 0
+    assert "r-colouring" in rhotics[0].detail
+
+
+def _rhotic_tokens(vowel: str, *, f2: float, f3: float, count: int = 4):
+    def point() -> vowel_measure.FormantPoint:
+        return vowel_measure.FormantPoint(f1=520.0, f2=f2, f3=f3, b1=50.0, b2=80.0, b3=120.0)
+
+    return [
+        vowel_measure.Token(
+            vowel=vowel,
+            word="start",
+            word_index=index,
+            start_s=index * 0.5,
+            end_s=index * 0.5 + 0.15,
+            duration_ms=150.0,
+            at20=point(),
+            at50=point(),
+            at80=point(),
+            rms_dbfs=-20.0,
+            f0_hz=120.0,
+            stress=1,
+            azure_score=90.0,
+            coda_voiceless=False,
+            accepted=True,
+        )
+        for index in range(count)
+    ]
+
+
+def test_the_normaliser_inverts_cleanly() -> None:
+    """`hz` is `z` run backwards, and it is what lets a target act on the audio.
+
+    Reading a target's hertz straight off the reference table imports the reference talker's
+    vocal tract along with the target — the exact error normalisation exists to prevent. This
+    asks the right question instead: where would THIS speaker's F2 be at the target position.
+    """
+    normaliser = vowel_measure.reference_normaliser("men")
+    point = vowel_measure.FormantPoint(f1=500.0, f2=1500.0, f3=2500.0, b1=50.0, b2=80.0, b3=120.0)
+    f1_z, f2_z, _ = normaliser.z(point)
+    f1_hz, f2_hz = normaliser.hz(f1_z, f2_z)
+    assert f1_hz == pytest.approx(500.0)
+    assert f2_hz == pytest.approx(1500.0)
+    assert normaliser.hz(None, None) == (None, None)
