@@ -403,3 +403,24 @@ def test_the_rejection_table_renders_when_nothing_can_be_normalised(
     assert "| Acoustic Feature |" in rendered
     assert vowel_measure.REJECT_SHORT in rendered
     assert "Refused rather than guessed" in rendered
+
+
+def test_the_suite_never_writes_a_recording_into_the_working_tree(tmp_path) -> None:
+    """`audio/` being gitignored is not the same promise as never being written to.
+
+    `audio_utils.keep` writes real WAV bytes, and its default path is inside the repository.
+    The offline suite runs `run_assessment_job` in several places, so without an isolated
+    `AUDIO_DIR` a plain `make test` leaves recordings in the checkout — which it did, until
+    this fixture was added.
+    """
+    import os
+
+    import audio_utils
+
+    assert (
+        os.environ["AUDIO_DIR"].startswith(str(tmp_path.parent.parent))
+        or "audio" in (os.environ["AUDIO_DIR"])
+    )
+    kept = audio_utils.keep(b"RIFF" + b"\x00" * 40, "a" * 64)
+    assert kept is not None
+    assert not str(kept.resolve()).startswith(str(Path(__file__).resolve().parent.parent))

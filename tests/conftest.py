@@ -95,6 +95,11 @@ def isolated_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     symptom was an empty targets table with no hint of a caching cause.
     """
     monkeypatch.setenv("DB_PATH", str(tmp_path / "coach.db"))
+    # And the kept audio, for the same reason plus one of its own: `audio_utils.keep` writes
+    # real WAV bytes, and its default lands in the working tree. An offline suite that leaves
+    # recordings in the repository is a suite that can leak one — `audio/` is gitignored, but
+    # "gitignored" is not the same promise as "never written".
+    monkeypatch.setenv("AUDIO_DIR", str(tmp_path / "audio"))
     import streamlit as st
 
     st.cache_resource.clear()
