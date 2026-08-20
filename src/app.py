@@ -21,6 +21,7 @@ import html
 import json
 import logging
 import sqlite3
+import statistics
 import threading
 import time
 import uuid
@@ -28,10 +29,13 @@ from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, cast
 
 import streamlit as st
 
+import accent_charts
+import accent_resynth
 import accent_view
 import acoustics
 import ai_coach
@@ -39,6 +43,7 @@ import audio_utils
 import budget
 import db
 import fallback_coach
+import native_model
 import perception_trainer
 import phoneme_reference
 import practice_queue
@@ -1110,6 +1115,14 @@ def coaching_for(
         # The guard belongs where the spend is, the same rule the TTS cache follows.
         return cast("tuple[Any, str]", cached)
 
+    # Computed before either branch so both coaches see the same evidence, and inside the
+    # cache guard so it is not re-derived on every unrelated rerun.
+    try:
+        gaps = geometry_gaps(conn, entry)
+    except Exception:  # a report is promised on every assessment, geometry or not
+        logger.warning("Could not derive the vowel geometry for the coach", exc_info=True)
+        gaps = []
+
     if ask_model:
         # Marked before the call, not after, and on the attempt rather than the outcome: a
         # call that reached Gemini and then fell back (malformed JSON, nothing surviving
@@ -1117,10 +1130,10 @@ def coaching_for(
         # leave the button live and let the same failure be bought over and over.
         _mark_gemini_attempted(entry.key)
         with st.spinner("Asking Gemini for a second opinion…"):
-            result = ai_coach.coach(entry.assessment, entry.reference_text, entry.mode)
+            result = ai_coach.coach(entry.assessment, entry.reference_text, entry.mode, gaps=gaps)
     else:
         try:
-            report = fallback_coach.build(entry.assessment, entry.mode)
+            report = fallback_coach.build(entry.assessment, entry.mode, gaps=gaps)
         except Exception as exc:  # a report is promised on every assessment
             logger.error("Could not build the offline report", exc_info=True)
             report = fallback_coach.emergency_report(f"{type(exc).__name__}: {exc}")
@@ -1264,6 +1277,120 @@ def render_coaching(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
     if report.practice_plan:
         st.markdown("**Practice plan**")
         st.markdown(report.practice_plan)
+
+    render_bridging_phrases(conn, report, entry)
+
+
+def geometry_gaps(conn: sqlite3.Connection, entry: CachedAttempt) -> list[Any]:
+    """What the vowel measurements say is worth practising, for the coach payload.
+
+    **This is the half of the diagnosis Azure cannot see.** The phoneme scores are categorical
+    — this sound or that one — and the geometry is continuous: how far each vowel sits from
+    General American, in which direction, net of the measurement noise floor. Without this the
+    coach writes from the phoneme payload alone and the whole measurement chunk stops at the
+    charts, which is where it sat until this was wired.
+
+    Empty is the ordinary answer and never an error: it needs a stored baseline, a reference
+    set and a measurement, and most attempts have none of the three. The report has to come
+    out the same shape either way.
+    """
+    measurement = entry.measurement
+    chosen = reference_set()
+    if measurement is None or not chosen:
+        return []
+    context = baseline_context(conn)
+    gate = vowel_measure.plot_gate(
+        measurement,
+        baseline_normaliser=context.normaliser,
+        baseline_style=context.style,
+    )
+    if not gate.ok or gate.normaliser is None:
+        return []
+    gaps = vowel_measure.ranked_gaps(
+        measurement,
+        gate.normaliser,
+        reference_set=chosen,
+        noise=context.noise,
+        minimum=gate.minimum_tokens,
+    )
+    # Rhythm is a property of the whole reading rather than of any token, so it comes from
+    # `rhythm.py` and not from the measurement — but it belongs in the same section, because
+    # what the coach needs is one continuous picture and not two.
+    if entry.attempt_id:
+        words = _words_for(conn, entry.attempt_id, entry.reference_text)
+        baseline = rhythm.baseline()
+        pace = vowel_measure.rhythm_gap(
+            rhythm.npvi(words).npvi if words else None,
+            baseline.rhythm.npvi if baseline is not None else None,
+        )
+        if pace is not None:
+            gaps = [*gaps, pace]
+    return gaps
+
+
+def render_bridging_phrases(conn: sqlite3.Connection, report: Any, entry: CachedAttempt) -> None:
+    """The vowel geometry's answer: a sentence to say, one click from being a drill.
+
+    **The point of the ranking is the next drill, not the chart.** A phrase the user has to
+    retype is a phrase they will not practise, so the button fills the practice textarea
+    directly and a second one puts the target on the queue, where it outlives the session that
+    produced it.
+    """
+    phrases = list(getattr(report, "bridging_phrases", ()) or ())
+    if not phrases:
+        return
+
+    st.markdown("**Bridging phrases** — from the vowel measurements, not the phoneme scores")
+    st.caption(
+        "Each one forces a single vowel several times over in different consonant contexts. "
+        "That is the part a word list cannot drill: a vowel is easy to hit on its own and "
+        "hard to hold through whatever comes next."
+    )
+    for index, phrase in enumerate(phrases):
+        label = f"/{phrase.vowel}/ {phrase.keyword}".strip()
+        st.markdown(f"**{label}** — {phrase.why}")
+        st.markdown(f"> {phrase.phrase}")
+        drill, queue = st.columns(2)
+        drill.button(
+            "Drill this now",
+            key=f"bridge_drill_{index}",
+            on_click=_load_drill,
+            args=(phrase.phrase,),
+        )
+        if queue.button("Add to practice queue", key=f"bridge_queue_{index}"):
+            _promote_vowel_target(conn, phrase, entry)
+
+
+def _load_drill(phrase: str) -> None:
+    """Pre-fill the practice textarea. Runs before the next render, like `_apply_preset`."""
+    st.session_state[TEXT_KEY] = phrase
+    st.session_state[PRESET_KEY] = ""
+
+
+def _promote_vowel_target(conn: sqlite3.Connection, phrase: Any, entry: CachedAttempt) -> None:
+    """Put a measured vowel gap on the practice queue.
+
+    **A rhoticity or reduction target is a `vowel` target with its evidence**, not a new kind.
+    `practice_targets` already carries that kind and `practice_queue` already grades it, so
+    inventing a fourth would mean a fourth graduation rule for the same underlying question.
+    """
+    item = f"/{phrase.vowel}/ {phrase.keyword}".strip()
+    try:
+        db.upsert_target(
+            conn,
+            item=item,
+            kind=practice_queue.VOWEL,
+            evidence={
+                "source": "vowel_geometry",
+                "why": phrase.why,
+                "phrase": phrase.phrase,
+                "attempt_id": entry.attempt_id,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 — a queue failure must not lose the report
+        st.error(f"Could not add that to the queue: {utils.redact(str(exc))}", icon="⚠️")
+        return
+    st.success(f"{item} is on the practice queue — it will show up on Today.", icon="🎯")
 
 
 def render_diff(assessment: speech_analyzer.Assessment, reference_text: str) -> None:
@@ -1531,6 +1658,40 @@ def reference_set() -> str:
     return chosen if chosen in vowel_reference.REFERENCE_SETS else ""
 
 
+@dataclass(frozen=True)
+class BaselineContext:
+    """The stored baseline, unpacked once per render.
+
+    Every accent surface needs the same four things out of `speaker_baseline`, and each was
+    previously doing its own `json.loads` at its own call site. One loader, so the noise floor
+    a chart draws and the noise floor a table quotes cannot come from different rows.
+    """
+
+    normaliser: Any | None
+    noise: Any | None
+    style: str
+    reference_set: str
+    row: Any | None = None
+
+    @property
+    def calibrated(self) -> bool:
+        return self.normaliser is not None
+
+
+def baseline_context(conn: sqlite3.Connection) -> BaselineContext:
+    """Load the current baseline, or an empty context when there is none."""
+    row = db.current_baseline(conn)
+    if row is None:
+        return BaselineContext(normaliser=None, noise=None, style="", reference_set="")
+    return BaselineContext(
+        normaliser=vowel_measure.normaliser_from_json(json.loads(row["normaliser_json"])),
+        noise=vowel_measure.noise_from_json(json.loads(row["noise_floor_json"])),
+        style=str(row["style_tag"]),
+        reference_set=str(row["reference_set"]),
+        row=row,
+    )
+
+
 def render_accent_table(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
     """The four-column table for one attempt, under its result."""
     measurement = entry.measurement
@@ -1568,25 +1729,48 @@ def render_accent_table(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
             icon="🚫",
         )
 
-    try:
-        normaliser = vowel_measure.lobanov(
-            measurement.accepted, categories=vowel_measure.REFERENCE_CATEGORIES
-        )
-    except vowel_measure.TooFewTokens as exc:
-        st.info(str(exc), icon="📉")
+    context = baseline_context(conn)
+    gate = vowel_measure.plot_gate(
+        measurement,
+        baseline_normaliser=context.normaliser,
+        baseline_style=context.style,
+    )
+
+    if gate.ok and gate.normaliser is not None:
+        # The stored baseline supplies the space, so this reading only has to supply the
+        # token. That is what lets a three-word drill produce a row at all: normalising a
+        # drill against itself needs a full inventory and would refuse every time.
+        normaliser, minimum = gate.normaliser, gate.minimum_tokens
+    elif context.normaliser is not None:
+        st.info(gate.reason, icon="📉")
         _render_rejections(measurement)
         return
+    else:
+        # No baseline yet. Fall back to normalising this reading against itself, which needs a
+        # full inventory — and says so rather than guessing when it does not have one.
+        try:
+            normaliser = vowel_measure.lobanov(
+                measurement.accepted, categories=vowel_measure.REFERENCE_CATEGORIES
+            )
+        except vowel_measure.TooFewTokens as exc:
+            st.info(str(exc), icon="📉")
+            _render_rejections(measurement)
+            return
+        minimum = vowel_measure.MIN_TOKENS_PER_CATEGORY
 
-    baseline_row = db.current_baseline(conn)
-    noise = (
-        vowel_measure.noise_from_json(json.loads(baseline_row["noise_floor_json"]))
-        if baseline_row is not None
-        else None
+    if gate.style_warning:
+        st.warning(gate.style_warning, icon="🗣️")
+
+    findings = vowel_measure.findings(
+        measurement,
+        normaliser,
+        reference_set=chosen,
+        noise=context.noise,
+        minimum=minimum,
     )
-    findings = vowel_measure.findings(measurement, normaliser, reference_set=chosen, noise=noise)
     st.markdown(accent_view.to_markdown(findings))
     st.caption(accent_view.PUBLISHED_CAPTION.format(set=chosen))
-    if noise is None:
+    if context.noise is None:
         st.caption(accent_view.noise_caption(None))
 
 
@@ -1773,6 +1957,580 @@ def render_baseline(conn: sqlite3.Connection) -> None:
         )
 
 
+def measured_attempts(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every real attempt carrying vowel tokens, newest first. What the chart picker offers.
+
+    Broader than `calibration_reads`, deliberately: a drill is exactly what these charts exist
+    to make plottable, so restricting the picker to the benchmark passage would rebuild the
+    gate `plot_gate` was written to remove.
+    """
+    rows = conn.execute(
+        """
+        SELECT a.id, a.created_at, a.reference_text, a.mode,
+               COUNT(v.id) FILTER (WHERE v.accepted = 1) AS accepted
+        FROM attempts a JOIN vowel_measurements v ON v.attempt_id = a.id
+        WHERE a.offline = 0
+        GROUP BY a.id ORDER BY a.created_at DESC
+        """
+    ).fetchall()
+    return [
+        row
+        for row in rows
+        if row["accepted"] > 0 and not rhythm.is_baseline_capture(row["reference_text"])
+    ]
+
+
+def measurement_for(conn: sqlite3.Connection, attempt_id: int) -> Any | None:
+    """Rebuild one attempt's `Measurement` from its stored tokens.
+
+    The re-derivation path v0.10.0 kept the rows for: everything a chart needs comes back out
+    of the database, so a changed reference table or normalisation scheme is a query rather
+    than a request that the passage be read again.
+    """
+    rows = [dict(row) for row in db.vowel_measurements_for(conn, attempt_id)]
+    if not rows:
+        return None
+    tokens = vowel_measure.tokens_from_rows(rows)
+    first = rows[0]
+    return vowel_measure.Measurement(
+        tokens=tuple(tokens),
+        ceiling_hz=float(first.get("lpc_ceiling_hz") or 5000.0),
+        snr_db_min=first.get("snr_db_min"),
+        style=str(first.get("style_tag") or STYLE_READ),
+    )
+
+
+def _chart_with_table(caption: str, chart: Any, rows: Sequence[Any], empty: str) -> None:
+    """One instrument: its picture, then its numbers. Never one without the other.
+
+    The chart carries the shape and the table carries the numbers, and the table is the half
+    that survives being pasted into a plan file or a commit message. Both come from the same
+    computation — `findings_by_instrument` — so they cannot disagree.
+    """
+    if chart is not None:
+        st.altair_chart(chart, theme="streamlit")
+    else:
+        st.caption(empty)
+    st.caption(caption)
+    st.markdown(accent_view.to_markdown(list(rows)))
+
+
+def render_accent_charts(conn: sqlite3.Connection) -> None:
+    """The six chart-and-table pairs, for one stored attempt."""
+    st.subheader("Where your vowels sit, and where they are going")
+    st.caption(accent_charts.POST_HOC)
+
+    chosen_set = reference_set()
+    if not chosen_set:
+        return
+
+    context = baseline_context(conn)
+    attempts = measured_attempts(conn)
+    if not attempts:
+        st.info(
+            "No recording carries vowel measurements yet. Read something on the Practice tab.",
+            icon="🎙️",
+        )
+        return
+
+    labels = {
+        int(row["id"]): (
+            f"#{row['id']} · {row['created_at'][:16].replace('T', ' ')} · "
+            f"{row['accepted']} tokens · {str(row['reference_text'])[:40]}"
+        )
+        for row in attempts
+    }
+    attempt_id = st.selectbox(
+        "Which reading?",
+        options=list(labels),
+        format_func=lambda key: labels[key],
+        key="accent_chart_attempt",
+    )
+    measurement = measurement_for(conn, int(attempt_id))
+    if measurement is None:
+        st.caption("That attempt's tokens could not be read back.")
+        return
+
+    gate = vowel_measure.plot_gate(
+        measurement,
+        baseline_normaliser=context.normaliser,
+        baseline_style=context.style,
+    )
+    if not gate.ok or gate.normaliser is None:
+        st.info(gate.reason, icon="📐")
+        return
+    if gate.style_warning:
+        st.warning(gate.style_warning, icon="🗣️")
+
+    normaliser, minimum = gate.normaliser, gate.minimum_tokens
+    accepted = measurement.accepted
+    speaker = vowel_measure.positions(accepted, normaliser, minimum=minimum)
+    published = vowel_measure.reference_positions(
+        chosen_set, source=vowel_measure.REFERENCE_PUBLISHED
+    )
+    modelled = vowel_measure.reference_positions(chosen_set, source=vowel_measure.REFERENCE_VOICE)
+    grouped = vowel_measure.findings_by_instrument(
+        measurement, normaliser, reference_set=chosen_set, noise=context.noise, minimum=minimum
+    )
+
+    # 1. Rhoticity FIRST. For a General American target it is routinely the largest single gap
+    # on the page, and it is the most correctable thing on it.
+    st.markdown("### Rhoticity — F3 against F2")
+    rhotic = accent_charts.rhoticity_frame(accepted, modelled or published)
+    _chart_with_table(
+        "Every r-coloured token, not a category mean — r-colouring arrives on the stressed "
+        "NURSE and vanishes on the unstressed lettER, and a mean is the statistic that hides "
+        "exactly that. Lower is more r-coloured.",
+        accent_charts.rhoticity_chart(rhotic) if not rhotic.empty else None,
+        grouped.get(vowel_measure.RHOTICITY, []),
+        "No r-coloured vowel was measured in this reading.",
+    )
+
+    # 2. The quadrant, with an arrow per vowel.
+    st.markdown("### Vowel space — the arrow is the instruction")
+    quadrant = accent_charts.quadrant_frame(speaker, published, context.noise)
+    rings = accent_charts.noise_ring_frame(quadrant)
+    _chart_with_table(
+        "Each arrow runs from where you said the vowel to the General American target: its "
+        "direction is the instruction and its length is the priority. The faint ring is the "
+        "measurement noise floor — an arrow shorter than the ring is not a finding, and none "
+        "is drawn.",
+        accent_charts.quadrant_chart(quadrant, rings) if not quadrant.empty else None,
+        grouped.get(vowel_measure.POSITION, []),
+        "Nothing in this reading could be placed in the vowel space.",
+    )
+
+    # 3. Trajectories — the exit condition.
+    st.markdown("### Diphthongs — a stroke, or a dot")
+    strokes = accent_charts.trajectory_frame(
+        vowel_measure.trajectories(accepted, normaliser, minimum=minimum)
+    )
+    _chart_with_table(
+        "Each vowel drawn from 20% of its duration to 80%. A diphthong that is being "
+        "monophthongised renders as a dot where a native rendering renders as a stroke — and "
+        "the steady vowels beside it are what make that visible.",
+        accent_charts.trajectory_chart(strokes) if not strokes.empty else None,
+        grouped.get(vowel_measure.TRAJECTORY, []),
+        f"No vowel in this reading reached {vowel_measure.MIN_TRAJECTORY_MS:.0f} ms, the "
+        f"length a glide needs before the 20% and 80% analysis windows fit inside it.",
+    )
+
+    # 4. Pitch.
+    st.markdown("### Intonation — your contour against the model's")
+    render_pitch_overlay(conn, int(attempt_id), measurement, modelled, published, normaliser)
+
+    # 5. Duration.
+    st.markdown("### Vowel length")
+    durations = accent_charts.duration_frame(speaker, published, modelled)
+    _chart_with_table(
+        "Three bars, and the third is the one a difference can be read from. Hillenbrand's "
+        "durations are citation-form words read in isolation, so connected speech is bound to "
+        "look short against them by an amount that is the reference's artefact rather than "
+        "your accent. The model bar is the same passage in connected speech.",
+        accent_charts.duration_chart(durations) if not durations.empty else None,
+        grouped.get(vowel_measure.DURATION, []) + grouped.get(vowel_measure.REDUCTION, []),
+        "No vowel in this reading has a duration to compare.",
+    )
+
+    # 6. Rhythm.
+    st.markdown("### Rhythm")
+    render_rhythm_chart(conn, int(attempt_id), grouped)
+
+    with st.expander("What was refused, and why"):
+        st.markdown(accent_view.to_markdown(grouped.get(vowel_measure.REJECTED, [])))
+
+
+def stored_audio_bytes(conn: sqlite3.Connection, attempt_id: int) -> bytes | None:
+    """This attempt's kept recording, or None. Gitignored, so it can legitimately be gone."""
+    row = db.audio_for(conn, attempt_id)
+    if row is None:
+        return None
+    try:
+        return Path(str(row["path"])).read_bytes()
+    except OSError:
+        logger.warning("Kept recording missing for attempt %s", attempt_id)
+        return None
+
+
+def render_pitch_overlay(
+    conn: sqlite3.Connection,
+    attempt_id: int,
+    measurement: Any,
+    modelled: Mapping[str, Any],
+    published: Mapping[str, Any],
+    normaliser: Any,
+) -> None:
+    """Two contours on one time axis, plus the resynthesis that makes the gap audible."""
+    attempt = db.get_attempt(conn, attempt_id)
+    if attempt is None:
+        return
+    reference_text = str(attempt["reference_text"])
+    wav_bytes = stored_audio_bytes(conn, attempt_id)
+    if wav_bytes is None:
+        st.caption(
+            "This attempt's recording is no longer on disk, so there is no pitch track to "
+            "draw. Recordings live under a gitignored directory and are never committed."
+        )
+        return
+
+    renderings = native_model.renderings_for(conn, reference_text)
+    if not renderings:
+        st.caption(
+            f"The model has not read this text yet, so there is nothing to overlay. "
+            f"Capturing it costs about {native_model.estimate(reference_text, ['x'])[0]:,} "
+            f"characters of the monthly 500,000 and roughly "
+            f"{native_model.estimate(reference_text, ['x'])[1]:.0f} seconds of the 18,000."
+        )
+        if st.button("Capture the model's reading", key=f"capture_native_{attempt_id}"):
+            _capture_native(conn, reference_text)
+        return
+
+    user_words = _words_for(conn, attempt_id, reference_text)
+    if not user_words:
+        st.caption("This attempt's word timings could not be read back.")
+        return
+
+    anchors = accent_charts.word_anchors(user_words, renderings[0].words())
+    if len(anchors) < 2:
+        st.caption(
+            "The two readings could not be anchored on shared words, so there is no honest "
+            "way to put them on one time axis."
+        )
+        return
+
+    user_track = accent_resynth.pitch_track(wav_bytes)
+    model_tracks = []
+    for rendering in renderings:
+        audio = rendering.audio()
+        if audio is not None:
+            model_tracks.append(accent_resynth.pitch_track(audio))
+
+    frame = accent_charts.pitch_frame(user_track, model_tracks, anchors)
+    boundaries = accent_charts.word_boundary_frame(anchors)
+    rows = _pitch_findings(user_track, model_tracks)
+    _chart_with_table(
+        f"Both contours in semitones relative to each speaker's OWN median, never hertz — a "
+        f"low voice and a synthetic one only overlay meaningfully that way, and what is left "
+        f"on the chart is the SHAPE. Aligned on word starts, not by time-warping: a warp that "
+        f"minimises distance would hide the timing errors this page also measures. "
+        f"{len(model_tracks)} model voice(s).",
+        accent_charts.pitch_chart(frame, boundaries) if not frame.empty else None,
+        rows,
+        "No pitch could be tracked in this recording.",
+    )
+    render_resynthesis(
+        wav_bytes,
+        user_track,
+        model_tracks,
+        anchors,
+        attempt_id,
+        measurement,
+        modelled,
+        published,
+        normaliser,
+    )
+
+
+def _words_for(
+    conn: sqlite3.Connection, attempt_id: int, reference_text: str
+) -> list[dict[str, Any]]:
+    """The normalised words for a stored attempt, re-parsed from its verbatim payload."""
+    attempt = db.get_attempt(conn, attempt_id)
+    if attempt is None:
+        return []
+    try:
+        payload = json.loads(str(attempt["azure_raw_json"]))
+        payloads = payload if isinstance(payload, list) else [payload]
+        mode = Mode(str(attempt["mode"]))
+        _, _, words = speech_analyzer.normalise(payloads, reference_text, mode)
+        return list(words)
+    except Exception:  # an unreadable payload is a missing chart, not a crash
+        logger.warning("Could not re-parse attempt %s", attempt_id, exc_info=True)
+        return []
+
+
+def _pitch_findings(
+    user_track: Sequence[tuple[float, float]],
+    model_tracks: Sequence[Sequence[tuple[float, float]]],
+) -> list[Any]:
+    """Range and terminal slope, in semitones, for the four-column table."""
+    rows: list[Any] = []
+    mine_range = accent_charts.pitch_range_semitones(user_track)
+    model_ranges = [
+        value
+        for value in (accent_charts.pitch_range_semitones(track) for track in model_tracks)
+        if value is not None
+    ]
+    target_range = statistics.fmean(model_ranges) if model_ranges else None
+    rows.append(
+        vowel_measure.Finding(
+            feature="Pitch range (10th–90th percentile)",
+            user=("—" if mine_range is None else f"{mine_range:.1f} st"),
+            target=("—" if target_range is None else f"{target_range:.1f} st"),
+            delta=(
+                "Not measurable from this recording."
+                if mine_range is None or target_range is None
+                else (
+                    f"{mine_range - target_range:+.1f} st → "
+                    + (
+                        "your pitch moves less than the model's; a narrow range reads as flat "
+                        "regardless of how accurate the sounds are"
+                        if mine_range < target_range
+                        else "your pitch moves more than the model's"
+                    )
+                )
+            ),
+        )
+    )
+    mine_slope = accent_charts.terminal_slope_semitones(user_track)
+    model_slopes = [
+        value
+        for value in (accent_charts.terminal_slope_semitones(track) for track in model_tracks)
+        if value is not None
+    ]
+    target_slope = statistics.fmean(model_slopes) if model_slopes else None
+    rows.append(
+        vowel_measure.Finding(
+            feature="Terminal slope (last 0.35 s)",
+            user=("—" if mine_slope is None else f"{mine_slope:+.1f} st"),
+            target=("—" if target_slope is None else f"{target_slope:+.1f} st"),
+            delta=(
+                "Not measurable from this recording."
+                if mine_slope is None or target_slope is None
+                else (
+                    f"{mine_slope - target_slope:+.1f} st → "
+                    + (
+                        "your phrase does not fall as far at the end. A level or rising "
+                        "terminal on a statement reads as uncertainty in General American."
+                        if mine_slope > target_slope
+                        else "your phrase falls at least as far as the model's at the end"
+                    )
+                )
+            ),
+        )
+    )
+    return rows
+
+
+def render_resynthesis(
+    wav_bytes: bytes,
+    user_track: Sequence[tuple[float, float]],
+    model_tracks: Sequence[Sequence[tuple[float, float]]],
+    anchors: Sequence[Any],
+    attempt_id: int,
+    measurement: Any,
+    modelled: Mapping[str, Any],
+    published: Mapping[str, Any],
+    normaliser: Any,
+) -> None:
+    """Your own voice with the model's intonation, played after your own voice unchanged.
+
+    **The ordering is the feature, not the layout.** A modified clip heard alone teaches
+    nothing — the listener has nothing to difference it against and hears whatever they
+    expected to hear. Original first, labelled, every time.
+    """
+    st.markdown("#### Hear it — your voice, one thing changed")
+    st.caption(accent_resynth.OWN_VOICE_NOTICE)
+
+    if not model_tracks:
+        st.caption("No model contour has been captured for this text yet.")
+        return
+
+    key = f"resynth_{attempt_id}"
+    # In the brief's order of value: intonation is the one that lands hardest, timing makes
+    # under-reduction audible, and the single-vowel shift is the narrowest and most fragile.
+    intonation, timing, vowel = st.columns(3)
+
+    def run(label: str, build: Any) -> None:
+        try:
+            st.session_state[key] = build()
+        except accent_resynth.ResynthesisError as exc:
+            st.session_state.pop(key, None)
+            st.warning(str(exc), icon="🎚️")
+
+    if intonation.button("Native intonation", key=f"{key}_pitch"):
+        run(
+            "pitch",
+            lambda: accent_resynth.corrected_pitch(
+                wav_bytes, _target_contour(model_tracks, anchors)
+            ),
+        )
+    if timing.button("Native vowel lengths", key=f"{key}_timing"):
+        run(
+            "timing",
+            lambda: accent_resynth.corrected_timing(
+                wav_bytes, _duration_stretches(measurement, modelled)
+            ),
+        )
+    if vowel.button("Fix one vowel", key=f"{key}_vowel"):
+        run(
+            "vowel",
+            lambda: _correct_worst_vowel(wav_bytes, measurement, published, normaliser),
+        )
+
+    result = st.session_state.get(key)
+    if result is None:
+        return
+
+    # ORIGINAL FIRST. Always, in this order, both labelled.
+    st.caption(f"**1. {accent_resynth.ORIGINAL_LABEL}**")
+    st.audio(wav_bytes, format="audio/wav")
+    st.caption(f"**2. {result.label}**")
+    st.audio(result.audio, format="audio/wav")
+    if result.note:
+        st.info(result.note, icon="🎚️")
+
+
+def _duration_stretches(
+    measurement: Any, modelled: Mapping[str, Any]
+) -> list[tuple[float, float, float]]:
+    """(start, end, ratio) per vowel, toward the model's connected-speech durations.
+
+    Against the MODEL table and never the published one: Hillenbrand's durations are
+    citation-form words read in isolation, so stretching a vowel toward one of those would
+    make every vowel in the clip roughly three times too long — a demonstration of the
+    reference's artefact rather than of the speaker's timing.
+    """
+    stretches: list[tuple[float, float, float]] = []
+    for token in measurement.accepted:
+        target = modelled.get(token.vowel)
+        if target is None or not target.duration_ms or not token.duration_ms:
+            continue
+        stretches.append((token.start_s, token.end_s, target.duration_ms / token.duration_ms))
+    return stretches
+
+
+def _correct_worst_vowel(
+    wav_bytes: bytes, measurement: Any, published: Mapping[str, Any], normaliser: Any
+) -> Any:
+    """Shift the single worst-placed vowel token and leave the rest of the clip untouched.
+
+    The worst token, not the worst category: the point of this surface is that everything
+    either side is bit-identical, so it has to act on one span of audio.
+
+    **Chosen and shifted in z, never in raw hertz.** Formants scale with vocal tract length,
+    so ranking tokens by their hertz distance to a reference talker's mean picks whichever
+    vowel carries the largest ANATOMICAL offset — a speaker with a longer tract has every F2
+    low, and the demonstration would then shift a vowel toward the reference's larynx rather
+    than toward the target accent. The gap is measured in the speaker's own normalised space,
+    and the target is mapped back out through `Normaliser.hz` to ask the only question the
+    manipulation can act on: where would THIS speaker's F2 be if the vowel sat on target.
+    """
+    worst: tuple[Any, float] | None = None
+    worst_gap = 0.0
+    for token in measurement.accepted:
+        target = published.get(token.vowel)
+        if target is None or target.f2_z is None or token.at50.f2 is None:
+            continue
+        _, produced_z, _ = normaliser.z(token.at50)
+        if produced_z is None:
+            continue
+        gap = abs(target.f2_z - produced_z)
+        if gap > worst_gap:
+            _, aim_hz = normaliser.hz(None, target.f2_z)
+            if aim_hz is None or aim_hz <= 0:
+                continue
+            worst, worst_gap = (token, aim_hz), gap
+    if worst is None:
+        raise accent_resynth.ResynthesisError(
+            "No vowel in this recording has both a measurement and a target to move toward."
+        )
+    token, aim_hz = worst
+    return accent_resynth.corrected_vowel(
+        wav_bytes, token.start_s, token.end_s, float(token.at50.f2), float(aim_hz)
+    )
+
+
+def _target_contour(
+    model_tracks: Sequence[Sequence[tuple[float, float]]], anchors: Sequence[Any]
+) -> list[tuple[float, float]]:
+    """The model's contour on the USER's clock, in semitones, averaged across voices.
+
+    Averaged rather than one voice picked: a single synthesiser's contour carries its own
+    habits, and what should transfer is the General American tendency.
+    """
+    per_time: dict[float, list[float]] = {}
+    for track in model_tracks:
+        if not track:
+            continue
+        median = statistics.median([hz for _, hz in track])
+        for model_time, hz in track:
+            mapped = accent_charts.to_user_clock(model_time, anchors)
+            if mapped is None:
+                continue
+            per_time.setdefault(round(mapped, 2), []).append(accent_resynth.semitones(hz, median))
+    return [(time_s, statistics.fmean(values)) for time_s, values in sorted(per_time.items())]
+
+
+def render_rhythm_chart(
+    conn: sqlite3.Connection, attempt_id: int, grouped: Mapping[str, Any]
+) -> None:
+    """One bar per vocalic interval, plus the nPVI figure against the TTS baseline."""
+    attempt = db.get_attempt(conn, attempt_id)
+    if attempt is None:
+        return
+    words = _words_for(conn, attempt_id, str(attempt["reference_text"]))
+    if not words:
+        st.caption("This attempt's timings could not be read back.")
+        return
+
+    runs = rhythm.vocalic_intervals(words)
+    measured = rhythm.npvi(words)
+    baseline = rhythm.baseline()
+    reference_npvi = baseline.rhythm.npvi if baseline is not None else None
+    gap = vowel_measure.rhythm_gap(measured.npvi, reference_npvi)
+
+    rows = [
+        vowel_measure.Finding(
+            feature="Rhythm — nPVI over vocalic intervals",
+            user=(
+                "—"
+                if measured.npvi is None
+                else f"{measured.npvi:.1f} ({measured.pairs} pairs, {measured.runs} stretches)"
+            ),
+            target=("—" if reference_npvi is None else f"{reference_npvi:.1f} (TTS baseline)"),
+            delta=(
+                gap.detail
+                if gap is not None
+                else (
+                    "Not enough connected speech to measure rhythm."
+                    if measured.npvi is None
+                    else "Within a point of the reference."
+                )
+            ),
+        )
+    ]
+    frame = accent_charts.rhythm_frame(runs)
+    _chart_with_table(
+        "One bar per vowel, in the order you said them, broken at every pause — nPVI is "
+        "computed inside unbroken stretches and never across one. A row of near-equal bars is "
+        "what a syllable-timed rhythm carried into English looks like.",
+        accent_charts.rhythm_chart(frame) if not frame.empty else None,
+        rows,
+        "Not enough connected speech in this reading to draw a rhythm.",
+    )
+
+
+def _capture_native(conn: sqlite3.Connection, reference_text: str) -> None:
+    """Buy the model's reading of this text. Says what it spent, afterwards."""
+    voice = tts.voice_name()
+    try:
+        with st.spinner(f"Synthesising and assessing with {voice}…"):
+            rendering = native_model.capture(conn, reference_text, voice)
+    except Exception as exc:  # noqa: BLE001 — every failure here is a message, not a crash
+        st.error(utils.redact(str(exc)), icon="💸")
+        return
+    tts_left = budget.tts_meter(conn).remaining
+    stt_left = budget.stt_meter(conn).remaining
+    st.success(
+        f"Captured {voice}: {rendering.characters:,} characters and "
+        f"{rendering.seconds:.0f} seconds. Remaining this month: {tts_left:,.0f} characters, "
+        f"{stt_left:,.0f} seconds.",
+        icon="✅",
+    )
+    st.rerun()
+
+
 def render_room_check(conn: sqlite3.Connection) -> None:
     """Five seconds, one number, and a plain answer about whether this room can be measured."""
     st.subheader("Room and microphone check")
@@ -1849,6 +2607,7 @@ def render_accent(conn: sqlite3.Connection) -> None:
         st.caption(f"Scoring against the **{chosen}** reference set.")
 
     render_baseline(conn)
+    render_accent_charts(conn)
     render_calibration(conn)
     with st.expander("Check the room first"):
         render_room_check(conn)

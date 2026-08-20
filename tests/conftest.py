@@ -175,6 +175,60 @@ def synth_vowel(
     return signal / peak * amplitude if peak else signal
 
 
+def _resonate_gliding(
+    signal: Any, start_hz: float, end_hz: float, bandwidth: float, rate: int
+) -> Any:
+    """A two-pole resonator whose centre frequency slides from `start_hz` to `end_hz`.
+
+    The coefficients are recomputed per sample rather than per segment. Concatenating short
+    steady segments would be simpler and wrong: each resonator starts from zero state, so the
+    joins ring, and the formant tracker reads the ringing rather than the glide.
+    """
+    import math
+
+    import numpy as np
+
+    out = np.zeros_like(signal)
+    count = max(len(signal) - 1, 1)
+    radius = math.exp(-math.pi * bandwidth / rate)
+    second = -radius * radius
+    for index in range(len(signal)):
+        frequency = start_hz + (end_hz - start_hz) * (index / count)
+        first = 2 * radius * math.cos(2 * math.pi * frequency / rate)
+        previous = out[index - 1] if index >= 1 else 0.0
+        before = out[index - 2] if index >= 2 else 0.0
+        out[index] = signal[index] + first * previous + second * before
+    return out
+
+
+def synth_glide(
+    start: tuple[float, ...],
+    end: tuple[float, ...],
+    seconds: float,
+    *,
+    f0: float = 120.0,
+    rate: int = SAMPLE_RATE,
+    amplitude: float = 0.5,
+) -> Any:
+    """A vowel whose formants slide from `start` to `end`. What makes a diphthong a diphthong.
+
+    `synth_vowel` can only produce a monophthong, so it cannot be used to test the one thing
+    the trajectory chart exists to show. A signal whose F2 provably moves by a known amount is
+    the only honest way to ask whether the pipeline can see that it moved.
+    """
+    import numpy as np
+
+    count = int(seconds * rate)
+    source = np.zeros(count)
+    source[:: int(rate / f0)] = 1.0
+    signal = _resonate(source, _GLOTTAL_POLE_HZ, _GLOTTAL_BANDWIDTH_HZ, rate)
+    pairs = list(zip(tuple(start) + UPPER_FORMANTS, tuple(end) + UPPER_FORMANTS))
+    for position, (first, last) in enumerate(pairs):
+        signal = _resonate_gliding(signal, first, last, 60.0 + 30.0 * position, rate)
+    peak = float(np.max(np.abs(signal)))
+    return signal / peak * amplitude if peak else signal
+
+
 def synth_noise(seconds: float, *, rate: int = SAMPLE_RATE, amplitude: float = 0.01) -> Any:
     """Low-level noise, standing in for a consonant or for room tone between words."""
     import numpy as np

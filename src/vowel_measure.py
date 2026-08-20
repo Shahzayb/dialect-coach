@@ -50,6 +50,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import acoustics
+import model_reference
 import phoneme_reference
 import speech_analyzer
 import stress_lexicon
@@ -71,6 +72,29 @@ VOCALIC_KINDS = stress_lexicon.VOCALIC_KINDS
 # 10 ms timing grid: a 90 ms vowel already carries about ±11% quantisation error on its
 # duration, so this floor is coarse by necessity rather than by choice.
 MIN_VOWEL_MS = 45.0
+
+# --- And a HIGHER floor for the trajectory, which is a different measurement -----------------
+#
+# **Found by running the model-reference capture, not by reasoning about it.** The measured
+# /eɪ/ FACE came out gliding -225 Hz, backwards, where General American glides about +140. The
+# per-token dump said why: on "same" the 80% sample read F2 1285 Hz and F1 240 Hz — those are
+# the following /m/, not the vowel.
+#
+# The arithmetic is forced. `acoustics.WINDOW_LENGTH_S` is 25 ms, so a sample at 80% of the
+# duration is analysed over a window reaching 12.5 ms past it. To keep that window inside the
+# vowel:
+#
+#     0.8 * d + 12.5 <= d   ->   d >= 62.5 ms
+#
+# and the 20% point needs the same by symmetry. Azure's timing sits on a 10 ms grid, so a
+# boundary can be out by that much at each end; 90 ms is 62.5 plus that margin, rounded.
+#
+# **A short token is still fine for POSITION.** The 50% window fits inside anything past 25 ms,
+# so a brief vowel still says where the tongue was — it just cannot say where the tongue WENT.
+# Only the trajectory is refused, which is why this is a property of the token rather than a
+# rejection: throwing the token away would cost the position measurement to protect the
+# trajectory one, and connected speech is full of 60 ms vowels.
+MIN_TRAJECTORY_MS = 90.0
 
 # How much of a token's middle the pitch tracker must call voiced. Formant analysis of an
 # unvoiced span measures a whisper, or the frication of the consonant next door.
@@ -95,6 +119,23 @@ REJECT_OUT_OF_RANGE = "segment falls outside the audio"
 REJECT_NO_FORMANTS = "no usable formant estimate"
 
 _TICKS_PER_SECOND = speech_analyzer.TICKS_PER_SECOND
+
+# --- Which reference a surface is measured against -------------------------------------------
+# Declared up here rather than beside the table renderer because they are DEFAULT ARGUMENT
+# VALUES for `reference_positions` and friends, and a default is evaluated at def time.
+#
+# The three do not coincide and are never averaged together. `REFERENCE_PUBLISHED` is
+# Hillenbrand et al. (1995) — real humans, peer-reviewed, twelve vowels of citation-form /hVd/
+# speech. `REFERENCE_VOICE` is `model_reference.py` — the whole 22-vowel inventory in connected
+# speech, measured through this project's own pipeline from sixteen current en-US neural
+# voices. `REFERENCE_SELF` is the speaker, used where no external target exists at all (how far
+# their unstressed vowels sit from their OWN schwa centroid).
+#
+# Imitating a synthesised voice can move a token AWAY from the published mean while sounding
+# better to a listener, which is exactly why every surface names the one it used.
+REFERENCE_PUBLISHED = "Hillenbrand 1995"
+REFERENCE_VOICE = "TTS voice, same pipeline"
+REFERENCE_SELF = "your own speech"
 
 
 @dataclass(frozen=True)
@@ -123,11 +164,29 @@ class Token:
     rejected_reason: str = ""
 
     @property
+    def trajectory_usable(self) -> bool:
+        """Whether this token is long enough for its 20% and 80% windows to fit inside it.
+
+        See `MIN_TRAJECTORY_MS`. Below it the edge samples analyse the neighbouring consonants
+        and the "glide" they report is co-articulation, measured confidently and pointing
+        wherever the neighbours happen to sit.
+        """
+        return (
+            self.duration_ms >= MIN_TRAJECTORY_MS
+            and self.at20.f2 is not None
+            and self.at80.f2 is not None
+        )
+
+    @property
     def f2_travel(self) -> float | None:
-        """Signed F2 movement from 20% to 80%. A monophthong sits near zero."""
-        if self.at20.f2 is None or self.at80.f2 is None:
+        """Signed F2 movement from 20% to 80%. A monophthong sits near zero.
+
+        None for a token too short to measure a glide in — refusing, rather than returning a
+        number that describes the consonants on either side.
+        """
+        if not self.trajectory_usable:
             return None
-        return self.at80.f2 - self.at20.f2
+        return self.at80.f2 - self.at20.f2  # type: ignore[operator]
 
     @property
     def f3_minus_f2(self) -> float | None:
@@ -485,6 +544,21 @@ class Normaliser:
             _z(point.f3, self.f3_mean, self.f3_sd),
         )
 
+    def hz(self, f1_z: float | None, f2_z: float | None) -> tuple[float | None, float | None]:
+        """`z` inverted: where a normalised position sits in THIS speaker's own hertz.
+
+        What it is for: a reference target is a position in z, and anything that has to act on
+        the audio — shifting a formant, naming a frequency — needs hertz. Reading the target's
+        hertz straight off the reference table would import the reference talker's vocal tract
+        along with the target, which is the error normalisation exists to prevent. Mapping the
+        target z back through the SPEAKER's own mean and SD asks the right question instead:
+        where would this speaker's F2 be if the vowel sat where the target sits.
+        """
+        return (
+            None if f1_z is None else f1_z * self.f1_sd + self.f1_mean,
+            None if f2_z is None else f2_z * self.f2_sd + self.f2_mean,
+        )
+
 
 def _z(value: float | None, mean: float | None, sd: float | None) -> float | None:
     if value is None or mean is None or sd is None or sd <= 0:
@@ -570,9 +644,34 @@ def _normaliser_from(means: Mapping[str, FormantPoint]) -> Normaliser:
     )
 
 
-def reference_normaliser(reference_set: str) -> Normaliser:
-    """The published table's own normaliser, built the same way over its own 12 categories."""
-    table = vowel_reference.REFERENCE_SETS.get(reference_set)
+def _reference_table(
+    reference_set: str, source: str
+) -> Mapping[str, vowel_reference.ReferenceVowel]:
+    """One of the two General American tables. **Never a blend of them.**
+
+    `REFERENCE_PUBLISHED` is Hillenbrand et al. (1995): real humans, peer-reviewed, twelve
+    vowels of citation-form /hVd/ speech recorded in the early 1990s. `REFERENCE_VOICE` is
+    `model_reference.py`: the whole 22-vowel inventory in connected speech, measured through
+    this project's own pipeline, from sixteen current en-US neural voices.
+
+    They answer different questions and they are never averaged — a mean of a human corpus and
+    a synthesiser set describes nothing at all. Every surface names which one it used, which is
+    what `REFERENCE_PUBLISHED` and `REFERENCE_VOICE` have existed for since v0.10.0.
+    """
+    if source == REFERENCE_VOICE:
+        return model_reference.REFERENCE_SETS.get(reference_set, {})
+    return vowel_reference.REFERENCE_SETS.get(reference_set, {})
+
+
+def reference_normaliser(reference_set: str, *, source: str = REFERENCE_PUBLISHED) -> Normaliser:
+    """A reference table's own normaliser, built the same way over its own categories.
+
+    Each table is normalised over ITS OWN inventory, not over a shared subset. A z-score is
+    relative to whatever inventory produced it, so a speaker normalised over twelve categories
+    and a reference normalised over twenty-two are not comparable — which is why
+    `REFERENCE_CATEGORIES` pins the speaker's side to the published twelve.
+    """
+    table = _reference_table(reference_set, source)
     if not table:
         raise TooFewTokens(
             f"{reference_set!r} is not a reference set. Choose 'men' or 'women' — and never "
@@ -613,6 +712,11 @@ class VowelPosition:
     f2_travel_hz: float | None
     f3_minus_f2_hz: float | None
     rms_dbfs: float | None
+    # How many of `n` were long enough to measure a GLIDE in, which is a stricter test than
+    # being long enough to measure a position in — see `MIN_TRAJECTORY_MS`. Carried so a
+    # trajectory row can say "0 of 14 tokens were long enough" instead of a bare "not
+    # measurable", which reads like a bug rather than a fact about connected speech.
+    n_trajectory: int = 0
 
     @property
     def has_reference(self) -> bool:
@@ -654,14 +758,17 @@ def positions(
             f2_travel_hz=_mean_of(token.f2_travel for token in group),
             f3_minus_f2_hz=_mean_of(token.f3_minus_f2 for token in group),
             rms_dbfs=_mean_of(token.rms_dbfs for token in group),
+            n_trajectory=sum(1 for token in group if token.trajectory_usable),
         )
     return found
 
 
-def reference_positions(reference_set: str) -> dict[str, VowelPosition]:
-    """The published means in the reference's own Lobanov space, for direct comparison."""
-    table = vowel_reference.REFERENCE_SETS.get(reference_set, {})
-    normaliser = reference_normaliser(reference_set)
+def reference_positions(
+    reference_set: str, *, source: str = REFERENCE_PUBLISHED
+) -> dict[str, VowelPosition]:
+    """A reference table's means in its own Lobanov space, for direct comparison."""
+    table = _reference_table(reference_set, source)
+    normaliser = reference_normaliser(reference_set, source=source)
     found: dict[str, VowelPosition] = {}
     for symbol, entry in table.items():
         point = FormantPoint(
@@ -681,6 +788,119 @@ def reference_positions(reference_set: str) -> dict[str, VowelPosition]:
             f2_travel_hz=entry.f2_travel,
             f3_minus_f2_hz=entry.at50.f3_minus_f2,
             rms_dbfs=None,
+            n_trajectory=entry.n,
+        )
+    return found
+
+
+# --- Trajectories ------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Trajectory:
+    """Where one vowel STARTS and where it ENDS, in the shared normalised space.
+
+    `VowelPosition` carries the 50% point and a scalar `f2_travel_hz`, which is enough for a
+    table row and not enough for a chart: a scalar says how far the tongue moved and not in
+    which direction. A diphthong is a gesture, and the only honest way to draw one is as the
+    stroke it actually is — from the 20% point to the 80% point, in the same space the
+    monophthongs are plotted in.
+
+    **20% and 80%, not 25% and 75%.** `acoustics.SAMPLE_POINTS` uses the proportions
+    Hillenbrand's own file sampled at, so the speaker and the reference are measured at the
+    same places. A 25/75 sample against a 20/80 reference is a small systematic bias that lands
+    hardest on exactly these vowels.
+    """
+
+    vowel: str
+    n: int
+    start_f1_z: float | None
+    start_f2_z: float | None
+    end_f1_z: float | None
+    end_f2_z: float | None
+    travel_hz: float | None  # signed F2 movement, the number the table reports
+
+    @property
+    def length_z(self) -> float | None:
+        """How long the stroke is. A monophthongised diphthong renders as a dot."""
+        if None in (self.start_f1_z, self.start_f2_z, self.end_f1_z, self.end_f2_z):
+            return None
+        return math.hypot(
+            float(self.end_f1_z) - float(self.start_f1_z),  # type: ignore[arg-type]
+            float(self.end_f2_z) - float(self.start_f2_z),  # type: ignore[arg-type]
+        )
+
+
+def trajectories(
+    tokens: Sequence[Token], normaliser: Normaliser, *, minimum: int = MIN_TOKENS_PER_CATEGORY
+) -> dict[str, Trajectory]:
+    """Per-vowel 20%→80% strokes, in z-units. Every vowel, not only the diphthongs.
+
+    Monophthongs are included deliberately: a chart that only draws the diphthongs cannot show
+    that they are the ones that move. A steady vowel's stroke is its own noise floor, and
+    seeing /i/ sit still next to a flattened /eɪ/ is what makes the flattening legible.
+    """
+    grouped: dict[str, list[Token]] = {}
+    for token in tokens:
+        # `trajectory_usable`, not `at50.usable`: a stroke drawn from a token too short to
+        # measure a glide in is a picture of the neighbouring consonants.
+        if token.accepted and token.trajectory_usable:
+            grouped.setdefault(token.vowel, []).append(token)
+
+    found: dict[str, Trajectory] = {}
+    for vowel, group in sorted(grouped.items()):
+        if len(group) < minimum:
+            continue
+        start = FormantPoint(
+            f1=_mean_of(token.at20.f1 for token in group),
+            f2=_mean_of(token.at20.f2 for token in group),
+            f3=None,
+            b1=None,
+            b2=None,
+            b3=None,
+        )
+        end = FormantPoint(
+            f1=_mean_of(token.at80.f1 for token in group),
+            f2=_mean_of(token.at80.f2 for token in group),
+            f3=None,
+            b1=None,
+            b2=None,
+            b3=None,
+        )
+        start_f1, start_f2, _ = normaliser.z(start)
+        end_f1, end_f2, _ = normaliser.z(end)
+        found[vowel] = Trajectory(
+            vowel=vowel,
+            n=len(group),
+            start_f1_z=start_f1,
+            start_f2_z=start_f2,
+            end_f1_z=end_f1,
+            end_f2_z=end_f2,
+            travel_hz=_mean_of(token.f2_travel for token in group),
+        )
+    return found
+
+
+def reference_trajectories(
+    reference_set: str, *, source: str = REFERENCE_PUBLISHED
+) -> dict[str, Trajectory]:
+    """The reference table's own strokes, in its own Lobanov space."""
+    table = _reference_table(reference_set, source)
+    normaliser = reference_normaliser(reference_set, source=source)
+    found: dict[str, Trajectory] = {}
+    for symbol, entry in table.items():
+        start = FormantPoint(f1=entry.at20.f1, f2=entry.at20.f2, f3=None, b1=None, b2=None, b3=None)
+        end = FormantPoint(f1=entry.at80.f1, f2=entry.at80.f2, f3=None, b1=None, b2=None, b3=None)
+        start_f1, start_f2, _ = normaliser.z(start)
+        end_f1, end_f2, _ = normaliser.z(end)
+        found[symbol] = Trajectory(
+            vowel=symbol,
+            n=entry.n,
+            start_f1_z=start_f1,
+            start_f2_z=start_f2,
+            end_f1_z=end_f1,
+            end_f2_z=end_f2,
+            travel_hz=entry.f2_travel,
         )
     return found
 
@@ -1051,14 +1271,18 @@ COLUMNS: tuple[str, str, str, str] = (
     "Delta / Adjustment Needed",
 )
 
-# Which reference a surface is measured against. The two do NOT coincide, and imitating the
-# voice can move a token AWAY from the published mean while sounding better — so every surface
-# says which one it used, and they are never averaged together.
-REFERENCE_PUBLISHED = "Hillenbrand 1995"
-REFERENCE_VOICE = "TTS voice, same pipeline"
-REFERENCE_SELF = "your own speech"
-
 WITHIN_NOISE = "Within measurement noise"
+
+# Appended to any trajectory instruction scored against the published table. Hillenbrand's
+# /hVd/ words were read in isolation and these are not, so the comparison is indicative rather
+# than like-for-like — the same class of mismatch caveat 3 forbids outright for durations.
+CITATION_CAVEAT = "(target is citation-form speech; treat as indicative)"
+
+# How far F3−F2 may sit from its target before the gap is worth an instruction. Inherited from
+# the threshold the pre-v0.11.0 code already used, now applied symmetrically: r-colouring
+# measured within this much of the target — in EITHER direction — is reported as being in the
+# band rather than converted into a gesture to change.
+RHOTICITY_TOLERANCE_HZ = 150.0
 
 
 def _feature(vowel: str, metric: str) -> str:
@@ -1129,6 +1353,16 @@ def _position_findings(
 def _position_instruction(
     vowel: str, label: str, delta: float | None, noise: NoiseFloor | None
 ) -> str:
+    """The signed delta, plus the articulatory instruction it implies for THIS vowel.
+
+    The instruction is **looked up** from `vowel_reference.ARTICULATION`, never composed here.
+    Until v0.11.0 this function generated it from the sign alone — "tongue further front, lips
+    spread" for a positive F2 delta and "tongue further back, lips rounder" for a negative one,
+    for every vowel in the inventory. That is right for the front unrounded vowels and **wrong
+    for the back rounded ones**: F2 responds to lip posture as strongly as to tongue
+    advancement, so a learner whose /u/ sits too high in F2 has almost always under-rounded
+    rather than fronted, and "move your tongue back" sends them to fix the wrong articulator.
+    """
     if delta is None:
         return "Not measurable from this recording."
     if noise is not None and noise.within_noise(vowel, delta):
@@ -1144,24 +1378,40 @@ def _position_instruction(
             f" (band widened ×{widened:g}: the 1995 reference predates the low-back merger "
             f"and GOOSE-fronting, so a deviation here may be a change it did not see)"
         )
-    if label.startswith("F1"):
-        # Higher F1 means a more open vowel: the jaw is lower and the tongue further from the
-        # palate. So a positive delta — target above the speaker — asks for more openness.
-        move = "open the jaw further, tongue lower" if delta > 0 else "close the jaw, tongue higher"
-    else:
-        # Higher F2 means a fronter vowel with spread lips.
-        move = (
-            "tongue further front, lips spread"
-            if delta > 0
-            else "tongue further back, lips rounder"
-        )
+    if vowel_reference.is_merging(vowel):
+        # Not an error class — a sound change in progress. Said before the instruction so a
+        # reader does not start drilling a merger back apart.
+        caveat = f" {vowel_reference.MERGING_NOTE}{caveat}"
+    formant = "F1" if label.startswith("F1") else "F2"
+    move = vowel_reference.instruction_for(vowel, formant, delta)
+    if not move:
+        # An inventory member with no entry, which a test forbids — but a missing instruction
+        # must render as an honest blank rather than as a generated guess.
+        return f"{_signed(delta, 'z', 2)} → no articulatory instruction for this vowel{caveat}"
     return f"{_signed(delta, 'z', 2)} → {move}{caveat}"
 
 
 def _trajectory_findings(
     speaker: Mapping[str, VowelPosition], reference: Mapping[str, VowelPosition]
 ) -> list[Finding]:
-    """F2 travel from 20% to 80% — whether a diphthong is a diphthong."""
+    """F2 travel from 20% to 80% — whether a diphthong is a diphthong.
+
+    **The sign of the travel is checked before any instruction is given**, and that guard was
+    added after the model-reference capture showed what happens without it. In connected speech
+    a diphthong's 80% window routinely lands in the following segment: measured across sixteen
+    neural voices, FACE came out travelling backwards, because "same" ends in a nasal whose
+    murmur reads as F1 240 Hz and "way" is followed by the word "I".
+
+    A backwards travel is not a small glide, and "widen the glide" is the wrong thing to say
+    about it — the vowel may be fine and the measurement contaminated. So a travel whose sign
+    disagrees with the reference is reported as unmeasurable in this context, with the reason,
+    rather than converted into an instruction.
+
+    Note also that the only published targets available are Hillenbrand's, measured on
+    citation-form /hVd/ words read in isolation. That is a gentler mismatch than it is for
+    durations — a glide's EXTENT survives shortening better than its length does — but it is a
+    mismatch, and the row says so instead of implying like-for-like.
+    """
     found: list[Finding] = []
     for vowel, position in sorted(speaker.items()):
         entry = phoneme_reference.lookup(vowel)
@@ -1170,20 +1420,47 @@ def _trajectory_findings(
         target = reference.get(vowel)
         target_travel = target.f2_travel_hz if target else None
         delta = _delta(target_travel, position.f2_travel_hz)
-        if target_travel is None:
+        if position.n_trajectory == 0:
+            # Said plainly, because the alternative reads as a defect. A vowel can be measured
+            # for POSITION and still be too short to measure a GLIDE in — connected speech is
+            # full of 60 ms diphthongs, and at that length the edge windows analyse the
+            # neighbouring consonants rather than the vowel.
+            instruction = (
+                f"None of the {position.n} token(s) reached {MIN_TRAJECTORY_MS:.0f} ms, the "
+                f"length a glide needs before the 20% and 80% analysis windows fit inside the "
+                f"vowel. Refused rather than measuring the consonants on either side."
+            )
+        elif target_travel is None:
             instruction = (
                 "No published GA reference for this diphthong. Travel is recorded, not scored."
             )
         elif delta is None:
             instruction = "Not measurable from this recording."
+        elif (position.f2_travel_hz or 0.0) * target_travel < 0:
+            # The glide is measured running the OPPOSITE way to the reference. Almost always
+            # the 80% window landing in the next segment rather than a real reversal, and
+            # neither "widen the glide" nor "monophthongised" is a safe thing to say about it.
+            instruction = (
+                f"Measured travelling the opposite way to the target "
+                f"({_signed(position.f2_travel_hz, 'Hz')} against "
+                f"{_signed(target_travel, 'Hz')}). In connected speech that is usually the "
+                f"80% sample landing in the following sound rather than a reversed glide, so "
+                f"no instruction is given. Drill this vowel in a slower, longer word to "
+                f"measure it cleanly."
+            )
         elif abs(position.f2_travel_hz or 0.0) < abs(target_travel) * 0.5:
-            instruction = f"{_signed(delta, 'Hz')} → monophthongised; glide, do not hold"
+            instruction = (
+                f"{_signed(delta, 'Hz')} → monophthongised; glide, do not hold {CITATION_CAVEAT}"
+            )
         else:
-            instruction = f"{_signed(delta, 'Hz')} → widen the glide"
+            instruction = f"{_signed(delta, 'Hz')} → widen the glide {CITATION_CAVEAT}"
         found.append(
             Finding(
                 feature=_feature(vowel, "F2 travel 20→80%"),
-                user=_with_count(_signed(position.f2_travel_hz, "Hz"), position.n),
+                user=_with_count(
+                    _signed(position.f2_travel_hz, "Hz"),
+                    position.n_trajectory,
+                ),
                 target=_signed(target_travel, "Hz") if target_travel is not None else "—",
                 delta=instruction,
             )
@@ -1217,12 +1494,23 @@ def _rhoticity_findings(
         delta = _delta(target_value, position.f3_minus_f2_hz)
         if delta is None:
             instruction = "Not measurable from this recording."
-        elif delta < -150:
-            instruction = f"{_signed(delta, 'Hz')} → r-colouring is strong enough"
+        elif abs(delta) <= RHOTICITY_TOLERANCE_HZ:
+            instruction = f"{_signed(delta, 'Hz')} → r-colouring is within the tolerance band"
         else:
+            # **`delta` is passed through UNCHANGED, and that is the whole point.** It is
+            # `target − produced` on F3−F2, and `Instruction.f3_raise` / `f3_lower` are keyed
+            # on the same convention: `f3_lower` is what to say when the target sits BELOW the
+            # speaker. A negative delta means the speaker's F3 sits further above F2 than the
+            # target's — r-colouring that has not arrived — and asks for a lower F3, which is
+            # `f3_lower`, "bunch the tongue". Negating first looks like it corrects for F3−F2
+            # being a difference rather than a formant. It does not: it inverts every
+            # r-colouring instruction on the surface, telling an under-rhotic speaker to
+            # release the bunching. Guarded by a test that names both directions.
+            move = vowel_reference.instruction_for(vowel, "F3", delta)
             instruction = (
-                f"{_signed(delta, 'Hz')} → F3 is sitting too high above F2: not enough "
-                f"r-colouring. Bunch the tongue body up and back, or curl the tip."
+                f"{_signed(delta, 'Hz')} → {move}"
+                if move
+                else f"{_signed(delta, 'Hz')} → no r-colouring instruction for this vowel"
             )
         found.append(
             Finding(
@@ -1395,34 +1683,484 @@ def rejection_findings(tokens: Sequence[Token]) -> list[Finding]:
     ]
 
 
+# --- Which instrument a row belongs to --------------------------------------------------------
+# Every chart in `accent_charts` renders its own table beside it, and that table must be the
+# SAME rows the whole-measurement table already carries — not a second set built from the same
+# numbers a slightly different way. So the findings are produced once, keyed by instrument, and
+# `findings()` is the concatenation. One definition, two renderings.
+
+POSITION = "position"
+TRAJECTORY = "trajectory"
+RHOTICITY = "rhoticity"
+DURATION = "duration"
+REDUCTION = "reduction"
+STRESS = "stress"
+PITCH = "pitch"
+RHYTHM = "rhythm"
+REJECTED = "rejected"
+
+# Reading order, and the order the Accent page renders in. **Rhoticity leads**: it is the
+# loudest, cleanest, most correctable marker available for a General American target, and on a
+# non-rhotic-influenced accent it is routinely the largest single gap on the page. Rejections
+# come last, so the table ends by admitting what it could not do.
+INSTRUMENT_ORDER: tuple[str, ...] = (
+    RHOTICITY,
+    POSITION,
+    TRAJECTORY,
+    PITCH,
+    DURATION,
+    REDUCTION,
+    RHYTHM,
+    STRESS,
+    REJECTED,
+)
+
+# The instruments that fall out of a `Measurement` alone. `PITCH` and `RHYTHM` need inputs a
+# measurement does not carry — the model's rendering of the same text, and the assessment's own
+# word timings — so they are built by their own functions and merged by the caller.
+MEASUREMENT_INSTRUMENTS: tuple[str, ...] = (
+    RHOTICITY,
+    POSITION,
+    TRAJECTORY,
+    DURATION,
+    REDUCTION,
+    STRESS,
+    REJECTED,
+)
+
+
+def _hertz_reference(
+    reference_set: str, source: str, published: Mapping[str, VowelPosition]
+) -> Mapping[str, VowelPosition]:
+    """The table to score an instrument that compares HERTZ against, never z-units.
+
+    **Only some instruments may switch tables, and which ones is not a preference.** A z-score
+    is relative to the inventory that produced it: the speaker is normalised over
+    `REFERENCE_CATEGORIES`, the published table over its own twelve, and `model_reference` over
+    twenty-two. So position and trajectory — which compare z — have to stay on the published
+    table or the arrows are measured in two different spaces and every one of them is wrong.
+
+    F3−F2 is in hertz and carries no normalisation at all, so it can be scored against the
+    better table, and the measured one is plainly better here: Hillenbrand published a mean for
+    /ɝ/ alone, in citation-form /hVd/ words, while `model_reference` covers all seven r-coloured
+    categories in connected speech through this same pipeline. Rhoticity is the largest and most
+    correctable gap on the page for a General American target, and it was scored against a
+    stand-in for six of its seven vowels until v0.11.0.
+
+    Falls back to `published` when the measured table has nothing for this set, so a fresh clone
+    with no capture behind it still gets the row it always got.
+    """
+    if source == REFERENCE_PUBLISHED:
+        return published
+    return reference_positions(reference_set, source=source) or published
+
+
+def findings_by_instrument(
+    measurement: Measurement,
+    normaliser: Normaliser,
+    *,
+    reference_set: str,
+    noise: NoiseFloor | None = None,
+    minimum: int = MIN_TOKENS_PER_CATEGORY,
+    rhoticity_source: str = REFERENCE_VOICE,
+) -> dict[str, list[Finding]]:
+    """The four-column rows for one measurement, split by which instrument produced them.
+
+    `minimum` is the per-category token floor. It is `MIN_TOKENS_PER_CATEGORY` when the
+    speaker is being normalised from their own reading, and **1** when a stored baseline is
+    supplying the normalisation — see `plot_gate`. A single token is a legitimate point once
+    the space it sits in was established elsewhere, provided its count travels with it, which
+    `VowelPosition.n` guarantees.
+
+    `rhoticity_source` picks the table the F3−F2 rows are scored against, and **only** those
+    rows — see `_hertz_reference`.
+    """
+    accepted = measurement.accepted
+    speaker = positions(accepted, normaliser, minimum=minimum)
+    reference = reference_positions(reference_set)
+    centroid = reduction(accepted, normaliser)
+
+    return {
+        RHOTICITY: _rhoticity_findings(
+            speaker, _hertz_reference(reference_set, rhoticity_source, reference)
+        ),
+        POSITION: _position_findings(speaker, reference, noise),
+        TRAJECTORY: _trajectory_findings(speaker, reference),
+        DURATION: (
+            _duration_findings(tense_lax_ratios(accepted, reference_set), "tense")
+            + _duration_findings(pre_fortis_ratios(accepted), "clipping")
+        ),
+        REDUCTION: [_reduction_finding(centroid)],
+        STRESS: _stress_findings(stress_contrasts(accepted, normaliser, centroid)),
+        REJECTED: rejection_findings(measurement.tokens),
+    }
+
+
 def findings(
     measurement: Measurement,
     normaliser: Normaliser,
     *,
     reference_set: str,
     noise: NoiseFloor | None = None,
+    minimum: int = MIN_TOKENS_PER_CATEGORY,
+    rhoticity_source: str = REFERENCE_VOICE,
 ) -> list[Finding]:
     """Every four-column row for one measurement, in reading order.
 
-    Position and trajectory first, because they are what the chart shows; then rhoticity, which
-    is the single most correctable marker; then the duration and reduction measures; then
-    stress; then the rejections, last, so the table ends by admitting what it could not do.
+    The concatenation of `findings_by_instrument` in `INSTRUMENT_ORDER`. Kept as its own name
+    because most callers want the whole table and should not have to know the keys.
+    """
+    grouped = findings_by_instrument(
+        measurement,
+        normaliser,
+        reference_set=reference_set,
+        noise=noise,
+        minimum=minimum,
+        rhoticity_source=rhoticity_source,
+    )
+    rows: list[Finding] = []
+    for instrument in INSTRUMENT_ORDER:
+        rows += grouped.get(instrument, [])
+    return rows
+
+
+# --- May this be drawn at all? ----------------------------------------------------------------
+
+
+NO_BASELINE = (
+    "**No stored baseline, so nothing here can be charted.** Establishing the vowel space "
+    "needs a full inventory from one speaker — the calibration passage, read twice. Until "
+    "that exists there is no centroid to normalise against, and a point plotted without one "
+    "is a confident dot drawn from a normalisation that does not exist."
+)
+
+NOTHING_MEASURABLE = (
+    "**Nothing in this recording could be measured.** Every vowel token was refused — see the "
+    "rejection table for what was refused and why."
+)
+
+STYLE_MISMATCH = (
+    "**This is {measured} speech measured against a baseline built from {baseline} speech.** "
+    "A baseline built from read speech normalises read speech; the two are different "
+    "populations, and the gap below carries some of that difference rather than only your "
+    "accent. Recalibrate on the same style to compare like with like."
+)
+
+
+@dataclass(frozen=True)
+class PlotGate:
+    """Whether this measurement may be drawn, and in whose vowel space.
+
+    **The gate is "is there a stored baseline", never "which mode was this".** Establishing
+    the normalisation reference needs a full vowel inventory from one speaker, which a
+    three-word drill cannot supply. But USING an already-stored baseline needs only the token
+    being measured — so once calibration has run, a drill token is a legitimate single point
+    with its count shown beside it.
+
+    Getting this wrong is costly in both directions. Refusing to plot drills throws away the
+    measure-drill-remeasure loop, which is the entire purpose of the accent surfaces; plotting
+    before a baseline exists draws a confident dot from a normalisation that does not exist.
+    """
+
+    ok: bool
+    reason: str
+    normaliser: Normaliser | None
+    minimum_tokens: int
+    tokens: int
+    # Not a refusal. A stated caveat, because a baseline built from read speech normalises read
+    # speech and saying so is the difference between a comparison and a category error.
+    style_warning: str = ""
+
+
+def plot_gate(
+    measurement: Measurement,
+    *,
+    baseline_normaliser: Normaliser | None,
+    baseline_style: str = "",
+) -> PlotGate:
+    """Decide whether to chart this measurement, and which normalisation to chart it in.
+
+    Takes the normaliser rather than a database row so this module stays SQL-free and the rule
+    is testable without a connection — `app.py` does the `json.loads`.
     """
     accepted = measurement.accepted
-    speaker = positions(accepted, normaliser)
+    if baseline_normaliser is None:
+        return PlotGate(
+            ok=False,
+            reason=NO_BASELINE,
+            normaliser=None,
+            minimum_tokens=MIN_TOKENS_PER_CATEGORY,
+            tokens=len(accepted),
+        )
+    if not accepted:
+        return PlotGate(
+            ok=False,
+            reason=NOTHING_MEASURABLE,
+            normaliser=baseline_normaliser,
+            minimum_tokens=1,
+            tokens=0,
+        )
+    warning = ""
+    if baseline_style and measurement.style and measurement.style != baseline_style:
+        warning = STYLE_MISMATCH.format(measured=measurement.style, baseline=baseline_style)
+    return PlotGate(
+        ok=True,
+        reason="",
+        normaliser=baseline_normaliser,
+        # One token is enough once the SPACE it sits in came from somewhere else. The count
+        # travels on every point and every row, so thin evidence looks thin.
+        minimum_tokens=1,
+        tokens=len(accepted),
+        style_warning=warning,
+    )
+
+
+# --- Ranking what to practise next ------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Gap:
+    """One measured shortfall, big enough to be worth a drill.
+
+    `magnitude` is in `unit`, always positive, and **only comparable within a metric**. There
+    is deliberately no cross-metric severity score: 0.6 z of vowel displacement and 300 Hz of
+    missing r-colouring are not commensurable, and inventing an exchange rate between them
+    would be the kind of confident-and-unfounded number this project exists to delete. The
+    ranking is therefore per metric, and `ranked_gaps` interleaves by metric priority.
+    """
+
+    vowel: str
+    metric: str
+    magnitude: float
+    unit: str
+    detail: str
+    n: int
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def label(self) -> str:
+        keyword = phoneme_reference.keyword_for(self.vowel)
+        return f"/{self.vowel}/ {keyword}".strip()
+
+
+# How many of each metric reach the coach. Three is enough to write a report around and few
+# enough that the payload stays the fraction of the raw response `compact` exists to be.
+GAPS_PER_METRIC = 3
+
+
+def ranked_gaps(
+    measurement: Measurement,
+    normaliser: Normaliser,
+    *,
+    reference_set: str,
+    noise: NoiseFloor | None = None,
+    minimum: int = MIN_TOKENS_PER_CATEGORY,
+    limit: int = GAPS_PER_METRIC,
+    rhoticity_source: str = REFERENCE_VOICE,
+) -> list[Gap]:
+    """What the geometry says is worth practising, worst first within each metric.
+
+    **Everything smaller than the noise floor is dropped before ranking**, not flagged after.
+    A vowel that moved less than the band moves that much between two reads with no learning
+    at all, so it is not a finding, and a finding that is not real must not become a drill.
+    """
+    accepted = measurement.accepted
+    speaker = positions(accepted, normaliser, minimum=minimum)
     reference = reference_positions(reference_set)
+    # Hertz-only, and only for the rhoticity gaps below — the position and trajectory gaps are
+    # in z and must stay in the space the speaker was normalised into. See `_hertz_reference`.
+    rhotic_reference = _hertz_reference(reference_set, rhoticity_source, reference)
     centroid = reduction(accepted, normaliser)
 
-    rows: list[Finding] = []
-    rows += _position_findings(speaker, reference, noise)
-    rows += _trajectory_findings(speaker, reference)
-    rows += _rhoticity_findings(speaker, reference)
-    rows += _duration_findings(tense_lax_ratios(accepted, reference_set), "tense")
-    rows += _duration_findings(pre_fortis_ratios(accepted), "clipping")
-    rows.append(_reduction_finding(centroid))
-    rows += _stress_findings(stress_contrasts(accepted, normaliser, centroid))
-    rows += rejection_findings(measurement.tokens)
-    return rows
+    found: dict[str, list[Gap]] = {RHOTICITY: [], POSITION: [], TRAJECTORY: [], REDUCTION: []}
+
+    for vowel, position in speaker.items():
+        # **Not `continue` on a missing published target.** Hillenbrand has a mean for /ɝ/ and
+        # for none of the other six r-coloured categories, so skipping here meant the rhoticity
+        # ranking could only ever fire on NURSE — while the measured table has all seven. The
+        # position and trajectory blocks guard on `target` themselves instead.
+        target = reference.get(vowel)
+        entry = phoneme_reference.lookup(vowel)
+
+        # Position — the arrow's length, net of the band it has to clear to be real.
+        # Bound to locals rather than tested as a tuple: `None not in (...)` is true at
+        # runtime and invisible to the type checker, and the ignore it would otherwise need is
+        # exactly the kind that goes stale without anyone noticing.
+        one, two = position.f1_z, position.f2_z
+        aim_f1, aim_f2 = (target.f1_z, target.f2_z) if target is not None else (None, None)
+        if one is not None and two is not None and aim_f1 is not None and aim_f2 is not None:
+            f1_delta, f2_delta = aim_f1 - one, aim_f2 - two
+            arrow = math.hypot(f1_delta, f2_delta)
+            band = (noise.band_for(vowel) if noise else None) or 0.0
+            if arrow > band:
+                found[POSITION].append(
+                    Gap(
+                        vowel=vowel,
+                        metric=POSITION,
+                        magnitude=arrow - band,
+                        unit="z",
+                        detail=(
+                            f"sits {arrow:.2f} z from the General American target, against a "
+                            f"{band:.2f} z measurement band"
+                        ),
+                        n=position.n,
+                        evidence={
+                            "arrow_z": round(arrow, 3),
+                            "noise_band_z": round(band, 3),
+                            "f1_delta_z": round(f1_delta, 3),
+                            "f2_delta_z": round(f2_delta, 3),
+                            "tokens": position.n,
+                        },
+                    )
+                )
+
+        # Trajectory — how much of the glide is missing. A monophthongised diphthong is the
+        # clearest single thing the charts show, so a shortfall here ranks on its own.
+        # `n_trajectory` and an explicit None check, never `or 0.0`: a vowel whose tokens were
+        # all too short to measure a glide in has NO travel, and reading that absence as a
+        # 0 Hz glide manufactures the worst possible monophthongisation finding out of a
+        # measurement that was refused. `_trajectory_findings` says exactly that in the table
+        # and this has to agree with it — a gap that is not real must not become a drill. The
+        # sign guard is the same one for the same reason: a glide measured running the
+        # opposite way to the reference is the following segment leaking into the 80% window,
+        # not a shortfall to practise.
+        measured_travel = position.f2_travel_hz
+        if (
+            target is not None
+            and entry is not None
+            and entry.kind == "diphthong"
+            and target.f2_travel_hz
+            and position.n_trajectory > 0
+            and measured_travel is not None
+            and measured_travel * target.f2_travel_hz > 0
+        ):
+            produced_travel = abs(measured_travel)
+            wanted = abs(target.f2_travel_hz)
+            if produced_travel < wanted:
+                found[TRAJECTORY].append(
+                    Gap(
+                        vowel=vowel,
+                        metric=TRAJECTORY,
+                        magnitude=wanted - produced_travel,
+                        unit="Hz",
+                        detail=(
+                            f"glides {produced_travel:.0f} Hz where General American glides "
+                            f"{wanted:.0f} Hz — the diphthong is flattening toward a monophthong"
+                        ),
+                        # The glide count, not the token count: only these tokens were long
+                        # enough to contribute a travel, so only these are the evidence.
+                        n=position.n_trajectory,
+                        evidence={
+                            "produced_travel_hz": round(produced_travel),
+                            "target_travel_hz": round(wanted),
+                            "tokens": position.n_trajectory,
+                        },
+                    )
+                )
+
+        # Rhoticity — F3 sitting too far above F2 is r-colouring that is not arriving. Scored
+        # against `rhotic_reference`, which is the MEASURED table by default: F3−F2 is in hertz
+        # and carries no normalisation, so it can use the table that actually covers all seven
+        # r-coloured categories. /ɝ/ still stands in for anything the chosen table lacks, on the
+        # same grounds `_rhoticity_findings` uses — r-colouring is one articulatory gesture
+        # whatever vowel carries it.
+        rhotic = vowel in {"ɝ", "ɚ"} or (entry is not None and entry.kind == "r-coloured")
+        rhotic_target = rhotic_reference.get(vowel)
+        nurse = rhotic_reference.get("ɝ")
+        against = rhotic_target.f3_minus_f2_hz if rhotic_target is not None else None
+        if against is None and nurse is not None:
+            against = nurse.f3_minus_f2_hz
+        if rhotic and position.f3_minus_f2_hz is not None and against is not None:
+            excess = position.f3_minus_f2_hz - against
+            if excess > 0:
+                found[RHOTICITY].append(
+                    Gap(
+                        vowel=vowel,
+                        metric=RHOTICITY,
+                        magnitude=excess,
+                        unit="Hz",
+                        detail=(
+                            f"F3 sits {position.f3_minus_f2_hz:.0f} Hz above F2 where the "
+                            f"target is {against:.0f} Hz — {excess:.0f} Hz of missing "
+                            f"r-colouring"
+                        ),
+                        n=position.n,
+                        evidence={
+                            "f3_minus_f2_hz": round(position.f3_minus_f2_hz),
+                            "target_f3_minus_f2_hz": round(against),
+                            "excess_hz": round(excess),
+                            "tokens": position.n,
+                        },
+                    )
+                )
+
+    # Reduction — one gap, not one per vowel: it is a property of the whole reading.
+    if centroid.measured and centroid.stressed_distance_z:
+        unstressed = float(centroid.mean_distance_z or 0.0)
+        stressed = float(centroid.stressed_distance_z)
+        ratio = unstressed / stressed if stressed else 0.0
+        if ratio > 0.8:
+            found[REDUCTION].append(
+                Gap(
+                    vowel="ə",
+                    metric=REDUCTION,
+                    magnitude=unstressed - stressed,
+                    unit="z",
+                    detail=(
+                        f"unstressed vowels sit {unstressed:.2f} z from your own schwa "
+                        f"centroid against {stressed:.2f} z for the stressed ones — they are "
+                        f"barely reducing at all"
+                    ),
+                    n=centroid.n_unstressed,
+                    evidence={
+                        "unstressed_distance_z": round(unstressed, 3),
+                        "stressed_distance_z": round(stressed, 3),
+                        "ratio": round(ratio, 3),
+                        "tokens": centroid.n_unstressed,
+                    },
+                )
+            )
+
+    ranked: list[Gap] = []
+    for metric in (RHOTICITY, POSITION, TRAJECTORY, REDUCTION):
+        ranked += sorted(found[metric], key=lambda gap: -gap.magnitude)[:limit]
+    return ranked
+
+
+def rhythm_gap(measured_npvi: float | None, reference_npvi: float | None) -> Gap | None:
+    """The nPVI deviation as a `Gap`, so rhythm reaches the coach the same way vowels do.
+
+    Separate from `ranked_gaps` because nPVI is not a property of a vowel token — it is a
+    property of the whole reading, and it comes from `rhythm.py` rather than from a
+    `Measurement`. A LOWER nPVI than the reference means the vowels are closer to equal in
+    length, which is what a syllable-timed rhythm carried into English sounds like.
+    """
+    if measured_npvi is None or reference_npvi is None:
+        return None
+    delta = measured_npvi - reference_npvi
+    if abs(delta) < 1.0:
+        return None
+    direction = (
+        "more even in length than the reference — the hallmark of a syllable-timed rhythm "
+        "carried into English"
+        if delta < 0
+        else "more uneven in length than the reference"
+    )
+    return Gap(
+        vowel="",
+        metric=RHYTHM,
+        magnitude=abs(delta),
+        unit="nPVI",
+        detail=(
+            f"nPVI {measured_npvi:.1f} against {reference_npvi:.1f} — your vowels are {direction}"
+        ),
+        n=0,
+        evidence={
+            "npvi": round(measured_npvi, 2),
+            "reference_npvi": round(reference_npvi, 2),
+            "delta": round(delta, 2),
+        },
+    )
 
 
 # --- Storage shapes ---------------------------------------------------------------------------
