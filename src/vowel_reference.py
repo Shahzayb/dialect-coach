@@ -25,10 +25,16 @@ deliberately carries. A surface must report those with an honest 'no published G
 reference' rather than inventing a target. `has_reference()` is the check.
 
 **3. Durations here are citation-form /hVd/ words read in isolation.** /i/ averages
-244 ms for men; the same vowel in connected speech is far shorter. **Absolute
-milliseconds must never be compared against this table.** Only ratios transfer —
+244 ms for men; the same vowel in connected speech is far shorter. **A bare
+comparison in absolute milliseconds is a comparison of two registers**, and it
+will show any connected-speech reading as roughly three times too short — an
+artefact of this table, not a fact about the speaker. Ratios transfer cleanly —
 tense against lax, pre-fortis against pre-lenis, stressed against unstressed —
 which is why `TENSE_LAX_PAIRS` exists and no absolute duration target does.
+Since v0.11.0 the duration chart does plot these milliseconds, deliberately, but
+never alone: `model_reference.py` carries the same vowels in connected speech
+through the identical pipeline, and that is the bar a difference may be read
+from.
 
 **4. It is upper-Midwest speech recorded in the early 1990s, and English moved on.**
 Two known drifts, handled by widening the tolerance band rather than by reporting a
