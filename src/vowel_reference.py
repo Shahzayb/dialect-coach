@@ -71,6 +71,12 @@ class ReferenceVowel:
     at50: Point
     at80: Point
     sd50: Point  # per-formant SD at the 50% point, the tolerance band's basis
+    # How many distinct TALKERS are behind the means. Zero here and non-zero in
+    # `model_reference.py`, which reuses this dataclass: Hillenbrand's per-vowel token counts
+    # are already in `n`, and its per-talker counts are not recoverable from `vowdata.dat`.
+    # A reference whose SD is a between-talker spread and one whose SD is within-corpus are
+    # different claims, and this field is how a surface can tell which it is holding.
+    voices: int = 0
 
     @property
     def f2_travel(self) -> float | None:

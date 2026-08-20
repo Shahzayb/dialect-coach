@@ -220,6 +220,36 @@ CREATE INDEX IF NOT EXISTS idx_vowel_measurements_attempt
   ON vowel_measurements(attempt_id);
 CREATE INDEX IF NOT EXISTS idx_vowel_measurements_vowel
   ON vowel_measurements(vowel, accepted);
+
+-- One neural voice reading one text, synthesised and then assessed through the SAME pipeline
+-- that measures the user. This is what a pitch overlay and a corrected-pitch resynthesis are
+-- drawn against, and what the General American vowel reference is built from.
+--
+-- **Assessed, not just synthesised, and that is the expensive half.** Azure's synthesiser will
+-- report word boundaries for free during synthesis, which would have been cheaper — but those
+-- offsets come from the synthesiser's own clock, and the user's come from the recogniser. Two
+-- contours anchored on two different segmenters are not aligned, they are approximately
+-- aligned, and timing error is one of the things being measured. So the model's rendering goes
+-- back through pronunciation assessment and both sides carry offsets from one segmenter.
+--
+-- Bought once per (voice, text) and kept forever: the audio in the gitignored audio/ directory
+-- like every other recording, the payload here. Re-deriving a reference table must never mean
+-- re-spending, for the same reason re-deriving a measurement must never mean re-recording.
+CREATE TABLE IF NOT EXISTS native_renderings (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  voice          TEXT    NOT NULL,   -- the exact en-US neural voice, never inferred later
+  text_key       TEXT    NOT NULL,   -- tts.cache_key: one definition of "the same text"
+  reference_text TEXT    NOT NULL,
+  wav_path       TEXT    NOT NULL,   -- never committed
+  payloads_json  TEXT    NOT NULL,   -- the raw Azure assessment, verbatim
+  seconds        REAL    NOT NULL,   -- what it cost in STT allowance
+  characters     INTEGER NOT NULL,   -- what it cost in TTS allowance
+  created_at     TEXT    NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_native_renderings_identity
+  ON native_renderings(voice, text_key);
+CREATE INDEX IF NOT EXISTS idx_native_renderings_text ON native_renderings(text_key);
 """
 
 
@@ -828,3 +858,79 @@ def current_baseline(conn: sqlite3.Connection) -> sqlite3.Row | None:
 def baseline_history(conn: sqlite3.Connection) -> Sequence[sqlite3.Row]:
     """Every baseline ever set, newest first. A re-calibration is a fact worth keeping."""
     return conn.execute("SELECT * FROM speaker_baseline ORDER BY id DESC").fetchall()
+
+
+# --- The model's own readings -----------------------------------------------------------------
+
+
+def record_native_rendering(
+    conn: sqlite3.Connection,
+    *,
+    voice: str,
+    text_key: str,
+    reference_text: str,
+    wav_path: str,
+    payloads: Any,
+    seconds: float,
+    characters: int,
+    created_at: str | None = None,
+) -> None:
+    """Store one voice's assessed reading of one text. Idempotent per (voice, text).
+
+    Upserts rather than inserting, so a re-capture after a better voice list or a longer
+    passage replaces the row instead of leaving two readings that disagree about what the
+    model does.
+    """
+    conn.execute(
+        """
+        INSERT INTO native_renderings
+            (voice, text_key, reference_text, wav_path, payloads_json, seconds, characters,
+             created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(voice, text_key) DO UPDATE SET
+            reference_text = excluded.reference_text,
+            wav_path = excluded.wav_path,
+            payloads_json = excluded.payloads_json,
+            seconds = excluded.seconds,
+            characters = excluded.characters,
+            created_at = excluded.created_at
+        """,
+        (
+            voice,
+            text_key,
+            reference_text,
+            wav_path,
+            json.dumps(payloads, ensure_ascii=False),
+            float(seconds),
+            int(characters),
+            created_at or utc_now_iso(),
+        ),
+    )
+    conn.commit()
+
+
+def native_rendering(conn: sqlite3.Connection, voice: str, text_key: str) -> sqlite3.Row | None:
+    """One voice's reading of one text, or None when it has not been captured."""
+    row = conn.execute(
+        "SELECT * FROM native_renderings WHERE voice = ? AND text_key = ?",
+        (voice, text_key),
+    ).fetchone()
+    return cast("sqlite3.Row | None", row)
+
+
+def native_renderings_for(conn: sqlite3.Connection, text_key: str) -> Sequence[sqlite3.Row]:
+    """Every captured voice for one text, by voice name. The population a band is drawn from."""
+    return conn.execute(
+        "SELECT * FROM native_renderings WHERE text_key = ? ORDER BY voice",
+        (text_key,),
+    ).fetchall()
+
+
+def native_rendering_voices(conn: sqlite3.Connection, text_key: str) -> set[str]:
+    """Which voices already exist for this text. What makes a capture run resumable."""
+    return {
+        str(row["voice"])
+        for row in conn.execute(
+            "SELECT voice FROM native_renderings WHERE text_key = ?", (text_key,)
+        ).fetchall()
+    }
