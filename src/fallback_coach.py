@@ -18,6 +18,7 @@ convert would only show up as a badly-shaped answer at run time.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -25,6 +26,7 @@ from pydantic import BaseModel, Field
 import phoneme_reference as pr
 import speech_analyzer
 import utils
+import vowel_reference
 from utils import Mode
 
 logger = logging.getLogger(__name__)
@@ -135,6 +137,21 @@ class StressAndRhythm(BaseModel):
     drill: str = Field(description="One concrete rhythm or stress exercise.")
 
 
+class BridgingPhrase(BaseModel):
+    """A sentence that forces one vowel repeatedly, in varied consonant contexts.
+
+    **Not a word list, and the difference is the whole value.** A vowel is easy to hit in
+    isolation and hard to hold through a following /l/, a preceding /s/, or a stressed-to-
+    unstressed transition. The co-articulation is what has to be practised, and a list of
+    citation-form words exercises none of it.
+    """
+
+    vowel: str = Field(description="The target vowel, IPA, without slashes.")
+    keyword: str = Field(description="Its Wells lexical-set keyword, e.g. FLEECE.")
+    why: str = Field(description="The measured gap that put it here. Numbers, not a claim.")
+    phrase: str = Field(description="One sentence carrying the vowel several times over.")
+
+
 class CoachingReport(BaseModel):
     """What the UI renders, whichever coach wrote it."""
 
@@ -153,6 +170,13 @@ class CoachingReport(BaseModel):
     stress_and_rhythm: StressAndRhythm
     practice_plan: str = Field(
         description="One five-minute routine naming specific words from this attempt."
+    )
+    bridging_phrases: list[BridgingPhrase] = Field(
+        default_factory=list,
+        description=(
+            "One per vowel geometry gap reported in `vowel_geometry`, and none for a vowel "
+            "that is not there. Sentences, never word lists."
+        ),
     )
 
 
@@ -276,6 +300,35 @@ def compact(assessment: Any, mode: Mode) -> dict[str, Any]:
         "delivery_faults": speech_analyzer.delivery_faults(assessment.words),
         # The only pairs a report is allowed to discuss. `ai_coach` validates against this.
         "observed_pairs": observed,
+        # A NEW SECTION, not a replacement. The phoneme evidence above is categorical — this
+        # sound or that one — and this is the continuous half: where the vowels actually sit,
+        # how far they are from General American, and by how much net of the measurement noise
+        # floor. Empty on every attempt with no stored baseline, which is most of them.
+        "vowel_geometry": [],
+    }
+
+
+def with_geometry(compacted: dict[str, Any], gaps: Sequence[Any]) -> dict[str, Any]:
+    """Attach the ranked vowel gaps to a compacted payload. Returns a new dict.
+
+    Kept separate from `compact` because the geometry needs a stored baseline and a
+    measurement, neither of which an `Assessment` carries — and because a coach must produce
+    the same report for an attempt whether or not the accent measurement happened to run.
+    """
+    return {
+        **compacted,
+        "vowel_geometry": [
+            {
+                "vowel": gap.vowel,
+                "keyword": pr.keyword_for(gap.vowel),
+                "metric": gap.metric,
+                "magnitude": round(gap.magnitude, 3),
+                "unit": gap.unit,
+                "detail": gap.detail,
+                "tokens": gap.n,
+            }
+            for gap in gaps
+        ],
     }
 
 
@@ -580,6 +633,35 @@ def _practice_plan(compacted: dict[str, Any], fixes: list[PriorityFix]) -> str:
     return "Five minutes, in this order:\n" + "\n".join(steps)
 
 
+def bridging_phrases(compacted: dict[str, Any], limit: int = 3) -> list[BridgingPhrase]:
+    """One hand-written phrase per measured vowel gap, worst first.
+
+    Free, offline and permanent: `vowel_reference.BRIDGING_PHRASES` was written by hand once,
+    so the fallback coach can answer any vowel the measurement can flag, with no API key and no
+    network, forever. The Gemini coach writes fresher ones when it is available; these are what
+    exists when it is not.
+    """
+    found: list[BridgingPhrase] = []
+    for gap in compacted.get("vowel_geometry") or []:
+        vowel = str(gap.get("vowel") or "")
+        options = vowel_reference.bridging_phrases(vowel)
+        if not options:
+            continue
+        found.append(
+            BridgingPhrase(
+                vowel=vowel,
+                keyword=str(gap.get("keyword") or pr.keyword_for(vowel)),
+                why=str(gap.get("detail") or ""),
+                # Rotated on the vowel rather than always the first, so drilling the same gap
+                # twice does not present the identical sentence twice.
+                phrase=options[len(found) % len(options)],
+            )
+        )
+        if len(found) >= limit:
+            break
+    return found
+
+
 def emergency_report(reason: str) -> CoachingReport:
     """A valid report for when building the real one raised.
 
@@ -635,4 +717,5 @@ def build_from_compacted(compacted: dict[str, Any]) -> CoachingReport:
         delivery_drills=delivery_drills(compacted),
         stress_and_rhythm=_stress_and_rhythm(compacted),
         practice_plan=_practice_plan(compacted, fixes),
+        bridging_phrases=bridging_phrases(compacted),
     )

@@ -424,3 +424,62 @@ def test_the_suite_never_writes_a_recording_into_the_working_tree(tmp_path) -> N
     kept = audio_utils.keep(b"RIFF" + b"\x00" * 40, "a" * 64)
     assert kept is not None
     assert not str(kept.resolve()).startswith(str(Path(__file__).resolve().parent.parent))
+
+
+# --- The chart page, end to end ------------------------------------------------------------------
+
+
+def test_the_accent_page_charts_a_reading_once_a_baseline_exists(
+    calibration_pair, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Six chart-and-table pairs, each rendering the SAME rows the whole table carries."""
+
+    monkeypatch.setenv("GA_REFERENCE_SET", "men")
+    _seed_calibration(calibration_pair, minutes_apart=15)
+
+    app = _app()
+    assert not app.exception
+    calibrate = [b for b in app.button if "Set the baseline" in b.label]
+    calibrate[0].click().run()
+    assert not app.exception
+
+    headings = " ".join(block.value for block in app.markdown)
+    for instrument in ("Rhoticity", "Vowel space", "Diphthongs", "Vowel length", "Rhythm"):
+        assert instrument in headings, f"the {instrument} section did not render"
+
+    # Every rendered table keeps the four-column contract.
+    tables = [block.value for block in app.markdown if "| Acoustic Feature |" in block.value]
+    assert tables, "no four-column table rendered beside any chart"
+    for table in tables:
+        assert table.splitlines()[0] == (
+            "| Acoustic Feature | User Realization | Target Realization "
+            "| Delta / Adjustment Needed |"
+        )
+
+
+def test_the_page_says_it_is_post_hoc_rather_than_live(
+    calibration_pair, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Issue #14 sketches real-time overlapping curves. This is drawn after the fact."""
+    monkeypatch.setenv("GA_REFERENCE_SET", "men")
+    _seed_calibration(calibration_pair, minutes_apart=15)
+    app = _app()
+    [b for b in app.button if "Set the baseline" in b.label][0].click().run()
+    text = " ".join(block.value for block in app.caption) + " ".join(
+        block.value for block in app.markdown
+    )
+    assert "Post-hoc" in text or "post-hoc" in text
+
+
+def test_the_charts_refuse_before_a_baseline_exists(
+    calibration_pair, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A confident dot drawn from a normalisation that does not exist is the failure here."""
+    monkeypatch.setenv("GA_REFERENCE_SET", "men")
+    _seed_calibration(calibration_pair, minutes_apart=15)
+    app = _app()  # no baseline stored yet — the button has not been clicked
+    assert not app.exception
+    text = " ".join(block.value for block in app.info) + " ".join(
+        block.value for block in app.markdown
+    )
+    assert "calibration passage" in text or "No stored baseline" in text
