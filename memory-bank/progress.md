@@ -92,6 +92,39 @@ read (91/98/91 pronunciation/accuracy/fluency both times) — consistent with se
 vocal fatigue/flattening rather than measurement noise, and the coaching report produced a
 coherent "Flat intonation across the span" drill quoting the real longest run.
 
+**Accent charts, resynthesis and a measured reference (v0.11.0).** The Accent tab carries six
+chart-and-table pairs for any stored reading — rhoticity first, then the vowel quadrant with an
+arrow per vowel from produced to target, diphthong trajectories, a semitone pitch overlay,
+duration, and rhythm. Each table is the SAME rows the whole four-column table carries
+(`vowel_measure.findings_by_instrument`), so the picture and the numbers cannot disagree.
+Charts gate on **whether a baseline is stored, never on the mode**: with one, a three-word
+drill plots as a single point carrying `n=1`, which is what makes the measure-drill-remeasure
+loop possible at all. The arrow-to-instruction mapping is **data** in `vowel_reference`, one
+hand-written entry per vowel, because F2 responds to lip posture as strongly as to tongue
+advancement — a back-rounded vowel can no longer reach the table with a tongue instruction, and
+a test enforces it.
+
+**A second General American reference, measured by this project.** `src/model_reference.py` is
+generated from the benchmark passage read by 16 sex-stratified en-US neural voices, each pushed
+back through pronunciation assessment so both sides of every comparison carry offsets from one
+segmenter. **21 of 22 categories in both sets**, against Hillenbrand's 12 — including six
+r-coloured categories that previously had no target at all. Durations are connected speech and
+so can be compared in milliseconds, the one caveat this table lifts. It complements
+`vowel_reference` and is never averaged with it; `REFERENCE_PUBLISHED` and `REFERENCE_VOICE`
+have existed since v0.10.0 and the second finally has something behind it.
+
+**Resynthesis: the user's own voice with one thing changed.** Corrected pitch (their contour
+replaced with the model's, scaled to their own median and range in semitones), corrected timing
+(a DurationTier toward the target lengths) and corrected vowel (one vowel's formants shifted, a
+third of the way, everything else bit-identical). Built on `parselmouth.praat.call` — the typed
+`Manipulation` class does not exist. Every manipulation is capped and says so; the original
+always plays first, labelled; and the surface states it is the user's own voice modified.
+
+**The loop closes.** Ranked gaps travel to the coach as a `vowel_geometry` section alongside the
+phoneme payload, both coaches answer with a bridging phrase (a sentence forcing the vowel in
+varied consonant contexts, never a word list), and one click fills the practice textarea while a
+second promotes it to the queue as a `vowel` target with its evidence.
+
 ## Not yet proven live
 
 - **The benchmark's 30-day trajectory has one real point, not several** — the first live
@@ -104,6 +137,15 @@ coherent "Flat intonation across the span" drill quoting the real longest run.
   confirmed from a real capture (`tests/fixtures/bad_delivery_capture.json`); the other two
   are covered only by a hand-built synthetic fixture. A reading that actually provokes one
   would close this — halting delivery with run-together sentences did not.
+
+- **No human has used the v0.11.0 surfaces.** The charts, the resynthesis players and the
+  one-click drill are proven against synthetic audio and an `AppTest` run, not against a voice.
+  In particular nobody has yet confirmed that a corrected-pitch clip *sounds* like their own
+  voice — the formant-preservation check says it should, and that is not the same thing.
+- **The trajectory chart has never seen a real monophthongised diphthong.** The exit condition
+  is proven on synthesised FACE vowels at 240 ms, where the distinction is 0.1 Hz against 72.
+  Whether a learner's monophthongal /eɪ/ is distinguishable at real connected-speech durations,
+  where boundary contamination is large, is **not** established — see the dead end below.
 
 ## Known issues
 
@@ -146,6 +188,19 @@ is unreachable from the running app. `app.py`'s `if entry.attempt_id:` treats id
 - **Fetching the Hillenbrand vowel data from its canonical URL.** `homepages.wmich.edu` now
   presents a certificate for `CN=redirect.wmich.edu`, so every fetch fails verification. Use
   the `santiagobarreda/hillenbrand_et_al_1995` mirror, packaged with the author's permission.
+- **Measuring a diphthong's glide from Azure's phoneme boundaries in connected speech.** The
+  number exists and does not mean what "F2 travel 20→80%" says. Across the 16-voice reference
+  capture, only twelve /eɪ/ tokens in the men's set clear a 90 ms floor, from three word types,
+  and each one's 80% analysis window lands in a following nasal or the next word's vowel — on
+  "same" it reads F1 240 Hz / F2 1285 Hz, a nasal murmur. **It cannot be gated on amplitude**:
+  that window measures −17.4 dB against −16.4 dB at the vowel's midpoint. `model_reference`
+  therefore publishes no at20/at80 at all. A passage written with clean diphthong contexts, or
+  a better source of boundaries, would be a re-derivation over the stored renderings rather
+  than a re-spend.
+- **Asking the Speech SDK which voices are children.** It reports no age at all:
+  `en-US-AnaNeural` comes back `gender=Female, voice_type=OnlineNeural`, identical in shape to
+  an adult woman. The exclusion list in `native_model.NON_ADULT_VOICES` is hand-maintained
+  because there is nothing to query.
 - **Testing a formant tracker against a three-formant synthetic vowel.** It under-determines
   the five-pole model Praat fits below a 5 kHz ceiling, producing a spurious ~1700 Hz-wide
   peak between F1 and F2. The test signal needs as many resonances as real speech.
