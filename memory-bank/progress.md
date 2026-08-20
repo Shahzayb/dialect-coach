@@ -2,6 +2,32 @@
 
 ## What works
 
+- **The review pass on v0.11.0, and what it changed.** Eight findings, five of them wrong
+  advice or dead wiring rather than style. All are fixed and each carries a test that fails
+  against the bug it covers:
+  - The rhoticity instruction was inverted — a speaker whose r-colouring had not arrived was
+    told to release the bunching. The 150 Hz threshold beside it is now
+    `RHOTICITY_TOLERANCE_HZ`, applied symmetrically.
+  - `ranked_gaps` read a missing `f2_travel_hz` as a 0 Hz glide, manufacturing a top-ranked
+    "monophthongised" drill out of a measurement `_trajectory_findings` had refused.
+  - `corrected_vowel` spliced the whole recording back in for a vowel at either edge of the
+    clip, because Praat reads an empty `Extract part` range as the whole sound.
+  - `corrected_pitch` re-ran the pitch tracker per contour point: 109 s on a 60 s paragraph,
+    now 0.37 s.
+  - `pitch_frame` never quantised the warped model times, so the "averaged across voices"
+    line aggregated nothing and zigzagged between them.
+  - **Rhoticity is now scored against `model_reference` and only in hertz.** `_hertz_reference`
+    is the rule: z-comparisons stay on the published table because a z-score is relative to
+    the inventory that produced it, and hertz comparisons may use the table that actually
+    covers all seven r-coloured categories. `ranked_gaps` also stopped skipping every vowel
+    with no published mean, which had limited the rhoticity ranking to NURSE.
+  - **The vowel geometry reaches both coaches.** `app.geometry_gaps` derives the ranking once,
+    inside the session-cache guard and before the coach branch, and hands it to
+    `ai_coach.coach` and `fallback_coach.build` alike. Verified end to end against a seeded
+    baseline: two trajectory gaps in, two hand-written bridging phrases out.
+  - `_correct_worst_vowel` ranks in z and maps the target back through `Normaliser.hz`, so the
+    vowel it picks is not whichever one carries the largest vocal-tract-length offset.
+
 **Assessment and diagnosis.** Record or upload a drill sentence or paragraph and get real
 Azure scores down to the phoneme: the metric row, a script-versus-heard diff, colour-coded
 reference text with score-on-hover, a card per flagged word naming the sound actually
@@ -148,26 +174,6 @@ second promotes it to the queue as a `vowel` target with its evidence.
   where boundary contamination is large, is **not** established — see the dead end below.
 
 ## Known issues
-
-- **`ranked_gaps` and `findings_by_instrument` still score against Hillenbrand only.** Both
-  call `reference_positions(reference_set)` with the default `source=REFERENCE_PUBLISHED`,
-  while the rhoticity chart draws its targets from `model_reference`. For the men's set the
-  chart marks /ɝ/ at 498 Hz and the table under it quotes 298 Hz, and the six other rhotics
-  get a real per-vowel target on the chart against Hillenbrand's /ɝ/ in every table row. The
-  measured reference was bought precisely to fix that; wiring it through changes what every
-  table on the page says, so it is a decision rather than a patch.
-- **The vowel geometry never reaches either coach.** Nothing in `src/` calls
-  `fallback_coach.with_geometry` or `vowel_measure.ranked_gaps` — `compact()`'s
-  `"vowel_geometry": []` is what `ai_coach.coach` and `fallback_coach.build` actually see. So
-  `_checked_bridging_phrases` returns early, `bridging_phrases` iterates nothing, and
-  `app.render_bridging_phrases` never renders: no bridging phrase, no one-click drill, no queue
-  promotion. `vowel_reference.PRE_FORTIS_PAIRS` and `STRESS_SHIFT_PAIRS` are likewise written
-  and read by no consumer. All of it is covered by tests, which is why it stayed invisible.
-- **`_correct_worst_vowel` picks and shifts in raw hertz.** It ranks tokens by the hertz gap
-  between the speaker's F2 and a model voice's mean, so vocal-tract length dominates the
-  choice: a speaker whose tract is longer than the model-set average has every F2 low, and the
-  "worst" vowel is whichever carries the largest anatomical offset. Every other ranking in the
-  chunk works in z-units for exactly this reason.
 
 **A real `.env` can silently undo the 180-second paragraph ceiling.** The default moved from
 120 to 180 for shadowing, but a `.env` written before that change still says 120 and wins —
