@@ -1129,6 +1129,16 @@ def _position_findings(
 def _position_instruction(
     vowel: str, label: str, delta: float | None, noise: NoiseFloor | None
 ) -> str:
+    """The signed delta, plus the articulatory instruction it implies for THIS vowel.
+
+    The instruction is **looked up** from `vowel_reference.ARTICULATION`, never composed here.
+    Until v0.11.0 this function generated it from the sign alone — "tongue further front, lips
+    spread" for a positive F2 delta and "tongue further back, lips rounder" for a negative one,
+    for every vowel in the inventory. That is right for the front unrounded vowels and **wrong
+    for the back rounded ones**: F2 responds to lip posture as strongly as to tongue
+    advancement, so a learner whose /u/ sits too high in F2 has almost always under-rounded
+    rather than fronted, and "move your tongue back" sends them to fix the wrong articulator.
+    """
     if delta is None:
         return "Not measurable from this recording."
     if noise is not None and noise.within_noise(vowel, delta):
@@ -1144,17 +1154,16 @@ def _position_instruction(
             f" (band widened ×{widened:g}: the 1995 reference predates the low-back merger "
             f"and GOOSE-fronting, so a deviation here may be a change it did not see)"
         )
-    if label.startswith("F1"):
-        # Higher F1 means a more open vowel: the jaw is lower and the tongue further from the
-        # palate. So a positive delta — target above the speaker — asks for more openness.
-        move = "open the jaw further, tongue lower" if delta > 0 else "close the jaw, tongue higher"
-    else:
-        # Higher F2 means a fronter vowel with spread lips.
-        move = (
-            "tongue further front, lips spread"
-            if delta > 0
-            else "tongue further back, lips rounder"
-        )
+    if vowel_reference.is_merging(vowel):
+        # Not an error class — a sound change in progress. Said before the instruction so a
+        # reader does not start drilling a merger back apart.
+        caveat = f" {vowel_reference.MERGING_NOTE}{caveat}"
+    formant = "F1" if label.startswith("F1") else "F2"
+    move = vowel_reference.instruction_for(vowel, formant, delta)
+    if not move:
+        # An inventory member with no entry, which a test forbids — but a missing instruction
+        # must render as an honest blank rather than as a generated guess.
+        return f"{_signed(delta, 'z', 2)} → no articulatory instruction for this vowel{caveat}"
     return f"{_signed(delta, 'z', 2)} → {move}{caveat}"
 
 
@@ -1220,9 +1229,15 @@ def _rhoticity_findings(
         elif delta < -150:
             instruction = f"{_signed(delta, 'Hz')} → r-colouring is strong enough"
         else:
+            # A POSITIVE delta means the target F3−F2 sits above the speaker's, i.e. the
+            # speaker is already more r-coloured than the target; a negative one means F3 is
+            # too high above F2 and the r-colouring is thin. `instruction_for` is keyed on
+            # F3 itself, so the sign is flipped: a too-wide F3−F2 asks for a LOWER F3.
+            move = vowel_reference.instruction_for(vowel, "F3", -delta)
             instruction = (
-                f"{_signed(delta, 'Hz')} → F3 is sitting too high above F2: not enough "
-                f"r-colouring. Bunch the tongue body up and back, or curl the tip."
+                f"{_signed(delta, 'Hz')} → {move}"
+                if move
+                else f"{_signed(delta, 'Hz')} → no r-colouring instruction for this vowel"
             )
         found.append(
             Finding(
