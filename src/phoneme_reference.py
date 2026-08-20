@@ -71,6 +71,111 @@ _ALIASES: dict[str, str] = {
 }
 
 
+# --- Other notations mapped onto Azure's symbols ---------------------------------------------
+# `_ALIASES` above maps textbook IPA spellings onto Azure's. These do the same job for two
+# other notations the project has to read, and they live here for the same reason: one table
+# per direction, in the module that owns what an Azure symbol means.
+
+# Wells's standard lexical sets. The keyword is what makes a row readable at a glance — IPA
+# alone is unreadable ("/ɝ/ F3−F2" means nothing to a reader), the keyword alone is imprecise
+# (NURSE names a set, not a sound), and the accent surfaces print both.
+#
+# These duplicate the keyword already inside each entry's `label`, which is deliberate: the
+# label is prose and may be reworded, and extracting a keyword from it with a regex would
+# silently yield "" the day somebody does. A test asserts the two agree wherever the label
+# carries a keyword at all, so they cannot drift apart in silence.
+LEXICAL_SET: Mapping[str, str] = {
+    "i": "FLEECE",
+    "ɪ": "KIT",
+    "ɛ": "DRESS",
+    "æ": "TRAP",
+    "ɑ": "LOT",
+    "ɔ": "THOUGHT",
+    "ʌ": "STRUT",
+    "ʊ": "FOOT",
+    "u": "GOOSE",
+    "ɝ": "NURSE",
+    "ə": "commA",
+    "ɚ": "lettER",
+    "eɪ": "FACE",
+    "aɪ": "PRICE",
+    "oʊ": "GOAT",
+    "aʊ": "MOUTH",
+    "ɔɪ": "CHOICE",
+    "ɑɹ": "START",
+    "ɔɹ": "NORTH",
+    "ɛɹ": "SQUARE",
+    "ɪɹ": "NEAR",
+    "ʊɹ": "CURE",
+}
+
+# ARPABET, as the CMU Pronouncing Dictionary writes it, onto Azure's IPA. Read by
+# `stress_lexicon`, which is the only thing in the project that sees ARPABET at all — but the
+# right-hand side is this module's vocabulary, so the table belongs here beside `_ALIASES`
+# rather than in the consumer.
+#
+# **Two of these depend on the stress digit, which is why `from_arpabet` takes the whole
+# phone rather than the bare symbol.** CMUdict has no separate schwa: it writes reduced /ə/ as
+# `AH0` and full /ʌ/ as `AH1`/`AH2`, and likewise `ER0` for /ɚ/ against `ER1`/`ER2` for /ɝ/.
+# Stripping the digit first would merge each pair and destroy exactly the reduction signal
+# this dictionary was added to provide.
+_ARPABET: Mapping[str, str] = {
+    "AA": "ɑ",
+    "AE": "æ",
+    "AH": "ʌ",  # AH0 is handled separately below — it is schwa
+    "AO": "ɔ",
+    "AW": "aʊ",
+    "AY": "aɪ",
+    "EH": "ɛ",
+    "ER": "ɝ",  # ER0 is handled separately below — it is unstressed
+    "EY": "eɪ",
+    "IH": "ɪ",
+    "IY": "i",
+    "OW": "oʊ",
+    "OY": "ɔɪ",
+    "UH": "ʊ",
+    "UW": "u",
+}
+
+_ARPABET_UNSTRESSED: Mapping[str, str] = {"AH": "ə", "ER": "ɚ"}
+
+
+def is_arpabet_vowel(phone: str) -> bool:
+    """Whether an ARPABET phone is a vowel, i.e. whether it carries a stress digit.
+
+    CMUdict marks stress on vowels and only on vowels, so the digit IS the vowel test. `R` is
+    a consonant in ARPABET and carries none — which is what lets a CMUdict vowel sequence
+    align against Azure's, where `ɑɹ` is a single r-coloured vowel and `AA1 R` is a vowel plus
+    a consonant. Both sides count one.
+    """
+    return bool(phone) and phone[-1].isdigit()
+
+
+def arpabet_stress(phone: str) -> int | None:
+    """0, 1 or 2 for a vowel; None for a consonant. 0 is reduced, 1 primary, 2 secondary."""
+    return int(phone[-1]) if is_arpabet_vowel(phone) else None
+
+
+def from_arpabet(phone: str) -> str:
+    """One ARPABET phone as the IPA symbol Azure would emit. Empty when it is not a vowel.
+
+    Only vowels are mapped: the accent measurement slices vowels, and an ARPABET consonant
+    inventory would be a second consonant table with nothing reading it.
+    """
+    stress = arpabet_stress(phone)
+    if stress is None:
+        return ""
+    base = phone[:-1].upper()
+    if stress == 0 and base in _ARPABET_UNSTRESSED:
+        return _ARPABET_UNSTRESSED[base]
+    return _ARPABET.get(base, "")
+
+
+def keyword_for(symbol: str | None) -> str:
+    """The Wells lexical-set keyword for a vowel, or "" for a consonant or unknown symbol."""
+    return LEXICAL_SET.get(normalise(symbol), "")
+
+
 def normalise(symbol: str | None) -> str:
     """Reduce a symbol to the spelling Azure uses. Empty string when there is nothing to read.
 
