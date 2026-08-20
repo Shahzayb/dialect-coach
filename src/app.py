@@ -1531,6 +1531,40 @@ def reference_set() -> str:
     return chosen if chosen in vowel_reference.REFERENCE_SETS else ""
 
 
+@dataclass(frozen=True)
+class BaselineContext:
+    """The stored baseline, unpacked once per render.
+
+    Every accent surface needs the same four things out of `speaker_baseline`, and each was
+    previously doing its own `json.loads` at its own call site. One loader, so the noise floor
+    a chart draws and the noise floor a table quotes cannot come from different rows.
+    """
+
+    normaliser: Any | None
+    noise: Any | None
+    style: str
+    reference_set: str
+    row: Any | None = None
+
+    @property
+    def calibrated(self) -> bool:
+        return self.normaliser is not None
+
+
+def baseline_context(conn: sqlite3.Connection) -> BaselineContext:
+    """Load the current baseline, or an empty context when there is none."""
+    row = db.current_baseline(conn)
+    if row is None:
+        return BaselineContext(normaliser=None, noise=None, style="", reference_set="")
+    return BaselineContext(
+        normaliser=vowel_measure.normaliser_from_json(json.loads(row["normaliser_json"])),
+        noise=vowel_measure.noise_from_json(json.loads(row["noise_floor_json"])),
+        style=str(row["style_tag"]),
+        reference_set=str(row["reference_set"]),
+        row=row,
+    )
+
+
 def render_accent_table(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
     """The four-column table for one attempt, under its result."""
     measurement = entry.measurement
@@ -1568,25 +1602,48 @@ def render_accent_table(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
             icon="🚫",
         )
 
-    try:
-        normaliser = vowel_measure.lobanov(
-            measurement.accepted, categories=vowel_measure.REFERENCE_CATEGORIES
-        )
-    except vowel_measure.TooFewTokens as exc:
-        st.info(str(exc), icon="📉")
+    context = baseline_context(conn)
+    gate = vowel_measure.plot_gate(
+        measurement,
+        baseline_normaliser=context.normaliser,
+        baseline_style=context.style,
+    )
+
+    if gate.ok and gate.normaliser is not None:
+        # The stored baseline supplies the space, so this reading only has to supply the
+        # token. That is what lets a three-word drill produce a row at all: normalising a
+        # drill against itself needs a full inventory and would refuse every time.
+        normaliser, minimum = gate.normaliser, gate.minimum_tokens
+    elif context.normaliser is not None:
+        st.info(gate.reason, icon="📉")
         _render_rejections(measurement)
         return
+    else:
+        # No baseline yet. Fall back to normalising this reading against itself, which needs a
+        # full inventory — and says so rather than guessing when it does not have one.
+        try:
+            normaliser = vowel_measure.lobanov(
+                measurement.accepted, categories=vowel_measure.REFERENCE_CATEGORIES
+            )
+        except vowel_measure.TooFewTokens as exc:
+            st.info(str(exc), icon="📉")
+            _render_rejections(measurement)
+            return
+        minimum = vowel_measure.MIN_TOKENS_PER_CATEGORY
 
-    baseline_row = db.current_baseline(conn)
-    noise = (
-        vowel_measure.noise_from_json(json.loads(baseline_row["noise_floor_json"]))
-        if baseline_row is not None
-        else None
+    if gate.style_warning:
+        st.warning(gate.style_warning, icon="🗣️")
+
+    findings = vowel_measure.findings(
+        measurement,
+        normaliser,
+        reference_set=chosen,
+        noise=context.noise,
+        minimum=minimum,
     )
-    findings = vowel_measure.findings(measurement, normaliser, reference_set=chosen, noise=noise)
     st.markdown(accent_view.to_markdown(findings))
     st.caption(accent_view.PUBLISHED_CAPTION.format(set=chosen))
-    if noise is None:
+    if context.noise is None:
         st.caption(accent_view.noise_caption(None))
 
 

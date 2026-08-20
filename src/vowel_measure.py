@@ -1410,34 +1410,418 @@ def rejection_findings(tokens: Sequence[Token]) -> list[Finding]:
     ]
 
 
+# --- Which instrument a row belongs to --------------------------------------------------------
+# Every chart in `accent_charts` renders its own table beside it, and that table must be the
+# SAME rows the whole-measurement table already carries — not a second set built from the same
+# numbers a slightly different way. So the findings are produced once, keyed by instrument, and
+# `findings()` is the concatenation. One definition, two renderings.
+
+POSITION = "position"
+TRAJECTORY = "trajectory"
+RHOTICITY = "rhoticity"
+DURATION = "duration"
+REDUCTION = "reduction"
+STRESS = "stress"
+PITCH = "pitch"
+RHYTHM = "rhythm"
+REJECTED = "rejected"
+
+# Reading order, and the order the Accent page renders in. **Rhoticity leads**: it is the
+# loudest, cleanest, most correctable marker available for a General American target, and on a
+# non-rhotic-influenced accent it is routinely the largest single gap on the page. Rejections
+# come last, so the table ends by admitting what it could not do.
+INSTRUMENT_ORDER: tuple[str, ...] = (
+    RHOTICITY,
+    POSITION,
+    TRAJECTORY,
+    PITCH,
+    DURATION,
+    REDUCTION,
+    RHYTHM,
+    STRESS,
+    REJECTED,
+)
+
+# The instruments that fall out of a `Measurement` alone. `PITCH` and `RHYTHM` need inputs a
+# measurement does not carry — the model's rendering of the same text, and the assessment's own
+# word timings — so they are built by their own functions and merged by the caller.
+MEASUREMENT_INSTRUMENTS: tuple[str, ...] = (
+    RHOTICITY,
+    POSITION,
+    TRAJECTORY,
+    DURATION,
+    REDUCTION,
+    STRESS,
+    REJECTED,
+)
+
+
+def findings_by_instrument(
+    measurement: Measurement,
+    normaliser: Normaliser,
+    *,
+    reference_set: str,
+    noise: NoiseFloor | None = None,
+    minimum: int = MIN_TOKENS_PER_CATEGORY,
+) -> dict[str, list[Finding]]:
+    """The four-column rows for one measurement, split by which instrument produced them.
+
+    `minimum` is the per-category token floor. It is `MIN_TOKENS_PER_CATEGORY` when the
+    speaker is being normalised from their own reading, and **1** when a stored baseline is
+    supplying the normalisation — see `plot_gate`. A single token is a legitimate point once
+    the space it sits in was established elsewhere, provided its count travels with it, which
+    `VowelPosition.n` guarantees.
+    """
+    accepted = measurement.accepted
+    speaker = positions(accepted, normaliser, minimum=minimum)
+    reference = reference_positions(reference_set)
+    centroid = reduction(accepted, normaliser)
+
+    return {
+        RHOTICITY: _rhoticity_findings(speaker, reference),
+        POSITION: _position_findings(speaker, reference, noise),
+        TRAJECTORY: _trajectory_findings(speaker, reference),
+        DURATION: (
+            _duration_findings(tense_lax_ratios(accepted, reference_set), "tense")
+            + _duration_findings(pre_fortis_ratios(accepted), "clipping")
+        ),
+        REDUCTION: [_reduction_finding(centroid)],
+        STRESS: _stress_findings(stress_contrasts(accepted, normaliser, centroid)),
+        REJECTED: rejection_findings(measurement.tokens),
+    }
+
+
 def findings(
     measurement: Measurement,
     normaliser: Normaliser,
     *,
     reference_set: str,
     noise: NoiseFloor | None = None,
+    minimum: int = MIN_TOKENS_PER_CATEGORY,
 ) -> list[Finding]:
     """Every four-column row for one measurement, in reading order.
 
-    Position and trajectory first, because they are what the chart shows; then rhoticity, which
-    is the single most correctable marker; then the duration and reduction measures; then
-    stress; then the rejections, last, so the table ends by admitting what it could not do.
+    The concatenation of `findings_by_instrument` in `INSTRUMENT_ORDER`. Kept as its own name
+    because most callers want the whole table and should not have to know the keys.
+    """
+    grouped = findings_by_instrument(
+        measurement, normaliser, reference_set=reference_set, noise=noise, minimum=minimum
+    )
+    rows: list[Finding] = []
+    for instrument in INSTRUMENT_ORDER:
+        rows += grouped.get(instrument, [])
+    return rows
+
+
+# --- May this be drawn at all? ----------------------------------------------------------------
+
+
+NO_BASELINE = (
+    "**No stored baseline, so nothing here can be charted.** Establishing the vowel space "
+    "needs a full inventory from one speaker — the calibration passage, read twice. Until "
+    "that exists there is no centroid to normalise against, and a point plotted without one "
+    "is a confident dot drawn from a normalisation that does not exist."
+)
+
+NOTHING_MEASURABLE = (
+    "**Nothing in this recording could be measured.** Every vowel token was refused — see the "
+    "rejection table for what was refused and why."
+)
+
+STYLE_MISMATCH = (
+    "**This is {measured} speech measured against a baseline built from {baseline} speech.** "
+    "A baseline built from read speech normalises read speech; the two are different "
+    "populations, and the gap below carries some of that difference rather than only your "
+    "accent. Recalibrate on the same style to compare like with like."
+)
+
+
+@dataclass(frozen=True)
+class PlotGate:
+    """Whether this measurement may be drawn, and in whose vowel space.
+
+    **The gate is "is there a stored baseline", never "which mode was this".** Establishing
+    the normalisation reference needs a full vowel inventory from one speaker, which a
+    three-word drill cannot supply. But USING an already-stored baseline needs only the token
+    being measured — so once calibration has run, a drill token is a legitimate single point
+    with its count shown beside it.
+
+    Getting this wrong is costly in both directions. Refusing to plot drills throws away the
+    measure-drill-remeasure loop, which is the entire purpose of the accent surfaces; plotting
+    before a baseline exists draws a confident dot from a normalisation that does not exist.
+    """
+
+    ok: bool
+    reason: str
+    normaliser: Normaliser | None
+    minimum_tokens: int
+    tokens: int
+    # Not a refusal. A stated caveat, because a baseline built from read speech normalises read
+    # speech and saying so is the difference between a comparison and a category error.
+    style_warning: str = ""
+
+
+def plot_gate(
+    measurement: Measurement,
+    *,
+    baseline_normaliser: Normaliser | None,
+    baseline_style: str = "",
+) -> PlotGate:
+    """Decide whether to chart this measurement, and which normalisation to chart it in.
+
+    Takes the normaliser rather than a database row so this module stays SQL-free and the rule
+    is testable without a connection — `app.py` does the `json.loads`.
     """
     accepted = measurement.accepted
-    speaker = positions(accepted, normaliser)
+    if baseline_normaliser is None:
+        return PlotGate(
+            ok=False,
+            reason=NO_BASELINE,
+            normaliser=None,
+            minimum_tokens=MIN_TOKENS_PER_CATEGORY,
+            tokens=len(accepted),
+        )
+    if not accepted:
+        return PlotGate(
+            ok=False,
+            reason=NOTHING_MEASURABLE,
+            normaliser=baseline_normaliser,
+            minimum_tokens=1,
+            tokens=0,
+        )
+    warning = ""
+    if baseline_style and measurement.style and measurement.style != baseline_style:
+        warning = STYLE_MISMATCH.format(measured=measurement.style, baseline=baseline_style)
+    return PlotGate(
+        ok=True,
+        reason="",
+        normaliser=baseline_normaliser,
+        # One token is enough once the SPACE it sits in came from somewhere else. The count
+        # travels on every point and every row, so thin evidence looks thin.
+        minimum_tokens=1,
+        tokens=len(accepted),
+        style_warning=warning,
+    )
+
+
+# --- Ranking what to practise next ------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Gap:
+    """One measured shortfall, big enough to be worth a drill.
+
+    `magnitude` is in `unit`, always positive, and **only comparable within a metric**. There
+    is deliberately no cross-metric severity score: 0.6 z of vowel displacement and 300 Hz of
+    missing r-colouring are not commensurable, and inventing an exchange rate between them
+    would be the kind of confident-and-unfounded number this project exists to delete. The
+    ranking is therefore per metric, and `ranked_gaps` interleaves by metric priority.
+    """
+
+    vowel: str
+    metric: str
+    magnitude: float
+    unit: str
+    detail: str
+    n: int
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def label(self) -> str:
+        keyword = phoneme_reference.keyword_for(self.vowel)
+        return f"/{self.vowel}/ {keyword}".strip()
+
+
+# How many of each metric reach the coach. Three is enough to write a report around and few
+# enough that the payload stays the fraction of the raw response `compact` exists to be.
+GAPS_PER_METRIC = 3
+
+
+def ranked_gaps(
+    measurement: Measurement,
+    normaliser: Normaliser,
+    *,
+    reference_set: str,
+    noise: NoiseFloor | None = None,
+    minimum: int = MIN_TOKENS_PER_CATEGORY,
+    limit: int = GAPS_PER_METRIC,
+) -> list[Gap]:
+    """What the geometry says is worth practising, worst first within each metric.
+
+    **Everything smaller than the noise floor is dropped before ranking**, not flagged after.
+    A vowel that moved less than the band moves that much between two reads with no learning
+    at all, so it is not a finding, and a finding that is not real must not become a drill.
+    """
+    accepted = measurement.accepted
+    speaker = positions(accepted, normaliser, minimum=minimum)
     reference = reference_positions(reference_set)
     centroid = reduction(accepted, normaliser)
 
-    rows: list[Finding] = []
-    rows += _position_findings(speaker, reference, noise)
-    rows += _trajectory_findings(speaker, reference)
-    rows += _rhoticity_findings(speaker, reference)
-    rows += _duration_findings(tense_lax_ratios(accepted, reference_set), "tense")
-    rows += _duration_findings(pre_fortis_ratios(accepted), "clipping")
-    rows.append(_reduction_finding(centroid))
-    rows += _stress_findings(stress_contrasts(accepted, normaliser, centroid))
-    rows += rejection_findings(measurement.tokens)
-    return rows
+    found: dict[str, list[Gap]] = {RHOTICITY: [], POSITION: [], TRAJECTORY: [], REDUCTION: []}
+
+    for vowel, position in speaker.items():
+        target = reference.get(vowel)
+        if target is None:
+            continue
+
+        # Position — the arrow's length, net of the band it has to clear to be real.
+        # Bound to locals rather than tested as a tuple: `None not in (...)` is true at
+        # runtime and invisible to the type checker, and the ignore it would otherwise need is
+        # exactly the kind that goes stale without anyone noticing.
+        one, two = position.f1_z, position.f2_z
+        aim_f1, aim_f2 = target.f1_z, target.f2_z
+        if one is not None and two is not None and aim_f1 is not None and aim_f2 is not None:
+            f1_delta, f2_delta = aim_f1 - one, aim_f2 - two
+            arrow = math.hypot(f1_delta, f2_delta)
+            band = (noise.band_for(vowel) if noise else None) or 0.0
+            if arrow > band:
+                found[POSITION].append(
+                    Gap(
+                        vowel=vowel,
+                        metric=POSITION,
+                        magnitude=arrow - band,
+                        unit="z",
+                        detail=(
+                            f"sits {arrow:.2f} z from the General American target, against a "
+                            f"{band:.2f} z measurement band"
+                        ),
+                        n=position.n,
+                        evidence={
+                            "arrow_z": round(arrow, 3),
+                            "noise_band_z": round(band, 3),
+                            "f1_delta_z": round(f1_delta, 3),
+                            "f2_delta_z": round(f2_delta, 3),
+                            "tokens": position.n,
+                        },
+                    )
+                )
+
+        # Trajectory — how much of the glide is missing. A monophthongised diphthong is the
+        # clearest single thing the charts show, so a shortfall here ranks on its own.
+        entry = phoneme_reference.lookup(vowel)
+        if entry is not None and entry.kind == "diphthong" and target.f2_travel_hz:
+            produced_travel = abs(position.f2_travel_hz or 0.0)
+            wanted = abs(target.f2_travel_hz)
+            if produced_travel < wanted:
+                found[TRAJECTORY].append(
+                    Gap(
+                        vowel=vowel,
+                        metric=TRAJECTORY,
+                        magnitude=wanted - produced_travel,
+                        unit="Hz",
+                        detail=(
+                            f"glides {produced_travel:.0f} Hz where General American glides "
+                            f"{wanted:.0f} Hz — the diphthong is flattening toward a monophthong"
+                        ),
+                        n=position.n,
+                        evidence={
+                            "produced_travel_hz": round(produced_travel),
+                            "target_travel_hz": round(wanted),
+                            "tokens": position.n,
+                        },
+                    )
+                )
+
+        # Rhoticity — F3 sitting too far above F2 is r-colouring that is not arriving.
+        # /ɝ/ has a published mean; /ɚ/ and the /Vɹ/ sequences do not and fall back to it —
+        # the same substitution `_rhoticity_findings` makes, for the same reason: r-colouring
+        # is one articulatory gesture whatever vowel carries it.
+        rhotic = vowel in {"ɝ", "ɚ"} or (entry is not None and entry.kind == "r-coloured")
+        nurse = reference.get("ɝ")
+        against = target.f3_minus_f2_hz
+        if against is None and nurse is not None:
+            against = nurse.f3_minus_f2_hz
+        if rhotic and position.f3_minus_f2_hz is not None and against is not None:
+            excess = position.f3_minus_f2_hz - against
+            if excess > 0:
+                found[RHOTICITY].append(
+                    Gap(
+                        vowel=vowel,
+                        metric=RHOTICITY,
+                        magnitude=excess,
+                        unit="Hz",
+                        detail=(
+                            f"F3 sits {position.f3_minus_f2_hz:.0f} Hz above F2 where the "
+                            f"target is {against:.0f} Hz — {excess:.0f} Hz of missing "
+                            f"r-colouring"
+                        ),
+                        n=position.n,
+                        evidence={
+                            "f3_minus_f2_hz": round(position.f3_minus_f2_hz),
+                            "target_f3_minus_f2_hz": round(against),
+                            "excess_hz": round(excess),
+                            "tokens": position.n,
+                        },
+                    )
+                )
+
+    # Reduction — one gap, not one per vowel: it is a property of the whole reading.
+    if centroid.measured and centroid.stressed_distance_z:
+        unstressed = float(centroid.mean_distance_z or 0.0)
+        stressed = float(centroid.stressed_distance_z)
+        ratio = unstressed / stressed if stressed else 0.0
+        if ratio > 0.8:
+            found[REDUCTION].append(
+                Gap(
+                    vowel="ə",
+                    metric=REDUCTION,
+                    magnitude=unstressed - stressed,
+                    unit="z",
+                    detail=(
+                        f"unstressed vowels sit {unstressed:.2f} z from your own schwa "
+                        f"centroid against {stressed:.2f} z for the stressed ones — they are "
+                        f"barely reducing at all"
+                    ),
+                    n=centroid.n_unstressed,
+                    evidence={
+                        "unstressed_distance_z": round(unstressed, 3),
+                        "stressed_distance_z": round(stressed, 3),
+                        "ratio": round(ratio, 3),
+                        "tokens": centroid.n_unstressed,
+                    },
+                )
+            )
+
+    ranked: list[Gap] = []
+    for metric in (RHOTICITY, POSITION, TRAJECTORY, REDUCTION):
+        ranked += sorted(found[metric], key=lambda gap: -gap.magnitude)[:limit]
+    return ranked
+
+
+def rhythm_gap(measured_npvi: float | None, reference_npvi: float | None) -> Gap | None:
+    """The nPVI deviation as a `Gap`, so rhythm reaches the coach the same way vowels do.
+
+    Separate from `ranked_gaps` because nPVI is not a property of a vowel token — it is a
+    property of the whole reading, and it comes from `rhythm.py` rather than from a
+    `Measurement`. A LOWER nPVI than the reference means the vowels are closer to equal in
+    length, which is what a syllable-timed rhythm carried into English sounds like.
+    """
+    if measured_npvi is None or reference_npvi is None:
+        return None
+    delta = measured_npvi - reference_npvi
+    if abs(delta) < 1.0:
+        return None
+    direction = (
+        "more even in length than the reference — the hallmark of a syllable-timed rhythm "
+        "carried into English"
+        if delta < 0
+        else "more uneven in length than the reference"
+    )
+    return Gap(
+        vowel="",
+        metric=RHYTHM,
+        magnitude=abs(delta),
+        unit="nPVI",
+        detail=(
+            f"nPVI {measured_npvi:.1f} against {reference_npvi:.1f} — your vowels are {direction}"
+        ),
+        n=0,
+        evidence={
+            "npvi": round(measured_npvi, 2),
+            "reference_npvi": round(reference_npvi, 2),
+            "delta": round(delta, 2),
+        },
+    )
 
 
 # --- Storage shapes ---------------------------------------------------------------------------
