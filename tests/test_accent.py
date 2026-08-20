@@ -383,3 +383,23 @@ def test_the_chart_keeps_a_series_legend() -> None:
         assert colour.get("legend") is not None or "legend" not in colour, (
             "a layer suppressing the colour legend suppresses the merged one"
         )
+
+
+def test_the_rejection_table_renders_when_nothing_can_be_normalised(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The branch that shows what was refused when there is nothing else to show.
+
+    It exists so a measurement that produced no usable vowels is still legible — a thin table,
+    visibly thin — and it was reached by no test until a rename broke it and only mypy noticed.
+    """
+    wav, words = build_recording([("had", [("h", 60), ("æ", 20), ("d", 70)])] * 4)
+    measurement = vowel_measure.extract(words, wav, ceiling_hz=5000.0, snr_db_min=30.0)
+    assert not measurement.accepted, "the fixture is meant to have nothing usable"
+
+    rows = vowel_measure.rejection_findings(measurement.tokens)
+    assert rows
+    rendered = accent_view.to_markdown(rows)
+    assert "| Acoustic Feature |" in rendered
+    assert vowel_measure.REJECT_SHORT in rendered
+    assert "Refused rather than guessed" in rendered

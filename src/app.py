@@ -1595,7 +1595,7 @@ def _render_rejections(measurement: Any) -> None:
     rejected = measurement.rejected
     if not rejected:
         return
-    st.markdown(accent_view.to_markdown(vowel_measure._rejection_findings(measurement.tokens)))
+    st.markdown(accent_view.to_markdown(vowel_measure.rejection_findings(measurement.tokens)))
 
 
 def calibration_reads(conn: sqlite3.Connection) -> list[sqlite3.Row]:
