@@ -1115,6 +1115,14 @@ def coaching_for(
         # The guard belongs where the spend is, the same rule the TTS cache follows.
         return cast("tuple[Any, str]", cached)
 
+    # Computed before either branch so both coaches see the same evidence, and inside the
+    # cache guard so it is not re-derived on every unrelated rerun.
+    try:
+        gaps = geometry_gaps(conn, entry)
+    except Exception:  # a report is promised on every assessment, geometry or not
+        logger.warning("Could not derive the vowel geometry for the coach", exc_info=True)
+        gaps = []
+
     if ask_model:
         # Marked before the call, not after, and on the attempt rather than the outcome: a
         # call that reached Gemini and then fell back (malformed JSON, nothing surviving
@@ -1122,10 +1130,10 @@ def coaching_for(
         # leave the button live and let the same failure be bought over and over.
         _mark_gemini_attempted(entry.key)
         with st.spinner("Asking Gemini for a second opinion…"):
-            result = ai_coach.coach(entry.assessment, entry.reference_text, entry.mode)
+            result = ai_coach.coach(entry.assessment, entry.reference_text, entry.mode, gaps=gaps)
     else:
         try:
-            report = fallback_coach.build(entry.assessment, entry.mode)
+            report = fallback_coach.build(entry.assessment, entry.mode, gaps=gaps)
         except Exception as exc:  # a report is promised on every assessment
             logger.error("Could not build the offline report", exc_info=True)
             report = fallback_coach.emergency_report(f"{type(exc).__name__}: {exc}")
@@ -1271,6 +1279,53 @@ def render_coaching(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
         st.markdown(report.practice_plan)
 
     render_bridging_phrases(conn, report, entry)
+
+
+def geometry_gaps(conn: sqlite3.Connection, entry: CachedAttempt) -> list[Any]:
+    """What the vowel measurements say is worth practising, for the coach payload.
+
+    **This is the half of the diagnosis Azure cannot see.** The phoneme scores are categorical
+    — this sound or that one — and the geometry is continuous: how far each vowel sits from
+    General American, in which direction, net of the measurement noise floor. Without this the
+    coach writes from the phoneme payload alone and the whole measurement chunk stops at the
+    charts, which is where it sat until this was wired.
+
+    Empty is the ordinary answer and never an error: it needs a stored baseline, a reference
+    set and a measurement, and most attempts have none of the three. The report has to come
+    out the same shape either way.
+    """
+    measurement = entry.measurement
+    chosen = reference_set()
+    if measurement is None or not chosen:
+        return []
+    context = baseline_context(conn)
+    gate = vowel_measure.plot_gate(
+        measurement,
+        baseline_normaliser=context.normaliser,
+        baseline_style=context.style,
+    )
+    if not gate.ok or gate.normaliser is None:
+        return []
+    gaps = vowel_measure.ranked_gaps(
+        measurement,
+        gate.normaliser,
+        reference_set=chosen,
+        noise=context.noise,
+        minimum=gate.minimum_tokens,
+    )
+    # Rhythm is a property of the whole reading rather than of any token, so it comes from
+    # `rhythm.py` and not from the measurement — but it belongs in the same section, because
+    # what the coach needs is one continuous picture and not two.
+    if entry.attempt_id:
+        words = _words_for(conn, entry.attempt_id, entry.reference_text)
+        baseline = rhythm.baseline()
+        pace = vowel_measure.rhythm_gap(
+            rhythm.npvi(words).npvi if words else None,
+            baseline.rhythm.npvi if baseline is not None else None,
+        )
+        if pace is not None:
+            gaps = [*gaps, pace]
+    return gaps
 
 
 def render_bridging_phrases(conn: sqlite3.Connection, report: Any, entry: CachedAttempt) -> None:
@@ -2062,7 +2117,7 @@ def render_accent_charts(conn: sqlite3.Connection) -> None:
 
     # 4. Pitch.
     st.markdown("### Intonation — your contour against the model's")
-    render_pitch_overlay(conn, int(attempt_id), measurement, modelled)
+    render_pitch_overlay(conn, int(attempt_id), measurement, modelled, published, normaliser)
 
     # 5. Duration.
     st.markdown("### Vowel length")
@@ -2098,7 +2153,12 @@ def stored_audio_bytes(conn: sqlite3.Connection, attempt_id: int) -> bytes | Non
 
 
 def render_pitch_overlay(
-    conn: sqlite3.Connection, attempt_id: int, measurement: Any, modelled: Mapping[str, Any]
+    conn: sqlite3.Connection,
+    attempt_id: int,
+    measurement: Any,
+    modelled: Mapping[str, Any],
+    published: Mapping[str, Any],
+    normaliser: Any,
 ) -> None:
     """Two contours on one time axis, plus the resynthesis that makes the gap audible."""
     attempt = db.get_attempt(conn, attempt_id)
@@ -2159,7 +2219,15 @@ def render_pitch_overlay(
         "No pitch could be tracked in this recording.",
     )
     render_resynthesis(
-        wav_bytes, user_track, model_tracks, anchors, attempt_id, measurement, modelled
+        wav_bytes,
+        user_track,
+        model_tracks,
+        anchors,
+        attempt_id,
+        measurement,
+        modelled,
+        published,
+        normaliser,
     )
 
 
@@ -2252,6 +2320,8 @@ def render_resynthesis(
     attempt_id: int,
     measurement: Any,
     modelled: Mapping[str, Any],
+    published: Mapping[str, Any],
+    normaliser: Any,
 ) -> None:
     """Your own voice with the model's intonation, played after your own voice unchanged.
 
@@ -2293,7 +2363,10 @@ def render_resynthesis(
             ),
         )
     if vowel.button("Fix one vowel", key=f"{key}_vowel"):
-        run("vowel", lambda: _correct_worst_vowel(wav_bytes, measurement, modelled))
+        run(
+            "vowel",
+            lambda: _correct_worst_vowel(wav_bytes, measurement, published, normaliser),
+        )
 
     result = st.session_state.get(key)
     if result is None:
@@ -2327,28 +2400,44 @@ def _duration_stretches(
     return stretches
 
 
-def _correct_worst_vowel(wav_bytes: bytes, measurement: Any, modelled: Mapping[str, Any]) -> Any:
+def _correct_worst_vowel(
+    wav_bytes: bytes, measurement: Any, published: Mapping[str, Any], normaliser: Any
+) -> Any:
     """Shift the single worst-placed vowel token and leave the rest of the clip untouched.
 
     The worst token, not the worst category: the point of this surface is that everything
     either side is bit-identical, so it has to act on one span of audio.
+
+    **Chosen and shifted in z, never in raw hertz.** Formants scale with vocal tract length,
+    so ranking tokens by their hertz distance to a reference talker's mean picks whichever
+    vowel carries the largest ANATOMICAL offset — a speaker with a longer tract has every F2
+    low, and the demonstration would then shift a vowel toward the reference's larynx rather
+    than toward the target accent. The gap is measured in the speaker's own normalised space,
+    and the target is mapped back out through `Normaliser.hz` to ask the only question the
+    manipulation can act on: where would THIS speaker's F2 be if the vowel sat on target.
     """
-    worst = None
+    worst: tuple[Any, float] | None = None
     worst_gap = 0.0
     for token in measurement.accepted:
-        target = modelled.get(token.vowel)
-        if target is None or target.f2_hz is None or token.at50.f2 is None:
+        target = published.get(token.vowel)
+        if target is None or target.f2_z is None or token.at50.f2 is None:
             continue
-        gap = abs(target.f2_hz - token.at50.f2)
+        _, produced_z, _ = normaliser.z(token.at50)
+        if produced_z is None:
+            continue
+        gap = abs(target.f2_z - produced_z)
         if gap > worst_gap:
-            worst, worst_gap = (token, target), gap
+            _, aim_hz = normaliser.hz(None, target.f2_z)
+            if aim_hz is None or aim_hz <= 0:
+                continue
+            worst, worst_gap = (token, aim_hz), gap
     if worst is None:
         raise accent_resynth.ResynthesisError(
             "No vowel in this recording has both a measurement and a target to move toward."
         )
-    token, target = worst
+    token, aim_hz = worst
     return accent_resynth.corrected_vowel(
-        wav_bytes, token.start_s, token.end_s, float(token.at50.f2), float(target.f2_hz)
+        wav_bytes, token.start_s, token.end_s, float(token.at50.f2), float(aim_hz)
     )
 
 

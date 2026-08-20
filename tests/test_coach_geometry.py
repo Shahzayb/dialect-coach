@@ -155,3 +155,95 @@ def test_the_prompt_asks_for_a_sentence_and_forbids_a_word_list() -> None:
     assert "bridging_phrases" in instruction
     assert "never a word list" in instruction.lower()
     assert "varied consonant contexts" in instruction.lower()
+
+
+# --- The wiring, which is the half that was missing --------------------------------------------
+# Every rule above was covered by tests and none of it ran: nothing in `src/` passed the gaps
+# to either coach, so `compact()`'s empty `vowel_geometry` was what both of them actually saw
+# and the bridging phrases, the one-click drill and the queue promotion never rendered. These
+# assert the seam rather than the rule.
+
+
+def assessment():
+    """The smallest real `Assessment` `compact` will walk. The geometry is what is under test."""
+    import speech_analyzer as sa
+
+    return sa.Assessment(
+        raw=[],
+        overall_scores={"pron_score": 62.0},
+        recognised_text="the north wind and the sun",
+        words=[],
+    )
+
+
+def test_the_offline_coach_writes_phrases_for_the_gaps_it_is_handed() -> None:
+    from utils import Mode
+
+    report = fc.build(assessment(), Mode.PARAGRAPH, gaps=[gap("ɝ"), gap("u")])
+    assert [phrase.vowel for phrase in report.bridging_phrases] == ["ɝ", "u"]
+    assert all(phrase.phrase.strip() for phrase in report.bridging_phrases)
+
+
+def test_the_offline_coach_writes_none_when_there_is_no_geometry() -> None:
+    """The ordinary case: no stored baseline, so no geometry, and the report is unchanged."""
+    from utils import Mode
+
+    assert fc.build(assessment(), Mode.PARAGRAPH).bridging_phrases == []
+
+
+def test_the_model_coach_is_handed_the_geometry_too() -> None:
+    """Offline, so this exercises the compaction and the fallback, which is the shared path."""
+    from utils import Mode
+
+    result = ai_coach.coach(
+        assessment(), "the north wind and the sun", Mode.PARAGRAPH, gaps=[gap("ɝ")]
+    )
+    assert [phrase.vowel for phrase in result.report.bridging_phrases] == ["ɝ"]
+
+
+def test_a_whole_reading_measure_carries_no_bridging_phrase() -> None:
+    """`rhythm_gap` has no vowel — it is a property of the reading, not of a token.
+
+    It belongs in the section, because what the coach needs is one continuous picture rather
+    than two. It must not produce a phrase, and it must not license one either.
+    """
+    pace = vowel_measure.rhythm_gap(40.0, 55.0)
+    assert pace is not None and pace.vowel == ""
+    compacted = fc.with_geometry(dict(BASE), [pace, gap("i")])
+
+    assert len(compacted["vowel_geometry"]) == 2, "the rhythm measure was dropped from the payload"
+    assert [phrase.vowel for phrase in fc.bridging_phrases(compacted)] == ["i"]
+
+    invented = fc.CoachingReport(
+        overall_comment="x",
+        priority_fixes=[],
+        delivery_drills=[],
+        stress_and_rhythm=fc.StressAndRhythm(issues=["x"], drill="x"),
+        practice_plan="x",
+        bridging_phrases=[
+            fc.BridgingPhrase(vowel="", keyword="", why="x", phrase="Say it evenly.")
+        ],
+    )
+    kept = ai_coach._checked_bridging_phrases(invented, compacted)
+    assert all(phrase.vowel for phrase in kept), "a phrase was kept for a vowel-less measure"
+
+
+def test_the_app_hands_the_geometry_to_whichever_coach_runs() -> None:
+    """Asserted against the source: this is a wiring bug, and wiring is not observable.
+
+    `AppTest` cannot reach this — it needs a stored baseline, a reference set and a real
+    measurement — and a unit test of `geometry_gaps` would pass just as happily while nothing
+    called it. What has to be true is that both branches receive `gaps`.
+    """
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parent.parent / "src" / "app.py").read_text("utf-8")
+    body = source[source.index('    cache = _session_cache("coaching")') :]
+    body = body[: body.index("    lru_put(cache")]
+
+    assert "gaps = geometry_gaps(conn, entry)" in body
+    assert "ai_coach.coach(" in body and "gaps=gaps" in body
+    assert "fallback_coach.build(entry.assessment, entry.mode, gaps=gaps)" in body
+    assert body.index("gaps = geometry_gaps") < body.index("if ask_model:"), (
+        "the geometry is derived after the branch, so one coach would not see it"
+    )

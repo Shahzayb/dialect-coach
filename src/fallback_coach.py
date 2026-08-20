@@ -695,10 +695,14 @@ def emergency_report(reason: str) -> CoachingReport:
     )
 
 
-def build(assessment: Any, mode: Mode) -> CoachingReport:
-    """The whole report, from the Azure data alone."""
-    compacted = compact(assessment, mode)
-    return build_from_compacted(compacted)
+def build(assessment: Any, mode: Mode, *, gaps: Sequence[Any] = ()) -> CoachingReport:
+    """The whole report, from the Azure data alone, plus whatever the geometry measured.
+
+    `gaps` is optional and empty is the normal case: the vowel geometry needs a stored baseline
+    and a measurement, and most attempts have neither. The report must come out the same shape
+    either way, which is why this is an argument rather than something `compact` reaches for.
+    """
+    return build_from_compacted(with_geometry(compact(assessment, mode), gaps))
 
 
 def build_from_compacted(compacted: dict[str, Any]) -> CoachingReport:

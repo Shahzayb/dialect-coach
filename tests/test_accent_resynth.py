@@ -355,3 +355,26 @@ def test_the_pitch_track_is_analysed_once_however_many_contour_points(
     assert len(contour) > 100, "the contour is too short to distinguish the two behaviours"
     accent_resynth.corrected_pitch(steady, contour)
     assert calls == 1, f"analysed the recording {calls} times for {len(contour)} contour points"
+
+
+# --- Picking the vowel to fix ------------------------------------------------------------------
+
+
+def test_the_vowel_to_correct_is_chosen_in_z_and_not_in_raw_hertz() -> None:
+    """Formants scale with vocal tract length, so raw hertz picks the wrong vowel.
+
+    A speaker whose tract is longer than the reference set's has every F2 low by roughly a
+    constant factor. Ranked in hertz, the "worst" vowel is whichever carries the largest
+    ANATOMICAL offset and the clip demonstrates a shift toward the reference talker's larynx.
+    Asserted against the source because the alternative is a Streamlit page with a stored
+    baseline behind it, and what is wrong here is which two numbers the ranking reads.
+    """
+    from pathlib import Path
+
+    source = (Path(__file__).resolve().parent.parent / "src" / "app.py").read_text("utf-8")
+    body = source[source.index("def _correct_worst_vowel(") :]
+    body = body[: body.index("\ndef _target_contour")]
+
+    assert "target.f2_z" in body, "the ranking does not read the target in z"
+    assert "normaliser.hz(" in body, "the target is not mapped back into the speaker's hertz"
+    assert "target.f2_hz" not in body, "the ranking still reads a reference talker's hertz"
