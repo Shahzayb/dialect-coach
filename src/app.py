@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import difflib
 import html
+import json
 import logging
 import sqlite3
 import threading
@@ -31,6 +32,8 @@ from typing import Any, cast
 
 import streamlit as st
 
+import accent_view
+import acoustics
 import ai_coach
 import audio_utils
 import budget
@@ -45,6 +48,8 @@ import shadowing
 import speech_analyzer
 import tts
 import utils
+import vowel_measure
+import vowel_reference
 from utils import AzureBand, Band, Mode
 
 logger = logging.getLogger(__name__)
@@ -226,6 +231,10 @@ class CachedAttempt:
     reference_text: str
     attempt_id: int | None
     mode: Mode
+    # The vowel measurement for this attempt, or None when it could not be taken. It travels
+    # here rather than being re-derived on render because it is expensive — a Burg analysis of
+    # the whole recording — and Streamlit re-runs the script on every widget interaction.
+    measurement: Any = None
 
 
 @dataclass
@@ -242,6 +251,7 @@ class AssessOutcome:
     error: tuple[str, str] | None = None
     cancelled: bool = False
     reached_azure: bool = False
+    measurement: Any = None
 
 
 @dataclass
@@ -715,6 +725,82 @@ def prepare_audio(
     return wav_bytes, seconds
 
 
+# --- The accent measurement ------------------------------------------------------------------
+
+# The speech-style tag. Scripted modes are read speech; Mode C, when it lands in v0.12.0, is
+# not. Derived from the mode rather than asked for, so it cannot be forgotten on an attempt.
+STYLE_READ = "read"
+STYLE_SPONTANEOUS = "spontaneous"
+
+
+def style_for(mode: Mode) -> str:
+    """Which measurement population an attempt belongs to."""
+    return STYLE_SPONTANEOUS if mode is Mode.UNSCRIPTED else STYLE_READ
+
+
+def measure_vowels(
+    conn: sqlite3.Connection, assessment: Any, wav_bytes: bytes, mode: Mode
+) -> Any | None:
+    """Measure this recording's vowels, or return None. Never raises into the worker thread.
+
+    A measurement failure must not cost the user the assessment they just paid Azure for, so
+    every exit here is a value. `snr_db_min` comes from `overall_scores`, where
+    `speech_analyzer._snr` already put it — the payload is not re-parsed.
+
+    The ceiling comes from the stored baseline when there is one, so every later reading is
+    measured in the same space the baseline was. With no baseline yet the sweep runs, which is
+    what a calibration read wants.
+    """
+    if assessment.offline:
+        # The offline fixture is a stored payload with no audio behind it. Its phoneme offsets
+        # point into a recording that is not here, so slicing them would measure whatever the
+        # user happened to record against the wrong transcript.
+        return None
+    try:
+        baseline = db.current_baseline(conn)
+        override = (utils.get("LPC_CEILING_HZ") or "").strip()
+        ceiling: float | None = None
+        if override:
+            ceiling = float(override)
+        elif baseline is not None:
+            ceiling = float(baseline["lpc_ceiling_hz"])
+        return vowel_measure.extract(
+            assessment.words,
+            wav_bytes,
+            ceiling_hz=ceiling,
+            snr_db_min=assessment.overall_scores.get("snr_db_min"),
+            style=style_for(mode),
+        )
+    except Exception:
+        logger.warning("Vowel measurement failed; the attempt is still recorded", exc_info=True)
+        return None
+
+
+def store_measurement(
+    conn: sqlite3.Connection,
+    attempt_id: int,
+    wav_bytes: bytes,
+    digest: str,
+    measurement: Any,
+) -> None:
+    """Keep the recording and its tokens. Failure here costs re-derivation, never the attempt."""
+    try:
+        path = audio_utils.keep(wav_bytes, digest)
+        if path is not None:
+            db.record_audio(
+                conn,
+                attempt_id,
+                path=str(path),
+                sha256=digest,
+                size_bytes=len(wav_bytes),
+                sample_rate=audio_utils.TARGET_SAMPLE_RATE,
+            )
+        if measurement is not None:
+            db.record_vowel_measurements(conn, attempt_id, vowel_measure.token_rows(measurement))
+    except Exception:
+        logger.warning("Could not store the recording or its measurements", exc_info=True)
+
+
 def run_assessment_job(
     conn: sqlite3.Connection,
     wav_bytes: bytes,
@@ -758,6 +844,15 @@ def run_assessment_job(
             # answering lands here: the result arrived, and it is thrown away unrecorded.
             return AssessOutcome(cancelled=True, reached_azure=reached_azure)
 
+        # The vowel measurement runs HERE, inside the assessment request, while `wav_bytes`
+        # is still in memory. Recordings are kept since v0.10.0, so this could in principle be
+        # a later pass — but the audio is already here and decoded, and a second pass would
+        # re-do the work for nothing. What the keeping buys is RE-derivation: when the
+        # normalisation scheme or the reference table changes, stored audio is re-measured
+        # rather than the passage being read again.
+        measurement = measure_vowels(conn, assessment, wav_bytes, mode)
+
+        digest = utils.sha256_bytes(wav_bytes)
         with _DB_LOCK:
             # The tag is written under the same lock as the row it describes, so no reader can
             # ever see a stored attempt whose provenance has not landed yet.
@@ -769,14 +864,22 @@ def run_assessment_job(
                 # Attempts, not successes: a retry re-uploads the same audio. Offline
                 # replays report zero attempts and are excluded from the meter anyway.
                 audio_seconds=seconds * max(assessment.attempts, 1),
-                audio_sha256=utils.sha256_bytes(wav_bytes),
+                audio_sha256=digest,
                 overall_scores=assessment.overall_scores,
                 azure_raw=assessment.raw if len(assessment.raw) > 1 else assessment.raw[0],
                 offline=assessment.offline,
             )
             for tag in tags:
                 db.tag_attempt(conn, attempt_id, tag)
-        return AssessOutcome(assessment=assessment, attempt_id=attempt_id)
+            # The speech-style tag goes on EVERY attempt from day one. Read speech is
+            # hyperarticulated and spontaneous speech is systematically more centralised, so
+            # pooling them makes a change of register look like a regression toward the middle
+            # of the vowel space. v0.12.0 adds spontaneous speech, but the tag has to exist
+            # before it: `attempt_tags` takes free text with no migration, and an untagged
+            # token can never be reclassified after the fact.
+            db.tag_attempt(conn, attempt_id, style_for(mode))
+            store_measurement(conn, attempt_id, wav_bytes, digest, measurement)
+        return AssessOutcome(assessment=assessment, attempt_id=attempt_id, measurement=measurement)
 
     except speech_analyzer.Cancelled as exc:
         return AssessOutcome(cancelled=True, reached_azure=exc.reached_azure)
@@ -868,6 +971,7 @@ def collect_finished_job() -> None:
             reference_text=job.reference_text,
             attempt_id=outcome.attempt_id,
             mode=job.mode,
+            measurement=outcome.measurement,
         )
     )
     st.session_state["last_key"] = job.key
@@ -1404,6 +1508,350 @@ def render_result(conn: sqlite3.Connection, entry: CachedAttempt, source: Any) -
 
     render_delivery(assessment)
     render_rhythm(assessment, reference_text)
+    render_accent_table(conn, entry)
+
+
+# --- The accent measurement surface ----------------------------------------------------------
+
+# What a five-second room check costs, and what it buys. Formant estimation degrades badly
+# with room reverb and a poor microphone, so telling somebody their /ɔ/ is wrong when the real
+# finding is that their room is wrong wastes a calibration read and teaches them nothing.
+ROOM_CHECK_TEXT = "The quick brown fox jumps over the lazy dog."
+ROOM_CHECK_SECONDS = 5.0
+
+
+def reference_set() -> str:
+    """Which published set the numbers are scored against, or "" when it has not been chosen.
+
+    Deliberately has no default. Formants scale with vocal tract length, the men's and women's
+    tables sit far apart, and an average of the two describes nobody — so this is refused
+    until it is set rather than guessed and then quietly wrong for every reading afterwards.
+    """
+    chosen = (utils.get("GA_REFERENCE_SET") or "").strip().lower()
+    return chosen if chosen in vowel_reference.REFERENCE_SETS else ""
+
+
+def render_accent_table(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
+    """The four-column table for one attempt, under its result."""
+    measurement = entry.measurement
+    st.subheader("Accent measurement")
+
+    if measurement is None:
+        st.caption(
+            "No vowel measurement for this attempt. Offline replays have no audio behind "
+            "their phoneme offsets, so slicing them would measure the wrong recording."
+        )
+        return
+
+    chosen = reference_set()
+    if not chosen:
+        st.warning(
+            "Set `GA_REFERENCE_SET` to `men` or `women` in `.env` to score these vowels. "
+            "There is no default and no average: formants scale with vocal tract length, so "
+            "one reference set is right and the other is wrong by roughly the size of the "
+            "effect being measured.",
+            icon="📏",
+        )
+        return
+
+    note = measurement.quality_note()
+    if note:
+        st.warning(note, icon="🎙️")
+
+    if measurement.alignment_db is not None and measurement.alignment_db < 3.0:
+        # The check that the phoneme offsets point where they are believed to. Loud, because
+        # every number below it would be plausible and wrong.
+        st.error(
+            f"The claimed vowel spans are only {measurement.alignment_db:.1f} dB louder than "
+            f"everything that is not a vowel. The slices are not landing on the vowels, so "
+            f"nothing below should be believed.",
+            icon="🚫",
+        )
+
+    try:
+        normaliser = vowel_measure.lobanov(
+            measurement.accepted, categories=vowel_measure.REFERENCE_CATEGORIES
+        )
+    except vowel_measure.TooFewTokens as exc:
+        st.info(str(exc), icon="📉")
+        _render_rejections(measurement)
+        return
+
+    baseline_row = db.current_baseline(conn)
+    noise = (
+        vowel_measure.noise_from_json(json.loads(baseline_row["noise_floor_json"]))
+        if baseline_row is not None
+        else None
+    )
+    findings = vowel_measure.findings(measurement, normaliser, reference_set=chosen, noise=noise)
+    st.markdown(accent_view.to_markdown(findings))
+    st.caption(accent_view.PUBLISHED_CAPTION.format(set=chosen))
+    if noise is None:
+        st.caption(accent_view.noise_caption(None))
+
+
+def _render_rejections(measurement: Any) -> None:
+    """Show what was refused even when nothing could be normalised. A thin table, visibly thin."""
+    rejected = measurement.rejected
+    if not rejected:
+        return
+    st.markdown(accent_view.to_markdown(vowel_measure.rejection_findings(measurement.tokens)))
+
+
+def calibration_reads(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Benchmark-passage attempts that carry usable vowel measurements, newest first.
+
+    The calibration passage is `progress_view.BENCHMARK_PASSAGE` — chosen once, for exactly
+    two consumers, and its own comment in `progress_view` says so. Nothing new is written for
+    this chunk.
+    """
+    rows = conn.execute(
+        """
+        SELECT a.id, a.created_at, a.reference_text,
+               COUNT(v.id) FILTER (WHERE v.accepted = 1) AS accepted
+        FROM attempts a JOIN vowel_measurements v ON v.attempt_id = a.id
+        WHERE a.offline = 0
+        GROUP BY a.id ORDER BY a.created_at DESC
+        """
+    ).fetchall()
+    return [
+        row
+        for row in rows
+        if progress_view.is_benchmark(row["reference_text"])
+        and not rhythm.is_baseline_capture(row["reference_text"])
+        and row["accepted"] > 0
+    ]
+
+
+def _minutes_between(first: str, second: str) -> float:
+    start = datetime.strptime(first, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    end = datetime.strptime(second, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    return abs((end - start).total_seconds()) / 60.0
+
+
+def build_baseline(conn: sqlite3.Connection, older: Any, newer: Any) -> str | None:
+    """Calibrate from two stored reads. Returns an error message, or None on success."""
+    chosen = reference_set()
+    if not chosen:
+        return "Set GA_REFERENCE_SET to 'men' or 'women' first."
+
+    first = vowel_measure.tokens_from_rows(
+        [dict(row) for row in db.vowel_measurements_for(conn, int(older["id"]))]
+    )
+    second = vowel_measure.tokens_from_rows(
+        [dict(row) for row in db.vowel_measurements_for(conn, int(newer["id"]))]
+    )
+    ceiling = next(
+        (float(row["lpc_ceiling_hz"]) for row in db.vowel_measurements_for(conn, int(older["id"]))),
+        acoustics.CEILING_TYPICAL_MALE,
+    )
+    try:
+        baseline = vowel_measure.calibrate(
+            first,
+            second,
+            reference_set=chosen,
+            ceiling_hz=ceiling,
+            attempt_ids=(int(older["id"]), int(newer["id"])),
+        )
+    except (vowel_measure.CalibrationRefused, vowel_measure.TooFewTokens) as exc:
+        return str(exc)
+
+    db.save_baseline(
+        conn,
+        positions=vowel_measure.positions_to_json(baseline.positions),
+        normaliser=vowel_measure.normaliser_to_json(baseline.normaliser),
+        noise_floor=vowel_measure.noise_to_json(baseline.noise),
+        lpc_ceiling_hz=baseline.ceiling_hz,
+        reference_set=baseline.reference_set,
+        style_tag=baseline.style,
+        tokens=baseline.tokens,
+        attempt_ids=baseline.attempt_ids,
+    )
+    return None
+
+
+def render_calibration(conn: sqlite3.Connection) -> None:
+    """The two-read calibration flow, and what it refuses."""
+    st.subheader("Calibration")
+    gap = utils.get_float("CALIBRATION_GAP_MINUTES")
+    st.markdown(
+        f"""
+Read the benchmark passage **twice in one sitting, at least {gap:g} minutes apart**, on the
+same microphone in the same room. The displacement between the two reads **is** the
+measurement noise floor — a vowel centroid moves between sessions from microphone placement,
+posture, time of day and warm-up, with no learning at all. Without that number the progress
+view would render exactly that wander as progress.
+"""
+    )
+
+    reads = calibration_reads(conn)
+    if len(reads) < 2:
+        st.info(
+            f"{len(reads)} of 2 calibration reads so far. Read the benchmark passage on the "
+            f"Practice tab — it is the same passage the progress chart uses, so the read "
+            f"counts for both.",
+            icon="🎯",
+        )
+        return
+
+    newer, older = reads[0], reads[1]
+    apart = _minutes_between(str(older["created_at"]), str(newer["created_at"]))
+    st.caption(
+        f"Two most recent reads: attempt {older['id']} and attempt {newer['id']}, "
+        f"{apart:.0f} minutes apart, {older['accepted']} and {newer['accepted']} usable "
+        f"vowel tokens."
+    )
+
+    if apart < gap:
+        st.warning(
+            f"Those two reads are only {apart:.0f} minutes apart, and the floor needs "
+            f"{gap:g}. Two back-to-back reads measure the microphone holding still, not the "
+            f"session-to-session wander this number exists to capture — so the band would "
+            f"come out flatteringly small and start licensing noise as progress.",
+            icon="⏱️",
+        )
+        return
+
+    if st.button("Set the baseline from these two reads", type="primary"):
+        problem = build_baseline(conn, older, newer)
+        if problem:
+            st.error(problem, icon="📉")
+        else:
+            st.success("Baseline and noise floor stored.")
+            st.rerun()
+
+
+def render_baseline(conn: sqlite3.Connection) -> None:
+    """The stored baseline: the vowel chart, the noise floor, and the four-column table."""
+    row = db.current_baseline(conn)
+    if row is None:
+        st.info(
+            "No baseline yet. Until the calibration passage has been read twice there is no "
+            "speaker centroid to normalise against and no noise floor, so no movement on any "
+            "accent surface can honestly be called progress.",
+            icon="📐",
+        )
+        return
+
+    chosen = str(row["reference_set"])
+    positions = vowel_measure.positions_from_json(json.loads(row["positions_json"]))
+    noise = vowel_measure.noise_from_json(json.loads(row["noise_floor_json"]))
+
+    st.subheader("Your vowel space")
+    st.caption(
+        f"Calibrated {row['created_at']} from attempts {row['attempt_ids']}, "
+        f"{row['tokens']} usable tokens, LPC ceiling {row['lpc_ceiling_hz']:.0f} Hz, "
+        f"{row['style_tag']} speech."
+    )
+
+    frame = accent_view.vowel_frame(positions, vowel_measure.reference_positions(chosen))
+    if frame.empty:
+        st.caption("Nothing in the baseline could be placed on a chart.")
+    else:
+        st.altair_chart(accent_view.vowel_chart(frame), theme="streamlit")
+        st.caption(accent_view.PUBLISHED_CAPTION.format(set=chosen))
+
+    st.markdown(accent_view.noise_caption(noise))
+
+    with st.expander("The noise floor, vowel by vowel"):
+        st.markdown(
+            accent_view.to_markdown(
+                [
+                    vowel_measure.Finding(
+                        feature=f"/{vowel}/ {phoneme_reference.keyword_for(vowel)} — "
+                        f"between-read displacement",
+                        user=f"{band:.2f} z",
+                        target="—",
+                        delta=(
+                            f"Movement smaller than {band:.2f} z is reported as "
+                            f"'{vowel_measure.WITHIN_NOISE}', in either direction."
+                        ),
+                    )
+                    for vowel, band in sorted(noise.per_vowel.items())
+                ]
+            )
+        )
+
+
+def render_room_check(conn: sqlite3.Connection) -> None:
+    """Five seconds, one number, and a plain answer about whether this room can be measured."""
+    st.subheader("Room and microphone check")
+    st.caption(
+        f"Before the first calibration read: record about {ROOM_CHECK_SECONDS:.0f} seconds "
+        f"and get the measured signal-to-noise back. Formant estimation degrades badly with "
+        f"room reverb and a poor microphone, and being told your vowels are wrong when the "
+        f"real finding is that the room is wrong wastes a calibration read. Costs about "
+        f"{ROOM_CHECK_SECONDS:.0f} seconds of the monthly Azure allowance."
+    )
+    st.info(f"Read this aloud: **{ROOM_CHECK_TEXT}**", icon="🗣️")
+
+    audio = st.audio_input("Room check recording", key="room_check_audio")
+    if audio is None or not st.button("Check the room"):
+        return
+
+    wav_bytes, seconds = prepare_audio(conn, audio.getvalue(), Mode.DRILL)
+    if wav_bytes is None or seconds is None:
+        return
+    with st.spinner("Measuring…"):
+        outcome = run_assessment_job(
+            conn, wav_bytes, seconds, ROOM_CHECK_TEXT, Mode.DRILL, threading.Event()
+        )
+    if outcome.error is not None:
+        icon, message = outcome.error
+        st.error(message, icon=icon)
+        return
+
+    snr = (outcome.assessment.overall_scores or {}).get("snr_db_min")
+    if snr is None:
+        st.warning("Azure reported no signal-to-noise ratio, so this is inconclusive.", icon="🤷")
+        return
+
+    if snr < vowel_measure.SNR_UNRELIABLE_DB:
+        st.error(
+            f"**{snr:.1f} dB — this room and microphone cannot support a vowel measurement.** "
+            f"Below about {vowel_measure.SNR_UNRELIABLE_DB:.0f} dB the formant estimates are "
+            f"describing the room. Get closer to the microphone, turn off fans and air "
+            f"conditioning, and add soft furnishings before calibrating.",
+            icon="🚫",
+        )
+    elif snr < vowel_measure.SNR_MARGINAL_DB:
+        st.warning(
+            f"**{snr:.1f} dB — usable, but not clean.** A calibration read taken here will "
+            f"work and every number will be looser than it needs to be.",
+            icon="⚠️",
+        )
+    else:
+        st.success(
+            f"**{snr:.1f} dB — good enough to measure vowels.** Go ahead and calibrate.",
+            icon="✅",
+        )
+
+
+def render_accent(conn: sqlite3.Connection) -> None:
+    """The Accent tab: room check, calibration, the baseline, and what it forbids."""
+    st.header("Accent")
+    st.caption(
+        "Azure's diagnosis is categorical — this phoneme is /θ/ or /t/, scored out of a "
+        "hundred. Accent is continuous. This page measures the gradient part: where your "
+        "vowels sit, how they move, how long they last and how far the unstressed ones "
+        "reduce."
+    )
+
+    chosen = reference_set()
+    if not chosen:
+        st.warning(
+            "**`GA_REFERENCE_SET` is not set.** Choose `men` or `women` in `.env`. There is "
+            "no default and never an average of the two: formants scale with vocal tract "
+            "length, so the wrong set is wrong by about the size of the thing being measured.",
+            icon="📏",
+        )
+    else:
+        st.caption(f"Scoring against the **{chosen}** reference set.")
+
+    render_baseline(conn)
+    render_calibration(conn)
+    with st.expander("Check the room first"):
+        render_room_check(conn)
 
 
 # --- The progress view ----------------------------------------------------------------------
@@ -2757,7 +3205,7 @@ def render() -> None:
     job: AssessJob | None = st.session_state.get("assess_job")
     running = job is not None
 
-    # Three tabs, not three pages: `AppTest.from_file` addresses one script and the bare
+    # Four tabs, not four pages: `AppTest.from_file` addresses one script and the bare
     # `render()` below is the entry point, so `st.navigation`/`pages/` would cost more than
     # it buys. Note Streamlit executes EVERY tab body on every rerun — which is why both the
     # progress view's re-parse and the queue's candidate ranking are cached rather than
@@ -2766,7 +3214,9 @@ def render() -> None:
     # `Today` is first deliberately. Opening the app should answer "what am I doing today?"
     # rather than present a blank textarea; the textarea is one click away, which is where a
     # thing you reach for on purpose belongs.
-    today_tab, practice_tab, progress_tab = st.tabs(["Today", "Practice", "Progress"])
+    today_tab, practice_tab, progress_tab, accent_tab = st.tabs(
+        ["Today", "Practice", "Progress", "Accent"]
+    )
     with today_tab:
         render_today(conn, job, running)
     with practice_tab:
@@ -2774,6 +3224,8 @@ def render() -> None:
     with progress_tab:
         render_progress(conn)
         render_history(conn)
+    with accent_tab:
+        render_accent(conn)
 
 
 render()

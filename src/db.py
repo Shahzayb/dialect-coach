@@ -3,8 +3,15 @@
 Why verbatim: the normalised shape this app renders is a lossy projection chosen for
 today's UI. Keeping exactly what Azure and Gemini returned means a later change of mind
 about what to surface is a re-parse of stored rows, not a re-recording that spends quota
-again. No audio is ever stored — the brief rules that out, and the SHA-256 is enough to
-recognise a repeat attempt.
+again.
+
+**Audio is now kept too, since v0.10.0.** This used to say the brief ruled it out; that
+stopped being true on 2026-08-19, when the "no stored audio" rule was lifted — recordings
+may be kept locally, never committed, with the path and hash in the database. The accent
+measurement is the first feature that needs it, for exactly the reason the raw payloads are
+kept: a changed normalisation scheme or reference table has to be a re-derivation, and a
+re-derivation must never require that the passage be read again. The bytes live under a
+gitignored directory and only the path and digest are stored here (see `attempt_audio`).
 
 This module never imports Streamlit, so tests and scripts can use it. `app.py` is
 responsible for wrapping `connect()` in `@st.cache_resource`: Streamlit re-runs the whole
@@ -128,6 +135,91 @@ CREATE TABLE IF NOT EXISTS attempt_tags (
 );
 
 CREATE INDEX IF NOT EXISTS idx_attempt_tags_tag ON attempt_tags(tag);
+
+-- Where an attempt's recording is on disk. The bytes are NOT in the database: a WAV per
+-- attempt would grow the file past the point where the WAL and the verbatim payloads are
+-- comfortable, and a file on disk is what parselmouth and ffmpeg both want anyway.
+--
+-- Content-addressed by the SHA-256 `attempts.audio_sha256` already stores, so re-reading the
+-- same passage twice with byte-identical audio writes one file and two rows. Additive, like
+-- every table below the first: `user_version` never moves.
+CREATE TABLE IF NOT EXISTS attempt_audio (
+  attempt_id   INTEGER PRIMARY KEY REFERENCES attempts(id) ON DELETE CASCADE,
+  path         TEXT    NOT NULL,   -- relative to AUDIO_DIR's parent; never committed
+  sha256       TEXT    NOT NULL,
+  bytes        INTEGER NOT NULL,
+  sample_rate  INTEGER NOT NULL,
+  created_at   TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_attempt_audio_sha ON attempt_audio(sha256);
+
+-- The calibrated speaker: where their vowels sit, and how far that wanders on its own.
+--
+-- One row is current and the rest are history — `superseded_at` is NULL on exactly one. Kept
+-- rather than overwritten because a re-calibration changes the space every stored measurement
+-- is expressed in, and a chart drawn last month has to stay explicable.
+--
+-- `noise_floor_json` is the reason the calibration passage is read TWICE. The per-vowel
+-- displacement between two reads taken in one sitting, with no learning possible in between,
+-- IS the measurement noise floor. Without it the progress view renders microphone placement
+-- as progress.
+CREATE TABLE IF NOT EXISTS speaker_baseline (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  created_at      TEXT    NOT NULL,
+  positions_json  TEXT    NOT NULL,  -- per-vowel means in Hz and z, with token counts
+  normaliser_json TEXT    NOT NULL,  -- the Lobanov centroid these z-scores are relative to
+  noise_floor_json TEXT   NOT NULL,  -- per-vowel displacement between the two reads
+  lpc_ceiling_hz  REAL    NOT NULL,  -- the sweep's winner; every later reading reuses it
+  reference_set   TEXT    NOT NULL,  -- 'men' | 'women'. Never an average of the two.
+  style_tag       TEXT    NOT NULL,  -- 'read' | 'spontaneous'
+  tokens          INTEGER NOT NULL,
+  attempt_ids     TEXT    NOT NULL,  -- JSON array: the two calibration attempts
+  superseded_at   TEXT               -- NULL on the current row, set when replaced
+);
+
+CREATE INDEX IF NOT EXISTS idx_speaker_baseline_current
+  ON speaker_baseline(superseded_at);
+
+-- One row per vowel token, accepted or rejected.
+--
+-- **Raw measurements, never only derived positions.** Normalisation schemes and reference
+-- tables will change; re-deriving must be a query over these rows, never a re-recording.
+-- That is also why `f3_*`, `rms_dbfs` and `stressed` are columns from day one even though
+-- nothing reads some of them until v0.11.0 — a column costs nothing and a re-recording is
+-- impossible for anything already spoken.
+--
+-- `lpc_ceiling_hz` and `snr_db_min` travel on every row so an old row stays interpretable
+-- after a re-calibration moves the ceiling, and so a reading taken in a bad room can be
+-- excluded later rather than silently averaged in.
+CREATE TABLE IF NOT EXISTS vowel_measurements (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  attempt_id      INTEGER NOT NULL REFERENCES attempts(id) ON DELETE CASCADE,
+  vowel           TEXT    NOT NULL,   -- Azure's IPA
+  word            TEXT,
+  word_index      INTEGER NOT NULL,
+  start_s         REAL    NOT NULL,
+  duration_ms     REAL    NOT NULL,
+  f1_20 REAL, f2_20 REAL, f3_20 REAL,
+  f1_50 REAL, f2_50 REAL, f3_50 REAL,
+  f1_80 REAL, f2_80 REAL, f3_80 REAL,
+  rms_dbfs        REAL,               -- dBFS: comparable WITHIN a recording, never across
+  f0_hz           REAL,
+  stressed        INTEGER,            -- 1/0 from CMUdict; NULL when the word did not align
+  stress_digit    INTEGER,            -- 0 reduced, 1 primary, 2 secondary
+  azure_score     REAL,
+  coda_voiceless  INTEGER,            -- NULL when no consonant follows inside the word
+  snr_db_min      REAL,
+  lpc_ceiling_hz  REAL    NOT NULL,
+  style_tag       TEXT    NOT NULL,
+  accepted        INTEGER NOT NULL,
+  rejected_reason TEXT    NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_vowel_measurements_attempt
+  ON vowel_measurements(attempt_id);
+CREATE INDEX IF NOT EXISTS idx_vowel_measurements_vowel
+  ON vowel_measurements(vowel, accepted);
 """
 
 
@@ -555,3 +647,184 @@ def queue_fingerprint(conn: sqlite3.Connection) -> tuple[int, int, int]:
     ).fetchone()
     trials_row = conn.execute("SELECT COUNT(*) AS total FROM perception_trials").fetchone()
     return int(targets_row["total"]), int(targets_row["top"]), int(trials_row["total"])
+
+
+# --- Audio, baselines and vowel measurements -------------------------------------------------
+# Added in v0.10.0. SQL only, like everything else here: what a baseline MEANS and when it is
+# stale is `vowel_measure`'s business, and the split is the same one `practice_queue` has.
+
+
+def record_audio(
+    conn: sqlite3.Connection,
+    attempt_id: int,
+    *,
+    path: str,
+    sha256: str,
+    size_bytes: int,
+    sample_rate: int,
+    created_at: str | None = None,
+) -> None:
+    """Remember where an attempt's recording is. Idempotent per attempt.
+
+    The row is written in the same transaction as the attempt it belongs to, so no reader can
+    ever see an attempt whose audio location has not landed yet — the same rule `tag_attempt`
+    follows for provenance.
+    """
+    conn.execute(
+        """
+        INSERT INTO attempt_audio (attempt_id, path, sha256, bytes, sample_rate, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(attempt_id) DO UPDATE SET
+            path = excluded.path, sha256 = excluded.sha256, bytes = excluded.bytes
+        """,
+        (
+            int(attempt_id),
+            path,
+            sha256,
+            int(size_bytes),
+            int(sample_rate),
+            created_at or utc_now_iso(),
+        ),
+    )
+    conn.commit()
+
+
+def audio_for(conn: sqlite3.Connection, attempt_id: int) -> sqlite3.Row | None:
+    """Where one attempt's recording is, or None when it was not kept."""
+    row = conn.execute(
+        "SELECT * FROM attempt_audio WHERE attempt_id = ?", (int(attempt_id),)
+    ).fetchone()
+    return cast("sqlite3.Row | None", row)
+
+
+def stored_audio(conn: sqlite3.Connection) -> Sequence[sqlite3.Row]:
+    """Every kept recording, oldest first. What a re-derivation pass walks."""
+    return conn.execute(
+        """
+        SELECT a.attempt_id, a.path, a.sha256, a.bytes, t.mode, t.reference_text,
+               t.azure_raw_json, t.created_at
+        FROM attempt_audio a JOIN attempts t ON t.id = a.attempt_id
+        ORDER BY t.created_at, a.attempt_id
+        """
+    ).fetchall()
+
+
+def record_vowel_measurements(
+    conn: sqlite3.Connection, attempt_id: int, rows: Sequence[dict[str, Any]]
+) -> int:
+    """Store one attempt's vowel tokens, replacing any already there.
+
+    Replacing rather than appending: re-deriving an attempt's measurements after a change to
+    the pipeline must leave one set of rows, not two generations interleaved.
+    """
+    conn.execute("DELETE FROM vowel_measurements WHERE attempt_id = ?", (int(attempt_id),))
+    conn.executemany(
+        """
+        INSERT INTO vowel_measurements (
+            attempt_id, vowel, word, word_index, start_s, duration_ms,
+            f1_20, f2_20, f3_20, f1_50, f2_50, f3_50, f1_80, f2_80, f3_80,
+            rms_dbfs, f0_hz, stressed, stress_digit, azure_score, coda_voiceless,
+            snr_db_min, lpc_ceiling_hz, style_tag, accepted, rejected_reason
+        ) VALUES (
+            :attempt_id, :vowel, :word, :word_index, :start_s, :duration_ms,
+            :f1_20, :f2_20, :f3_20, :f1_50, :f2_50, :f3_50, :f1_80, :f2_80, :f3_80,
+            :rms_dbfs, :f0_hz, :stressed, :stress_digit, :azure_score, :coda_voiceless,
+            :snr_db_min, :lpc_ceiling_hz, :style_tag, :accepted, :rejected_reason
+        )
+        """,
+        [{**row, "attempt_id": int(attempt_id)} for row in rows],
+    )
+    conn.commit()
+    return len(rows)
+
+
+def vowel_measurements_for(conn: sqlite3.Connection, attempt_id: int) -> Sequence[sqlite3.Row]:
+    """Every token measured for one attempt, in the order it was spoken."""
+    return conn.execute(
+        "SELECT * FROM vowel_measurements WHERE attempt_id = ? ORDER BY start_s, id",
+        (int(attempt_id),),
+    ).fetchall()
+
+
+def vowel_measurement_series(
+    conn: sqlite3.Connection, *, style_tag: str | None = None
+) -> Sequence[sqlite3.Row]:
+    """Accepted tokens across every real attempt, oldest first — the trend query's input.
+
+    Filters `offline = 1` for the reason every other progress reader does: a replayed fixture
+    is a constant, and thirty identical points is not a trajectory.
+
+    **`style_tag` is not optional in spirit even though it defaults to None.** Read speech is
+    hyperarticulated and spontaneous speech is systematically more centralised; pooling the two
+    makes a change of register look like a regression toward the middle of the vowel space.
+    Every trend surface passes one.
+    """
+    sql = """
+        SELECT v.*, a.created_at
+        FROM vowel_measurements v JOIN attempts a ON a.id = v.attempt_id
+        WHERE a.offline = 0 AND v.accepted = 1
+    """
+    params: list[Any] = []
+    if style_tag is not None:
+        sql += " AND v.style_tag = ?"
+        params.append(style_tag)
+    return conn.execute(sql + " ORDER BY a.created_at, v.id", params).fetchall()
+
+
+def save_baseline(
+    conn: sqlite3.Connection,
+    *,
+    positions: Any,
+    normaliser: Any,
+    noise_floor: Any,
+    lpc_ceiling_hz: float,
+    reference_set: str,
+    style_tag: str,
+    tokens: int,
+    attempt_ids: Sequence[int],
+    created_at: str | None = None,
+) -> int:
+    """Store a new baseline and retire the one it replaces.
+
+    Both in one transaction: a moment with two current baselines, or none, would make every
+    z-score on screen ambiguous about which space it is in.
+    """
+    when = created_at or utc_now_iso()
+    with conn:
+        conn.execute(
+            "UPDATE speaker_baseline SET superseded_at = ? WHERE superseded_at IS NULL",
+            (when,),
+        )
+        cursor = conn.execute(
+            """
+            INSERT INTO speaker_baseline (
+                created_at, positions_json, normaliser_json, noise_floor_json,
+                lpc_ceiling_hz, reference_set, style_tag, tokens, attempt_ids
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                when,
+                json.dumps(positions, ensure_ascii=False),
+                json.dumps(normaliser, ensure_ascii=False),
+                json.dumps(noise_floor, ensure_ascii=False),
+                float(lpc_ceiling_hz),
+                reference_set,
+                style_tag,
+                int(tokens),
+                json.dumps(list(attempt_ids)),
+            ),
+        )
+    return int(cursor.lastrowid or 0)
+
+
+def current_baseline(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    """The baseline in force, or None before the calibration passage has been read twice."""
+    row = conn.execute(
+        "SELECT * FROM speaker_baseline WHERE superseded_at IS NULL ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return cast("sqlite3.Row | None", row)
+
+
+def baseline_history(conn: sqlite3.Connection) -> Sequence[sqlite3.Row]:
+    """Every baseline ever set, newest first. A re-calibration is a fact worth keeping."""
+    return conn.execute("SELECT * FROM speaker_baseline ORDER BY id DESC").fetchall()

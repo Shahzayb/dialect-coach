@@ -201,6 +201,26 @@ _DEFAULTS: dict[str, str] = {
     "AZURE_TTS_USD_PER_MILLION_CHARS": "16.00",
     "GEMINI_USD_PER_MTOK_IN": "0.00",
     "GEMINI_USD_PER_MTOK_OUT": "0.00",
+    # --- Accent measurement (v0.10.0) --------------------------------------------------
+    # Keep every recording. `projectbrief.md` permits this — the "no stored audio" rule was
+    # lifted on 2026-08-19 — and the accent measurement is the first thing that needs it: a
+    # normalisation scheme or a reference table changing must be a re-derivation over stored
+    # audio, never a request that the passage be read again. Roughly 2.9 MB per 90-second
+    # read, so a hundred reads is about 290 MB. Set false to go back to deleting.
+    "KEEP_AUDIO": "true",
+    "AUDIO_DIR": "./audio/attempts",
+    # Which published reference set the numbers are scored against. **No default on purpose.**
+    # Formants scale with vocal tract length, the men's and women's tables are far apart, and
+    # an average of the two describes nobody — so this is refused until it is set, rather than
+    # guessed from f0 and quietly wrong for every reading afterwards.
+    "GA_REFERENCE_SET": "",
+    # Overrides the ceiling stored on the baseline. Normally empty: the ceiling is established
+    # once by the calibration sweep and then held still, or later readings stop being
+    # comparable to the baseline they are measured against.
+    "LPC_CEILING_HZ": "",
+    # How far apart the two calibration reads must be. Their displacement IS the measurement
+    # noise floor, and two back-to-back reads measure only the microphone.
+    "CALIBRATION_GAP_MINUTES": "10",
 }
 
 _TRUTHY = {"1", "true", "yes", "on"}

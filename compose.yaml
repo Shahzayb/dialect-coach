@@ -1,6 +1,11 @@
 services:
   app:
     build: .
+    # Pinned rather than left to Compose's default `<directory>-app` naming: CI builds this
+    # image with buildx (for GitHub Actions layer caching) under this exact tag, then `docker
+    # compose run` reuses it in the steps that follow instead of rebuilding — that only works
+    # if both sides agree on the name rather than one of them guessing it from a directory.
+    image: dialect-coach-app:local
     ports:
       - "8501:8501"
     # Secrets stay outside the image. Optional so the scaffold runs before .env exists.

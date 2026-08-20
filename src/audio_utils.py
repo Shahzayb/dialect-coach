@@ -1,8 +1,19 @@
-"""Audio conversion, duration validation, and temp-file lifecycle.
+"""Audio conversion, duration validation, temp-file lifecycle, and kept recordings.
 
-Azure's `AudioConfig(filename=...)` needs a real path on disk, which is the only reason a
-temp file exists anywhere in this project. It is deleted in a `finally` block so it goes
-even when the call it was created for raises mid-flight.
+Azure's `AudioConfig(filename=...)` needs a real path on disk, which is why the temp file in
+`temp_wav` exists. It is deleted in a `finally` block so it goes even when the call it was
+created for raises mid-flight.
+
+**`keep` is a separate thing and a newer one.** Until v0.10.0 this module deleted every
+recording and said so in a comment that called it a project constraint. That stopped being
+true on 2026-08-19, when the "no stored audio" rule was lifted: recordings may be kept
+locally, never committed, with the path and hash in the database. The accent measurement is
+the first feature that needs it — not to defer the measurement, which still runs inside the
+assessment request while the audio is in memory, but so that a changed normalisation scheme
+or reference table is a re-derivation over stored audio rather than a request that the
+calibration passage be read again.
+
+`temp_wav` still deletes, because a temp file is still a temp file.
 """
 
 from __future__ import annotations
@@ -13,6 +24,7 @@ import os
 import tempfile
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from pathlib import Path
 
 from pydub import AudioSegment
 
@@ -96,8 +108,10 @@ def validate_duration(seconds: float, mode: Mode) -> None:
 def temp_wav(wav_bytes: bytes) -> Iterator[str]:
     """Write `wav_bytes` to a temp file, yield its path, and always delete it.
 
-    The `finally` is the point: Azure raising mid-call must not leave audio on disk, since
-    "no persistent audio storage" is a project constraint, not a nicety.
+    The `finally` is the point: a temp file is scratch space for one Azure call, and Azure
+    raising mid-call must not leave a stray copy in the system temp directory. This is no
+    longer about a no-stored-audio rule — that was lifted on 2026-08-19 and `keep` below is
+    what acts on it — it is simply that scratch space gets cleaned up.
     """
     handle, path = tempfile.mkstemp(suffix=".wav")
     try:
@@ -156,3 +170,34 @@ def echo_track(clips: Sequence[bytes], *, tail_ms: int = 0) -> bytes:
     buffer = io.BytesIO()
     track.export(buffer, format="wav")
     return buffer.getvalue()
+
+
+def kept_path(sha256: str) -> Path:
+    """Where the recording with this digest lives. Content-addressed, so repeats share a file.
+
+    `attempts.audio_sha256` already holds the digest, so the path needs no separate identity
+    and re-reading the same passage with byte-identical audio cannot write it twice.
+    """
+    return Path(utils.get("AUDIO_DIR") or "./audio/attempts") / f"{sha256}.wav"
+
+
+def keep(wav_bytes: bytes, sha256: str) -> Path | None:
+    """Write a recording to the kept-audio directory. None when keeping is switched off.
+
+    Never raises into the caller: a full disk must fail the recording's *storage*, not the
+    assessment the user just paid Azure for. A failure is logged and reported as None, and
+    the attempt is still recorded — it simply cannot be re-derived later.
+
+    The directory is gitignored (`audio/`). Nothing here ever leaves the machine.
+    """
+    if not utils.get_bool("KEEP_AUDIO"):
+        return None
+    path = kept_path(sha256)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if not path.exists():
+            path.write_bytes(wav_bytes)
+        return path
+    except OSError:
+        logger.warning("Could not keep the recording at %s", path, exc_info=True)
+        return None

@@ -31,19 +31,6 @@ REFERENCE = (
 )
 
 
-@pytest.fixture(autouse=True)
-def isolated_db(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A throwaway database per test, and no connection carried over from the last one.
-
-    get_connection is @st.cache_resource, which AppTest shares across runs — without the
-    clear, every test after the first would keep writing to the first test's database.
-    """
-    monkeypatch.setenv("DB_PATH", str(tmp_path / "coach.db"))
-    import streamlit as st
-
-    st.cache_resource.clear()
-
-
 @pytest.fixture
 def run_app(monkeypatch: pytest.MonkeyPatch):
     """Run app.py, overriding settings through monkeypatch so nothing leaks between tests."""
@@ -1005,13 +992,18 @@ def seed_attempts(app: AppTest, count: int = 3, *, benchmark: bool = False) -> N
     conn.close()
 
 
-def test_the_page_has_a_today_a_practice_and_a_progress_tab(run_app) -> None:
+def test_the_page_has_today_practice_progress_and_accent_tabs(run_app) -> None:
     """Today is first: opening the app should answer "what am I doing today?" rather than
     present a blank textarea. The textarea is one click away, which is where a thing you
-    reach for on purpose belongs."""
+    reach for on purpose belongs.
+
+    Accent is last and separate rather than folded into Progress: it holds the calibration
+    flow and the room check, which are things you do once, and Progress is about scores over
+    time.
+    """
     app = run_app()
     assert not app.exception
-    assert len(app.tabs) == 3
+    assert len(app.tabs) == 4
 
 
 def test_the_progress_tab_says_so_when_there_is_no_history(run_app) -> None:
@@ -1794,15 +1786,27 @@ def test_the_tag_travels_through_the_worker_thread(monkeypatch: pytest.MonkeyPat
 
     assert outcome.error is None, outcome.error
     assert outcome.attempt_id is not None
-    assert db.tags_for(conn, outcome.attempt_id) == {shadowing.SHADOW_TAG}
+    # The speech-style tag rides alongside, on every attempt, since v0.10.0 — see below.
+    assert db.tags_for(conn, outcome.attempt_id) == {shadowing.SHADOW_TAG, app_module.STYLE_READ}
     # `attempt_series` is deliberately NOT asserted here: this row is an offline replay, and
     # both progress readers exclude those — the fixture scores the same every time, so thirty
     # identical points would not be a trajectory. `test_db` covers the join on a real row.
     conn.close()
 
 
-def test_an_untagged_assessment_writes_no_tag(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A cold read must stay untagged, or the trajectory it belongs on would lose it."""
+def test_a_cold_read_carries_its_style_tag_and_nothing_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold read must not be tagged `shadowed`, or it would leave the trajectory it belongs on.
+
+    It does carry a **speech-style** tag, and that is not the same thing. Every attempt gets
+    one from v0.10.0 onward, because read speech is hyperarticulated and spontaneous speech is
+    systematically more centralised: pooling the two makes a change of register look like a
+    regression toward the middle of the vowel space. The tag has to exist before v0.12.0 adds
+    spontaneous speech, since an untagged token can never be reclassified afterwards.
+    """
+    import shadowing
+
     conn = db.connect(":memory:")
     outcome = app_module.run_assessment_job(
         conn,
@@ -1813,8 +1817,17 @@ def test_an_untagged_assessment_writes_no_tag(monkeypatch: pytest.MonkeyPatch) -
         threading.Event(),
     )
     assert outcome.attempt_id is not None
-    assert db.tags_for(conn, outcome.attempt_id) == set()
+    tags = db.tags_for(conn, outcome.attempt_id)
+    assert tags == {app_module.STYLE_READ}
+    assert shadowing.SHADOW_TAG not in tags
     conn.close()
+
+
+def test_the_style_tag_follows_the_mode_rather_than_being_asked_for() -> None:
+    """Derived, so it cannot be forgotten on an attempt."""
+    assert app_module.style_for(Mode.DRILL) == app_module.STYLE_READ
+    assert app_module.style_for(Mode.PARAGRAPH) == app_module.STYLE_READ
+    assert app_module.style_for(Mode.UNSCRIPTED) == app_module.STYLE_SPONTANEOUS
 
 
 def test_a_shadowed_result_renders_on_exactly_one_surface(
