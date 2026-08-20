@@ -104,6 +104,20 @@ the existing coaching payload**, not a second model call.
   `Intonation.ErrorTypes`. Beside them sit the measurements
   `Break.BreakLength` and `Intonation.Monotone.SyllablePitchDeltaConfidence`, which
   `speech_analyzer._prosody_detail` now reads into every normalised word.
+- **Azure also sends a per-word continuous confidence for the two break faults, and nothing
+  reads it.** Confirmed live 2026-08-20 against three real captures (attempts 7-9, a drill
+  and two paragraph reads): every word's `Feedback.Prosody.Break` carries sibling objects
+  `UnexpectedBreak: {"Confidence": <float>}` and `MissingBreak: {"Confidence": <float>}`
+  beside `ErrorTypes` and `BreakLength` — present on every word regardless of whether
+  `ErrorTypes` ever flags anything, the same pattern `Intonation.Monotone
+  .SyllablePitchDeltaConfidence` already exploits. `_prosody_detail` (speech_analyzer.py)
+  reads only `BreakLength` and the monotone confidence; the two break confidences are parsed
+  by nothing. Across those three real attempts `Break.ErrorTypes` was `"None"` on every
+  single word (207 words total) — so the standing "UnexpectedBreak/MissingBreak never seen
+  from Azure" finding (`progress.md`) is Azure's own categorical judgment, not a parsing gap
+  — but the untouched confidence values mean a continuous break-quality measurement, exactly
+  parallel to how Monotone's confidence already drives delivery coaching, is sitting in the
+  payload unused should a future chunk want it.
 - **`BreakLength` is in 100-ns ticks, and that was derived, not looked up.** SDK 1.51.1
   never mentions the field — not in its Python layer, not in the strings of its native
   libraries. The committed capture holds 0, 200000 and 2000000 in a 9.79-second utterance,

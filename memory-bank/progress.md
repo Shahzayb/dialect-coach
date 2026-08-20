@@ -60,6 +60,13 @@ pre-registered claim: a shadowed read should score higher than a cold one, and t
 should narrow over weeks as the pattern transfers — if it never narrows, the practice isn't
 transferring and the surface says so rather than explaining it away later.
 
+**First real shadow/cold pair landed 2026-08-20.** One shadowed benchmark read against the
+cold read from the same session: Fluency **-0.7**, Prosody **-5.4** — the opposite direction
+from the pre-registered claim. `progress_view.shadow_summary` correctly refused to call this
+a pattern ("That is an observation, not a result — 3 pairs is the least this view will call
+a pattern"), which is the mechanism working as designed, not a defect. Too early to read
+anything into the direction; needs more pairs.
+
 **Accent measurement (v0.10.0).** The Accent tab holds a room check, a two-read calibration
 flow, a vowel chart against published General American means, and a stated noise floor. Every
 assessment also renders a four-column table — `Acoustic Feature | User Realization | Target
@@ -74,17 +81,25 @@ refuses a calibration built from two back-to-back reads. The noise floor — dis
 between two reads of the same passage ten minutes apart — means no movement smaller than that
 band is ever reported as change, including in the flattering direction.
 
+**Calibrated live for the first time on 2026-08-20**, from a real room check plus two
+benchmark-passage reads (attempts 8 and 9, 13 minutes apart, 140/136 usable vowel tokens,
+276 combined). Noise floor came out at **0.20 z median across 18 vowels**, ranging from
+0.05 z (/ə/ commA) to 0.56 z (/ɚ/ lettER) — the SNR gate, baseline computation and vowel
+chart all render correctly against a real voice, not just synthetic fixtures. The second
+read was also the first live capture of the `Monotone` delivery fault on a real recording
+(93 words across 2 stretches) with segmental scores essentially unchanged from the first
+read (91/98/91 pronunciation/accuracy/fluency both times) — consistent with second-read
+vocal fatigue/flattening rather than measurement noise, and the coaching report produced a
+coherent "Flat intonation across the span" drill quoting the real longest run.
+
 ## Not yet proven live
 
-- **v0.10.0's baseline and noise floor exist only on synthetic audio.** No human has read the
-  calibration passage; the SNR gate, baseline and noise floor need a real room, mic and voice
-  before they mean anything.
-- **Shadowing has no cold-read partner yet**, so the pre-registered fluency/prosody-gap claim
-  has no data, and whether the gap narrows over weeks is unanswered.
-- **The benchmark's 30-day trajectory hasn't started** — the series is empty until several
-  real reads accumulate over a month.
+- **The benchmark's 30-day trajectory has one real point, not several** — the first live
+  benchmark read landed 2026-08-20 (pronunciation 91.2), but a trajectory needs the series to
+  accumulate over weeks; one point proves the pipeline, not a trend.
 - **The perception trainer's graduation rule (90% across two blocks) has never fired** on real
-  listening; it's been run, not used.
+  listening — two real blocks now exist (75%, then 80% on `/w/ → /v/`, 2026-08-20), still short
+  of the 90% bar, so it's been run twice, not yet used to graduate anything.
 - **`UnexpectedBreak` and `MissingBreak` have never been seen from Azure.** Only `Monotone` is
   confirmed from a real capture (`tests/fixtures/bad_delivery_capture.json`); the other two
   are covered only by a hand-built synthetic fixture. A reading that actually provokes one

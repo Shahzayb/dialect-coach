@@ -2,6 +2,9 @@
 guides/
 playground/
 
+# Playwright MCP's own snapshot/console dumps from interactive manual testing sessions.
+.playwright-mcp/
+
 # Local notes that stay out of git
 plans/master-plan.md
 
