@@ -140,6 +140,27 @@ _ARPABET: Mapping[str, str] = {
 _ARPABET_UNSTRESSED: Mapping[str, str] = {"AH": "ə", "ER": "ɚ"}
 
 
+# Which consonants are voiceless. Needed for ONE measurement and worth the six lines: the
+# pre-fortis clipping cue. The same vowel is markedly shorter before a voiceless coda than
+# before a voiced one, and in American English **that length difference, not the final
+# consonant's own voicing, is the main cue that separates "bat" from "bad"** — the /t/ and /d/
+# themselves are often both released weakly or flapped. A learner who produces no clipping
+# produces minimal pairs that do not land, however cleanly they articulate the consonant.
+VOICELESS_CONSONANTS = frozenset({"p", "t", "k", "f", "θ", "s", "ʃ", "tʃ", "h"})
+
+
+def is_voiceless(symbol: str | None) -> bool | None:
+    """True/False for a consonant, None for a vowel or an unknown symbol.
+
+    Three-valued on purpose. "Not voiceless" and "not a consonant at all" must not collapse
+    into the same False, or every vowel would be counted as a voiced coda.
+    """
+    entry = lookup(symbol)
+    if entry is None or entry.kind != "consonant":
+        return None
+    return normalise(symbol) in VOICELESS_CONSONANTS
+
+
 def is_arpabet_vowel(phone: str) -> bool:
     """Whether an ARPABET phone is a vowel, i.e. whether it carries a stress digit.
 

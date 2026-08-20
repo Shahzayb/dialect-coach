@@ -247,6 +247,35 @@ def rms_dbfs(sound: parselmouth.Sound, start_s: float, end_s: float) -> float | 
     return level if level > _SILENCE_DBFS else None
 
 
+def rms_dbfs_excluding(
+    sound: parselmouth.Sound, spans: Sequence[tuple[float, float]]
+) -> float | None:
+    """RMS in dBFS of everything the given spans do NOT cover.
+
+    The complement, specifically — not the whole recording. Comparing vowels against the whole
+    is comparing them against a signal they themselves dominate, which understates the contrast
+    badly: on a synthetic reading where vowels are two-thirds of the duration it collapsed a
+    real 20 dB separation to 2.5 dB. The complement is what "everything that is not a vowel"
+    actually means.
+    """
+    values = np.asarray(sound.values[0], dtype=np.float64)
+    rate = sound.sampling_frequency
+    mask = np.ones(values.size, dtype=bool)
+    for start_s, end_s in spans:
+        first = max(0, int(round(start_s * rate)))
+        last = min(values.size, int(round(end_s * rate)))
+        if last > first:
+            mask[first:last] = False
+    outside = values[mask]
+    if outside.size == 0:
+        return None
+    mean_square = float(np.mean(np.square(outside)))
+    if mean_square <= 0.0:
+        return None
+    level = 10.0 * math.log10(mean_square)
+    return level if level > _SILENCE_DBFS else None
+
+
 class Analysis:
     """One recording, analysed once at one ceiling, then sampled many times.
 
