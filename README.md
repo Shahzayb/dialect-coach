@@ -1,6 +1,6 @@
 # Dialect Coach
 
-Records you speaking English, tells you which sounds you got wrong, and coaches you on how to fix them.
+Record yourself speaking English, see which sounds you got wrong, and get coached on how to fix them.
 
 Pet project, not a product. In progress, nowhere near done.
 
