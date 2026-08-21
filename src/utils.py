@@ -36,7 +36,12 @@ class RowLike(Protocol):
 
 
 class Mode(str, Enum):
-    """The three recording modes. Mode C is declared but not implemented yet."""
+    """The three recording modes.
+
+    Mode C is the one that measures the register this project is about: generating language and
+    monitoring pronunciation at the same time. It is not a longer paragraph — it is a different
+    speech population, which is why every attempt carries a style tag.
+    """
 
     DRILL = "drill"
     PARAGRAPH = "paragraph"

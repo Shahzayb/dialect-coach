@@ -41,7 +41,10 @@ CREATE TABLE IF NOT EXISTS attempts (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
   created_at       TEXT    NOT NULL,   -- UTC ISO-8601, always 'Z'-suffixed
   mode             TEXT    NOT NULL,   -- drill | paragraph | unscripted
-  reference_text   TEXT,               -- NULL for unscripted, which has no reference
+  -- The text for a scripted mode. For unscripted it is the PROMPT: nothing is scored against
+  -- it, but it is what pairs two recordings into a spontaneous calibration, and it is the only
+  -- thing that makes a Mode C row readable in the history table.
+  reference_text   TEXT,
   recognised_text  TEXT,
   audio_seconds    REAL    NOT NULL,   -- what the STT meter is charged for this attempt
   audio_sha256     TEXT    NOT NULL,   -- recognises a repeat; the audio itself is not kept
@@ -887,9 +890,16 @@ def save_baseline(
     """
     when = created_at or utc_now_iso()
     with conn:
+        # **Scoped to this style.** Read speech and spontaneous speech are different
+        # populations — vowels centralise and unstressed syllables collapse further toward
+        # schwa the moment a speaker generates language instead of reading it — so each style
+        # has its own current baseline and neither ever retires or averages into the other.
+        # Superseding across styles would mean the first Mode C calibration silently deleted
+        # the read baseline every Mode B reading is normalised against.
         conn.execute(
-            "UPDATE speaker_baseline SET superseded_at = ? WHERE superseded_at IS NULL",
-            (when,),
+            "UPDATE speaker_baseline SET superseded_at = ? "
+            "WHERE superseded_at IS NULL AND style_tag = ?",
+            (when, style_tag),
         )
         cursor = conn.execute(
             """
@@ -913,10 +923,38 @@ def save_baseline(
     return int(cursor.lastrowid or 0)
 
 
-def current_baseline(conn: sqlite3.Connection) -> sqlite3.Row | None:
-    """The baseline in force, or None before the calibration passage has been read twice."""
+def current_baseline(conn: sqlite3.Connection, *, style: str) -> sqlite3.Row | None:
+    """The baseline in force **for one speech style**, or None if that style has none yet.
+
+    `style` is required and has no default. A default would be a guess about which population a
+    reading belongs to, and getting it wrong normalises spontaneous speech against a read
+    centroid — which makes a change of register look like a regression toward the middle of the
+    vowel space. There are up to two current rows, one per style; asking without saying which
+    is not a question this table can answer.
+    """
     row = conn.execute(
-        "SELECT * FROM speaker_baseline WHERE superseded_at IS NULL ORDER BY id DESC LIMIT 1"
+        "SELECT * FROM speaker_baseline WHERE superseded_at IS NULL AND style_tag = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (style,),
+    ).fetchone()
+    return cast("sqlite3.Row | None", row)
+
+
+def any_current_baseline(conn: sqlite3.Connection) -> sqlite3.Row | None:
+    """The oldest current baseline of any style. **Used for the LPC ceiling and nothing else.**
+
+    The ceiling has to match vocal tract length, which is a property of the speaker and not of
+    whether they happen to be reading or talking. It is established once by a sweep and then
+    held still, because a reading measured at a different ceiling is not comparable to the
+    baseline it is set against — so a later spontaneous calibration reuses the ceiling the read
+    calibration already settled rather than sweeping to a second, incompatible one. Oldest
+    first, deliberately: the first sweep is the one everything else was measured against.
+
+    Never use this to pick a normaliser. That is `current_baseline(conn, style=...)`, and the
+    whole point of the split is that a centroid IS style-specific even though a ceiling is not.
+    """
+    row = conn.execute(
+        "SELECT * FROM speaker_baseline WHERE superseded_at IS NULL ORDER BY id ASC LIMIT 1"
     ).fetchone()
     return cast("sqlite3.Row | None", row)
 

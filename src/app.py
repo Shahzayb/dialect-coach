@@ -761,10 +761,11 @@ def prepare_audio(
 
 # --- The accent measurement ------------------------------------------------------------------
 
-# The speech-style tag. Scripted modes are read speech; Mode C, when it lands in v0.12.0, is
-# not. Derived from the mode rather than asked for, so it cannot be forgotten on an attempt.
-STYLE_READ = "read"
-STYLE_SPONTANEOUS = "spontaneous"
+# The speech-style tag. Scripted modes are read speech; Mode C is not. Derived from the mode
+# rather than asked for, so it cannot be forgotten on an attempt. The values themselves live in
+# `vowel_measure`, which is where every consumer of them already is.
+STYLE_READ = vowel_measure.STYLE_READ
+STYLE_SPONTANEOUS = vowel_measure.STYLE_SPONTANEOUS
 
 
 def style_for(mode: Mode) -> str:
@@ -784,6 +785,11 @@ def measure_vowels(
     The ceiling comes from the stored baseline when there is one, so every later reading is
     measured in the same space the baseline was. With no baseline yet the sweep runs, which is
     what a calibration read wants.
+
+    **The ceiling is read style-agnostically** (`any_current_baseline`) even though everything
+    else here is style-scoped: it tracks vocal tract length, not register, and a spontaneous
+    calibration that swept to its own ceiling would produce formants incomparable with every
+    reading already stored.
     """
     if assessment.offline:
         # The offline fixture is a stored payload with no audio behind it. Its phoneme offsets
@@ -791,7 +797,7 @@ def measure_vowels(
         # user happened to record against the wrong transcript.
         return None
     try:
-        baseline = db.current_baseline(conn)
+        baseline = db.any_current_baseline(conn)
         override = (utils.get("LPC_CEILING_HZ") or "").strip()
         ceiling: float | None = None
         if override:
@@ -1362,7 +1368,7 @@ def geometry_gaps(conn: sqlite3.Connection, entry: CachedAttempt) -> list[Any]:
     chosen = reference_set()
     if measurement is None or not chosen:
         return []
-    context = baseline_context(conn)
+    context = baseline_context(conn, style=measurement.style)
     gate = vowel_measure.plot_gate(
         measurement,
         baseline_normaliser=context.normaliser,
@@ -1752,9 +1758,13 @@ class BaselineContext:
         return self.normaliser is not None
 
 
-def baseline_context(conn: sqlite3.Connection) -> BaselineContext:
-    """Load the current baseline, or an empty context when there is none."""
-    row = db.current_baseline(conn)
+def baseline_context(conn: sqlite3.Connection, *, style: str) -> BaselineContext:
+    """Load the current baseline **for one speech style**, or an empty context when it has none.
+
+    `style` is required and never guessed: there is one current baseline per style, and asking
+    without saying which would silently hand spontaneous speech a read centroid.
+    """
+    row = db.current_baseline(conn, style=style)
     if row is None:
         return BaselineContext(normaliser=None, noise=None, style="", reference_set="")
     return BaselineContext(
@@ -1803,7 +1813,7 @@ def render_accent_table(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
             icon="🚫",
         )
 
-    context = baseline_context(conn)
+    context = baseline_context(conn, style=measurement.style)
     gate = vowel_measure.plot_gate(
         measurement,
         baseline_normaliser=context.normaliser,
@@ -1813,10 +1823,27 @@ def render_accent_table(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
     if gate.ok and gate.normaliser is not None:
         # The stored baseline supplies the space, so this reading only has to supply the
         # token. That is what lets a three-word drill produce a row at all: normalising a
-        # drill against itself needs a full inventory and would refuse every time.
-        normaliser, minimum = gate.normaliser, gate.minimum_tokens
-    elif context.normaliser is not None:
+        # drill against itself needs a full inventory and would refuse every time. Free speech
+        # does not get that latitude — see `minimum_tokens_for`.
+        normaliser = gate.normaliser
+        minimum = vowel_measure.minimum_tokens_for(measurement.style, gate.minimum_tokens)
+    elif context.normaliser is not None or gate.reason == vowel_measure.NOTHING_MEASURABLE:
         st.info(gate.reason, icon="📉")
+        _render_rejections(measurement)
+        return
+    elif measurement.style == vowel_measure.STYLE_SPONTANEOUS:
+        # **Never fall back to normalising spontaneous speech against itself either.** A single
+        # free-speech recording cannot supply a full inventory — that is the point of the mode —
+        # and the categories it does carry are exactly the ones that sentence happened to use,
+        # so a centroid built from them is a centroid of the topic. Say what is missing instead.
+        st.info(
+            vowel_measure.STYLE_MISMATCH.format(
+                measured=vowel_measure.STYLE_SPONTANEOUS, baseline=vowel_measure.STYLE_READ
+            )
+            if db.any_current_baseline(conn) is not None
+            else vowel_measure.NO_BASELINE,
+            icon="📐",
+        )
         _render_rejections(measurement)
         return
     else:
@@ -1831,9 +1858,6 @@ def render_accent_table(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
             _render_rejections(measurement)
             return
         minimum = vowel_measure.MIN_TOKENS_PER_CATEGORY
-
-    if gate.style_warning:
-        st.warning(gate.style_warning, icon="🗣️")
 
     findings = vowel_measure.findings(
         measurement,
@@ -1856,6 +1880,20 @@ def _render_rejections(measurement: Any) -> None:
     st.markdown(accent_view.to_markdown(vowel_measure.rejection_findings(measurement.tokens)))
 
 
+def _measurable_attempts(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every non-offline attempt with at least one accepted vowel token, newest first."""
+    rows = conn.execute(
+        """
+        SELECT a.id, a.created_at, a.mode, a.reference_text,
+               COUNT(v.id) FILTER (WHERE v.accepted = 1) AS accepted
+        FROM attempts a JOIN vowel_measurements v ON v.attempt_id = a.id
+        WHERE a.offline = 0
+        GROUP BY a.id ORDER BY a.created_at DESC
+        """
+    ).fetchall()
+    return [row for row in rows if row["accepted"] > 0]
+
+
 def calibration_reads(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Benchmark-passage attempts that carry usable vowel measurements, newest first.
 
@@ -1863,22 +1901,45 @@ def calibration_reads(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     two consumers, and its own comment in `progress_view` says so. Nothing new is written for
     this chunk.
     """
-    rows = conn.execute(
-        """
-        SELECT a.id, a.created_at, a.reference_text,
-               COUNT(v.id) FILTER (WHERE v.accepted = 1) AS accepted
-        FROM attempts a JOIN vowel_measurements v ON v.attempt_id = a.id
-        WHERE a.offline = 0
-        GROUP BY a.id ORDER BY a.created_at DESC
-        """
-    ).fetchall()
     return [
         row
-        for row in rows
+        for row in _measurable_attempts(conn)
         if progress_view.is_benchmark(row["reference_text"])
         and not rhythm.is_baseline_capture(row["reference_text"])
-        and row["accepted"] > 0
     ]
+
+
+def spontaneous_calibration_reads(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Mode C attempts on the SAME prompt that carry usable vowel measurements, newest first.
+
+    A spontaneous baseline cannot be built the way the read one was, because you cannot read the
+    same passage twice when you are not reading. The nearest available analogue is the same
+    PROMPT twice: the content is not identical, so the displacement between the two recordings
+    carries content variation on top of measurement noise.
+
+    That makes the resulting floor an **upper bound** rather than an equal of the read floor —
+    wider — and wider is the conservative direction for a guard. A floor that is too narrow
+    licenses reporting noise as progress; one that is too wide only refuses to call something
+    progress until it is bigger. The surface says which of the two this is.
+
+    Grouped rather than just "the two most recent": two Mode C recordings on different prompts
+    would compare two different vocabularies, and the vowel inventory of free speech is decided
+    by the words the topic pulled in.
+    """
+    rows = [
+        row
+        for row in _measurable_attempts(conn)
+        if str(row["mode"]) == Mode.UNSCRIPTED.value and (row["reference_text"] or "").strip()
+    ]
+    by_prompt: dict[str, list[sqlite3.Row]] = {}
+    for row in rows:
+        by_prompt.setdefault(str(row["reference_text"]).strip().lower(), []).append(row)
+    pairs = [group for group in by_prompt.values() if len(group) >= 2]
+    if not pairs:
+        return rows[:1] if rows else []
+    # The prompt whose most recent recording is newest, so a session in progress is the one
+    # offered rather than an older prompt that happens to already have a pair.
+    return max(pairs, key=lambda group: str(group[0]["created_at"]))
 
 
 def _minutes_between(first: str, second: str) -> float:
@@ -1887,8 +1948,15 @@ def _minutes_between(first: str, second: str) -> float:
     return abs((end - start).total_seconds()) / 60.0
 
 
-def build_baseline(conn: sqlite3.Connection, older: Any, newer: Any) -> str | None:
-    """Calibrate from two stored reads. Returns an error message, or None on success."""
+def build_baseline(
+    conn: sqlite3.Connection, older: Any, newer: Any, *, style: str = STYLE_READ
+) -> str | None:
+    """Calibrate from two stored reads. Returns an error message, or None on success.
+
+    `style` decides which population the baseline is stored under, and `vowel_measure.calibrate`
+    refuses if the two readings' own tokens disagree with it — a baseline filed under the wrong
+    style is applied to the wrong readings for as long as it stands.
+    """
     chosen = reference_set()
     if not chosen:
         return "Set GA_REFERENCE_SET to 'men' or 'women' first."
@@ -1909,6 +1977,7 @@ def build_baseline(conn: sqlite3.Connection, older: Any, newer: Any) -> str | No
             second,
             reference_set=chosen,
             ceiling_hz=ceiling,
+            style=style,
             attempt_ids=(int(older["id"]), int(newer["id"])),
         )
     except (vowel_measure.CalibrationRefused, vowel_measure.TooFewTokens) as exc:
@@ -1928,20 +1997,72 @@ def build_baseline(conn: sqlite3.Connection, older: Any, newer: Any) -> str | No
     return None
 
 
+def _render_calibration_pair(
+    conn: sqlite3.Connection,
+    reads: Sequence[Any],
+    *,
+    style: str,
+    button_label: str,
+    key: str,
+) -> None:
+    """The half of a calibration flow that is identical for both styles.
+
+    Both need the same two things checked and refused in the same way: two usable recordings,
+    and enough time between them that the displacement is a session-to-session wander rather
+    than a microphone holding still.
+    """
+    gap = utils.get_float("CALIBRATION_GAP_MINUTES")
+    if len(reads) < 2:
+        return
+
+    newer, older = reads[0], reads[1]
+    apart = _minutes_between(str(older["created_at"]), str(newer["created_at"]))
+    st.caption(
+        f"Two most recent: attempt {older['id']} and attempt {newer['id']}, "
+        f"{apart:.0f} minutes apart, {older['accepted']} and {newer['accepted']} usable "
+        f"vowel tokens."
+    )
+
+    if apart < gap:
+        st.warning(
+            f"Those two recordings are only {apart:.0f} minutes apart, and the floor needs "
+            f"{gap:g}. Two back-to-back takes measure the microphone holding still, not the "
+            f"session-to-session wander this number exists to capture — so the band would "
+            f"come out flatteringly small and start licensing noise as progress.",
+            icon="⏱️",
+        )
+        return
+
+    if st.button(button_label, type="primary", key=key):
+        problem = build_baseline(conn, older, newer, style=style)
+        if problem:
+            st.error(problem, icon="📉")
+        else:
+            st.success(f"{style.capitalize()} baseline and noise floor stored.")
+            st.rerun()
+
+
 def render_calibration(conn: sqlite3.Connection) -> None:
-    """The two-read calibration flow, and what it refuses."""
+    """The two calibration flows — one per speech style — and what they refuse."""
     st.subheader("Calibration")
     gap = utils.get_float("CALIBRATION_GAP_MINUTES")
     st.markdown(
         f"""
-Read the benchmark passage **twice in one sitting, at least {gap:g} minutes apart**, on the
-same microphone in the same room. The displacement between the two reads **is** the
+**Each speech style needs its own baseline.** Read speech and spontaneous speech are different
+populations, not the same measurement made under harder conditions: speakers hyperarticulate
+when reading and reduce far more when generating language. A read baseline normalises read
+speech, so a spontaneous recording is either normalised against a spontaneous baseline or it is
+not normalised at all. Neither ever supersedes or averages into the other.
+
+Both are built the same way: the same material **twice in one sitting, at least {gap:g} minutes
+apart**, on the same microphone in the same room. The displacement between the two **is** the
 measurement noise floor — a vowel centroid moves between sessions from microphone placement,
-posture, time of day and warm-up, with no learning at all. Without that number the progress
-view would render exactly that wander as progress.
+posture, time of day and warm-up, with no learning at all. Without that number the progress view
+would render exactly that wander as progress.
 """
     )
 
+    st.markdown("#### Read speech — the benchmark passage, twice")
     reads = calibration_reads(conn)
     if len(reads) < 2:
         st.info(
@@ -1950,57 +2071,89 @@ view would render exactly that wander as progress.
             f"counts for both.",
             icon="🎯",
         )
-        return
+    else:
+        _render_calibration_pair(
+            conn,
+            reads,
+            style=STYLE_READ,
+            button_label="Set the read baseline from these two reads",
+            key="calibrate_read",
+        )
 
-    newer, older = reads[0], reads[1]
-    apart = _minutes_between(str(older["created_at"]), str(newer["created_at"]))
+    st.markdown("#### Spontaneous speech — the same prompt, twice")
     st.caption(
-        f"Two most recent reads: attempt {older['id']} and attempt {newer['id']}, "
-        f"{apart:.0f} minutes apart, {older['accepted']} and {newer['accepted']} usable "
-        f"vowel tokens."
+        "You cannot read the same passage twice when you are not reading, so the nearest "
+        "available analogue is the same PROMPT twice. The content will not be identical, which "
+        "means this floor carries content variation on top of measurement noise and comes out "
+        "**wider** than the read one. That is an upper bound, and an upper bound is the safe "
+        "direction: it can only refuse to call something progress until the change is bigger."
     )
-
-    if apart < gap:
-        st.warning(
-            f"Those two reads are only {apart:.0f} minutes apart, and the floor needs "
-            f"{gap:g}. Two back-to-back reads measure the microphone holding still, not the "
-            f"session-to-session wander this number exists to capture — so the band would "
-            f"come out flatteringly small and start licensing noise as progress.",
-            icon="⏱️",
+    spontaneous = spontaneous_calibration_reads(conn)
+    if len(spontaneous) < 2:
+        st.info(
+            f"{len(spontaneous)} of 2 recordings on one prompt so far. Record the same "
+            f"Unscripted prompt again on the Practice tab, at least {gap:g} minutes after the "
+            f"first — both takes have to be on the SAME prompt, because free speech samples the "
+            f"vowel space wherever the topic sends it.",
+            icon="🗣️",
         )
         return
-
-    if st.button("Set the baseline from these two reads", type="primary"):
-        problem = build_baseline(conn, older, newer)
-        if problem:
-            st.error(problem, icon="📉")
-        else:
-            st.success("Baseline and noise floor stored.")
-            st.rerun()
+    st.caption(f"Prompt: _{str(spontaneous[0]['reference_text'])[:120]}_")
+    _render_calibration_pair(
+        conn,
+        spontaneous,
+        style=STYLE_SPONTANEOUS,
+        button_label="Set the spontaneous baseline from these two recordings",
+        key="calibrate_spontaneous",
+    )
 
 
 def render_baseline(conn: sqlite3.Connection) -> None:
-    """The stored baseline: the vowel chart, the noise floor, and the four-column table."""
-    row = db.current_baseline(conn)
-    if row is None:
+    """The stored baselines — one per speech style — each with its chart and its noise floor."""
+    stored = [
+        (style, db.current_baseline(conn, style=style))
+        for style in (STYLE_READ, STYLE_SPONTANEOUS)
+    ]
+    present = [(style, row) for style, row in stored if row is not None]
+    if not present:
         st.info(
-            "No baseline yet. Until the calibration passage has been read twice there is no "
-            "speaker centroid to normalise against and no noise floor, so no movement on any "
+            "No baseline yet. Until the calibration material has been recorded twice there is "
+            "no speaker centroid to normalise against and no noise floor, so no movement on any "
             "accent surface can honestly be called progress.",
             icon="📐",
         )
         return
 
+    missing = [style for style, row in stored if row is None]
+    if missing:
+        st.caption(
+            f"No {' or '.join(missing)} baseline yet, so {' and '.join(missing)} recordings are "
+            f"not normalised at all — they are never borrowed against the other style's "
+            f"centroid."
+        )
+    for style, row in present:
+        _render_one_baseline(style, row)
+
+
+def _render_one_baseline(style: str, row: Any) -> None:
+    """One stored baseline: its provenance, its vowel chart, and its noise floor."""
     chosen = str(row["reference_set"])
     positions = vowel_measure.positions_from_json(json.loads(row["positions_json"]))
     noise = vowel_measure.noise_from_json(json.loads(row["noise_floor_json"]))
 
-    st.subheader("Your vowel space")
+    st.markdown(f"#### Your vowel space — {style} speech")
     st.caption(
         f"Calibrated {row['created_at']} from attempts {row['attempt_ids']}, "
         f"{row['tokens']} usable tokens, LPC ceiling {row['lpc_ceiling_hz']:.0f} Hz, "
         f"{row['style_tag']} speech."
     )
+    if style == STYLE_SPONTANEOUS:
+        st.caption(
+            "This floor was measured across two recordings on one prompt, so it carries "
+            "content variation on top of measurement noise and is **wider than the read "
+            "floor by construction**. Treat it as an upper bound: it under-reports change "
+            "rather than over-reporting it."
+        )
 
     frame = accent_view.vowel_frame(positions, vowel_measure.reference_positions(chosen))
     if frame.empty:
@@ -2011,7 +2164,7 @@ def render_baseline(conn: sqlite3.Connection) -> None:
 
     st.markdown(accent_view.noise_caption(noise))
 
-    with st.expander("The noise floor, vowel by vowel"):
+    with st.expander(f"The {style} noise floor, vowel by vowel"):
         st.markdown(
             accent_view.to_markdown(
                 [
@@ -2098,7 +2251,6 @@ def render_accent_charts(conn: sqlite3.Connection) -> None:
     if not chosen_set:
         return
 
-    context = baseline_context(conn)
     attempts = measured_attempts(conn)
     if not attempts:
         st.info(
@@ -2161,18 +2313,25 @@ def render_accent_charts(conn: sqlite3.Connection) -> None:
         f"{str(chosen['created_at'])[:16].replace('T', ' ')}"
     )
 
+    # Resolved from the SELECTED reading's own style, not from the page: there is one current
+    # baseline per style, and which one applies is a property of the recording being drawn.
+    context = baseline_context(conn, style=measurement.style)
     gate = vowel_measure.plot_gate(
         measurement,
         baseline_normaliser=context.normaliser,
         baseline_style=context.style,
     )
     if not gate.ok or gate.normaliser is None:
-        st.info(gate.reason, icon="📐")
+        st.info(
+            gate.reason
+            or vowel_measure.NO_BASELINE,
+            icon="📐",
+        )
         return
-    if gate.style_warning:
-        st.warning(gate.style_warning, icon="🗣️")
-
-    normaliser, minimum = gate.normaliser, gate.minimum_tokens
+    # Free speech samples the vowel space wherever the sentence went, so a lone token is not a
+    # deliberate probe the way a drill token is. See `vowel_measure.minimum_tokens_for`.
+    minimum = vowel_measure.minimum_tokens_for(measurement.style, gate.minimum_tokens)
+    normaliser = gate.normaliser
     accepted = measurement.accepted
     speaker = vowel_measure.positions(accepted, normaliser, minimum=minimum)
     published = vowel_measure.reference_positions(
