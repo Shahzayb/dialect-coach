@@ -471,12 +471,40 @@ class Recognition:
     scored_against: str = ""
 
 
+class _AttemptMeter:
+    """Counts attempts across several `retry_transient` calls that each restart at 1.
+
+    Mode C sends the audio twice, and `retry_transient` numbers the tries within ONE call. So
+    the running total is "everything finished passes used, plus where this pass has got to",
+    and a pass is closed with `finished()` when it returns. Adding the raw attempt numbers
+    together instead would report a two-pass recording as one — which is exactly how the usage
+    meter would drift low by the length of every Mode C attempt.
+    """
+
+    def __init__(self, on_attempt: Callable[[int], None] | None) -> None:
+        self._closed = 0
+        self._current = 0
+        self._on_attempt = on_attempt
+
+    def count(self, attempt: int) -> None:
+        self._current = attempt
+        if self._on_attempt is not None:
+            self._on_attempt(self.total)
+
+    def finished(self) -> None:
+        self._closed += self._current
+        self._current = 0
+
+    @property
+    def total(self) -> int:
+        return self._closed + self._current
+
+
 def _recognise_unscripted(
     wav_path: str,
     topic: str,
     cancel_event: threading.Event | None,
-    count: Callable[[int], None],
-    tally: Callable[[], int],
+    meter: _AttemptMeter,
 ) -> Recognition:
     """Mode C. Two passes by default, one when `UNSCRIPTED_TWO_PASS` is off.
 
@@ -496,13 +524,17 @@ def _recognise_unscripted(
             lambda: _assess_continuous(
                 wav_path, "", cancel_event, mode=Mode.UNSCRIPTED, topic=topic
             ),
-            on_attempt=count,
+            on_attempt=meter.count,
         )
-        return Recognition(payloads, False, tally(), _joined_display(payloads))
+        meter.finished()
+        return Recognition(payloads, False, meter.total, _joined_display(payloads))
 
     transcript_payloads = utils.retry_transient(
-        lambda: _transcribe_continuous(wav_path, cancel_event), on_attempt=count
+        lambda: _transcribe_continuous(wav_path, cancel_event), on_attempt=meter.count
     )
+    # Closed before the second pass starts, so pass 2's attempt 1 adds to pass 1's total
+    # instead of replacing it.
+    meter.finished()
     transcript = _joined_display(transcript_payloads)
     if not transcript:
         raise NoSpeechDetected(
@@ -513,9 +545,10 @@ def _recognise_unscripted(
 
     payloads = utils.retry_transient(
         lambda: _assess_continuous(wav_path, transcript, cancel_event, mode=Mode.UNSCRIPTED),
-        on_attempt=count,
+        on_attempt=meter.count,
     )
-    return Recognition(payloads, False, tally(), transcript)
+    meter.finished()
+    return Recognition(payloads, False, meter.total, transcript)
 
 
 def recognise(
@@ -548,24 +581,12 @@ def recognise(
 
     # Summed across passes, not replaced: Mode C sends the audio twice and each pass restarts
     # `retry_transient`'s numbering at 1.
-    made = 0
-    current = 0
-
-    def count(attempt: int) -> None:
-        nonlocal made, current
-        made += attempt - current
-        current = attempt
-        if on_attempt is not None:
-            on_attempt(made)
-
-    def tally() -> int:
-        nonlocal current
-        current = 0
-        return made
+    meter = _AttemptMeter(on_attempt)
 
     if mode is Mode.UNSCRIPTED:
-        result = _recognise_unscripted(wav_path, topic, cancel_event, count, tally)
-        if result.attempts > 2:
+        result = _recognise_unscripted(wav_path, topic, cancel_event, meter)
+        expected = 2 if utils.get_bool("UNSCRIPTED_TWO_PASS") else 1
+        if result.attempts > expected:
             logger.warning(
                 "Mode C took %d attempts across its passes; all of them may have cost quota.",
                 result.attempts,
@@ -579,10 +600,11 @@ def recognise(
             return _assess_single_shot(wav_path, reference_text)
         return _assess_continuous(wav_path, reference_text, cancel_event)
 
-    payloads = utils.retry_transient(call, on_attempt=count)
-    if made > 1:
-        logger.warning("Assessment took %d attempts; all of them may have cost quota.", made)
-    return Recognition(payloads, False, tally(), reference_text)
+    payloads = utils.retry_transient(call, on_attempt=meter.count)
+    meter.finished()
+    if meter.total > 1:
+        logger.warning("Assessment took %d attempts; all of them may have cost quota.", meter.total)
+    return Recognition(payloads, False, meter.total, reference_text)
 
 
 # --- Normalisation ------------------------------------------------------------------------
