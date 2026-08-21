@@ -18,6 +18,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+import accent_resynth
+import acoustics
 import ladder
 import ladder_reference
 import shadowing
@@ -172,3 +174,83 @@ def native_leg(
     except ladder.LadderError:
         return None
     return NativeLeg(voice=voice, audio=audio, span=other)
+
+
+# --- Corrections at rung scale --------------------------------------------------------------------
+# Each of the three above corrects a whole recording. On the ladder the unit is a word, a
+# sentence or a paragraph, so the correction has to act on a span of one.
+#
+# **The span is cut first, then corrected as a clip in its own right.** The alternative —
+# correcting in place and splicing the result back between two untouched ends — is what
+# `corrected_vowel` has to do, and it is the path where Praat's empty-range `Extract part`
+# returns the whole recording. Cutting first with `ladder.slice_wav` (plain PCM frame
+# arithmetic, no Praat) means pitch and timing never touch that path at all. `corrected_vowel`
+# still splices, inside the cut, and still guards it with `_MIN_PART_S`.
+#
+# **No stacking.** Three separate corrections, each changing exactly one thing, so "your voice,
+# one thing changed" stays literally true and no clip compounds three manipulations into
+# something that has stopped sounding like the speaker.
+
+
+def corrected_pitch_in(
+    wav_bytes: bytes,
+    span: Span,
+    target: Sequence[tuple[float, float]],
+    *,
+    max_shift: float = accent_resynth.MAX_PITCH_SHIFT_SEMITONES,
+) -> accent_resynth.Resynthesis:
+    """`corrected_pitch`, applied to one rung's span. `target` is on the full clock."""
+    audio, offset = ladder.cut_with_offset(wav_bytes, span)
+    duration = acoustics.load(audio).duration
+    moved = [(time_s, value) for time_s, value in ladder.rebase(target, offset, duration)]
+    if not moved:
+        raise accent_resynth.ResynthesisError(
+            "The model contour does not reach this part of the recording, so there is nothing "
+            "to correct toward here."
+        )
+    return accent_resynth.corrected_pitch(audio, moved, max_shift=max_shift)
+
+
+def corrected_timing_in(
+    wav_bytes: bytes,
+    span: Span,
+    stretches: Sequence[tuple[float, float, float]],
+) -> accent_resynth.Resynthesis:
+    """`corrected_timing`, applied to one rung's span. `stretches` are on the full clock.
+
+    A vowel straddling the cut edge is dropped rather than clipped: stretching half a vowel
+    would report a timing correction that was never applied to the sound the listener hears.
+    """
+    audio, offset = ladder.cut_with_offset(wav_bytes, span)
+    duration = acoustics.load(audio).duration
+    moved = [
+        (start, end, ratio) for start, end, ratio in ladder.rebase(stretches, offset, duration)
+    ]
+    if not moved:
+        raise accent_resynth.ResynthesisError(
+            "No vowel inside this unit has both a measurement and a target length to move toward."
+        )
+    return accent_resynth.corrected_timing(audio, moved)
+
+
+def corrected_vowel_in(
+    wav_bytes: bytes,
+    span: Span,
+    start_s: float,
+    end_s: float,
+    produced_f2_hz: float,
+    target_f2_hz: float,
+    *,
+    fraction: float = accent_resynth.MAX_FORMANT_FRACTION,
+) -> accent_resynth.Resynthesis:
+    """`corrected_vowel`, applied to one vowel inside one rung's span."""
+    audio, offset = ladder.cut_with_offset(wav_bytes, span)
+    duration = acoustics.load(audio).duration
+    first, last = start_s - offset, end_s - offset
+    if first < 0.0 or last > duration or last <= first:
+        raise accent_resynth.ResynthesisError(
+            "That vowel does not sit inside the unit being practised."
+        )
+    return accent_resynth.corrected_vowel(
+        audio, first, last, produced_f2_hz, target_f2_hz, fraction=fraction
+    )

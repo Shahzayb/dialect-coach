@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 import accent_charts
+import accent_resynth
 import phoneme_reference
 import rhythm
 import shadowing
@@ -630,6 +631,33 @@ def track_within(track: Sequence[tuple[float, float]], span: Span) -> list[tuple
     measurement must not, or every span would be judged partly on its neighbours.
     """
     return [(time_s, hz) for time_s, hz in track if span.start_s <= time_s <= span.end_s]
+
+
+# Which metrics can be measured from the audio alone. The rest need Azure's phoneme boundaries
+# — nPVI pairs vocalic intervals, and a relative word length needs the word to have been
+# delimited — so they are dark during free repetition and light up only when an attempt is
+# banked. That split is what makes "the tenth repetition as cheap as the first" possible at all,
+# and the surface has to say which half it is showing rather than letting a partial verdict read
+# as a complete one.
+LOCAL_METRICS: frozenset[str] = frozenset({"pitch_range_st", "terminal_slope_st"})
+
+
+def local_scalars(wav_bytes: bytes, rung: Rung) -> dict[str, float]:
+    """Everything measurable from one clip with no network and no phoneme boundaries.
+
+    The clip is the unit already — the caller cut it — so the whole track is the span.
+    """
+    if rung not in METRICS:
+        return {}
+    track = accent_resynth.pitch_track(wav_bytes)
+    found: dict[str, float] = {}
+    spread = accent_charts.pitch_range_semitones(track)
+    if spread is not None and "pitch_range_st" in METRICS[rung]:
+        found["pitch_range_st"] = float(spread)
+    slope = accent_charts.terminal_slope_semitones(track)
+    if slope is not None and "terminal_slope_st" in METRICS[rung]:
+        found["terminal_slope_st"] = float(slope)
+    return found
 
 
 def mean_word_seconds(words: Sequence[Mapping[str, object]]) -> float | None:
