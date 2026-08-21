@@ -23,6 +23,7 @@ byte range in PCM, so it is cut here with the standard library and the trap neve
 from __future__ import annotations
 
 import io
+import statistics
 import wave
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -483,3 +484,176 @@ def scalars(
     if span.rung is Rung.PARAGRAPH and prosody is not None:
         found["prosody"] = float(prosody)
     return found
+
+
+# --- The movement half: a noise floor for these metrics -------------------------------------------
+# `vowel_measure.NoiseFloor` is per-vowel and in formant z-units, so it answers for the SOUND
+# rung and nothing else. The metrics the other three rungs are judged on — pitch range, terminal
+# fall, rhythm, relative length — have no floor there, and measured resolution needs one for
+# each: arrival alone would let a lucky reading graduate something.
+#
+# The construction is deliberately the same one, for the same reason: the displacement between
+# two reads of the same passage in one sitting, at least `CALIBRATION_GAP_MINUTES` apart, IS how
+# much these numbers wander with no learning in between.
+
+
+@dataclass(frozen=True)
+class MetricFloor:
+    """How far each metric moves between two readings with no learning in between.
+
+    Pooled across units rather than held per unit: one sentence contributes exactly one pair,
+    which is not enough to characterise anything. Every sentence in the passage contributing
+    to one per-metric floor is both more robust and the more conservative reading — the median
+    absolute displacement across units is larger than the smallest of them, so it can only
+    refuse to call something progress until the change is bigger.
+    """
+
+    per_metric: Mapping[str, float]
+    units: int
+
+    def band_for(self, metric: str) -> float | None:
+        return self.per_metric.get(metric)
+
+    def within_noise(self, metric: str, movement: float | None) -> bool:
+        """Whether a change is too small to be called movement.
+
+        Unmeasurable counts as within noise, and a metric with no floor at all counts as
+        within noise too — both are 'this cannot be called progress', which is the direction
+        that refuses rather than flatters.
+        """
+        if movement is None:
+            return True
+        band = self.band_for(metric)
+        return band is None or abs(movement) < band
+
+
+def metric_noise_floor(
+    first: Mapping[int, Mapping[str, float]], second: Mapping[int, Mapping[str, float]]
+) -> MetricFloor:
+    """Per-metric displacement between two calibration reads, pooled across units.
+
+    `first` and `second` are `{unit index: {metric: value}}` for the same passage read twice.
+    A unit measured in only one of the two reads contributes nothing — there is no
+    displacement to take.
+    """
+    gathered: dict[str, list[float]] = {}
+    units = 0
+    for index, values in first.items():
+        other = second.get(index)
+        if other is None:
+            continue
+        counted = False
+        for metric, value in values.items():
+            if metric not in other:
+                continue
+            gathered.setdefault(metric, []).append(abs(float(other[metric]) - float(value)))
+            counted = True
+        units += 1 if counted else 0
+    return MetricFloor(
+        per_metric={
+            metric: statistics.median(values) for metric, values in gathered.items() if values
+        },
+        units=units,
+    )
+
+
+# --- The verdict ----------------------------------------------------------------------------------
+
+
+# Both bars have to clear, and neither is enough alone. Arrival without movement is a reading
+# that happened to land — it says nothing about whether the speaker changed. Movement without
+# arrival is real progress that has not got there yet, which is worth showing and is not
+# resolution. The brief's rule, kept as an `and` rather than a preference.
+RESOLVED_NOTE = (
+    "Resolved needs both: inside the range native talkers occupy, AND a change bigger than "
+    "your own session-to-session variation. Either one alone is not enough."
+)
+
+
+@dataclass(frozen=True)
+class MetricVerdict:
+    """One metric on one attempt: where it landed, and whether that counts."""
+
+    metric: str
+    value: float | None
+    band: Band | None
+    arrived: bool
+    # How far outside the band, in SDs. 0.0 when inside; None when it cannot be judged.
+    distance_sd: float | None
+    # None when there is no earlier attempt to compare against — not False, because
+    # "first attempt" and "did not move" are different states and only one is a failure.
+    moved: bool | None
+
+    @property
+    def resolved(self) -> bool:
+        return self.arrived and self.moved is True
+
+    @property
+    def judgeable(self) -> bool:
+        """Whether this metric can be judged at all on this recording."""
+        return self.value is not None and self.band is not None
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """Every metric for one span, and whether the problem on it is resolved."""
+
+    rung: Rung
+    metrics: tuple[MetricVerdict, ...]
+
+    def for_metric(self, metric: str) -> MetricVerdict | None:
+        return next((m for m in self.metrics if m.metric == metric), None)
+
+    @property
+    def judgeable(self) -> tuple[MetricVerdict, ...]:
+        return tuple(m for m in self.metrics if m.judgeable)
+
+    @property
+    def resolved(self) -> bool:
+        """Resolved when every judgeable metric has cleared both bars.
+
+        A rung with nothing judgeable on this recording is NOT resolved: `all(())` is True and
+        would silently graduate a problem the instruments could not see. That is the one
+        failure mode this property exists to refuse.
+        """
+        judgeable = self.judgeable
+        return bool(judgeable) and all(m.resolved for m in judgeable)
+
+
+def verdict(
+    span: Span,
+    values: Mapping[str, float],
+    bands: Mapping[str, Band],
+    *,
+    previous: Mapping[str, float] | None = None,
+    floor: MetricFloor | None = None,
+) -> Verdict:
+    """Judge one attempt at one span against both bars.
+
+    `previous` is the attempt this one is compared against — the first attempt on this problem,
+    not the one before it, so ten repetitions are ten measurements of the same gap rather than
+    a random walk that can drift into looking like progress.
+    """
+    judged: list[MetricVerdict] = []
+    for metric in METRICS.get(span.rung, ()):
+        value = values.get(metric)
+        band = bands.get(metric)
+        arrived = band.contains(value) if band is not None else False
+        distance = band.distance(value) if band is not None else None
+
+        moved: bool | None = None
+        if previous is not None and metric in previous and value is not None:
+            movement = value - float(previous[metric])
+            moved = floor is not None and not floor.within_noise(metric, movement)
+
+        judged.append(
+            MetricVerdict(
+                metric=metric,
+                value=value,
+                band=band,
+                arrived=arrived,
+                distance_sd=distance,
+                moved=moved,
+            )
+        )
+    return Verdict(rung=span.rung, metrics=tuple(judged))

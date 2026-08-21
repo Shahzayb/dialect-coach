@@ -353,3 +353,122 @@ def test_widening_the_band_is_possible_but_not_the_default() -> None:
     band = ladder.Band(metric="npvi", mean=55.0, sd=4.0, voices=16)
     assert not band.contains(62.0)
     assert band.contains(62.0, width=2.0)
+
+
+# --- The movement half, and the verdict that joins the two bars -----------------------------------
+
+
+def test_the_noise_floor_is_the_median_displacement_across_units() -> None:
+    floor = ladder.metric_noise_floor(
+        {0: {"npvi": 55.0}, 1: {"npvi": 60.0}, 2: {"npvi": 50.0}},
+        {0: {"npvi": 57.0}, 1: {"npvi": 66.0}, 2: {"npvi": 51.0}},
+    )
+    assert floor.per_metric["npvi"] == pytest.approx(2.0)  # median of 2, 6, 1
+    assert floor.units == 3
+
+
+def test_a_unit_measured_in_only_one_read_contributes_no_displacement() -> None:
+    floor = ladder.metric_noise_floor({0: {"npvi": 55.0}, 9: {"npvi": 1.0}}, {0: {"npvi": 58.0}})
+    assert floor.units == 1
+    assert floor.per_metric["npvi"] == pytest.approx(3.0)
+
+
+def test_a_change_smaller_than_the_floor_is_not_movement() -> None:
+    floor = ladder.MetricFloor(per_metric={"npvi": 3.0}, units=5)
+    assert floor.within_noise("npvi", 2.5)
+    assert not floor.within_noise("npvi", 3.5)
+
+
+def test_the_floor_refuses_in_the_flattering_direction_too() -> None:
+    """The rule is symmetric, and that is the whole point of measuring it."""
+    floor = ladder.MetricFloor(per_metric={"npvi": 3.0}, units=5)
+    assert floor.within_noise("npvi", 2.5) == floor.within_noise("npvi", -2.5)
+
+
+def test_a_metric_with_no_floor_cannot_be_called_movement() -> None:
+    floor = ladder.MetricFloor(per_metric={}, units=0)
+    assert floor.within_noise("npvi", 100.0)
+
+
+def _span(rung: ladder.Rung = ladder.Rung.SENTENCE) -> ladder.Span:
+    return ladder.Span(rung=rung, label="x", start_s=0.0, end_s=1.0, word_indices=(0,))
+
+
+BANDS = {
+    "npvi": ladder.Band("npvi", mean=55.0, sd=4.0, voices=16),
+    "pitch_range_st": ladder.Band("pitch_range_st", mean=10.0, sd=2.0, voices=16),
+    "terminal_slope_st": ladder.Band("terminal_slope_st", mean=-4.0, sd=1.5, voices=16),
+}
+FLOOR = ladder.MetricFloor(per_metric={"npvi": 2.0, "pitch_range_st": 1.0}, units=6)
+
+
+def test_arrival_without_movement_is_not_resolved() -> None:
+    """A reading that happened to land says nothing about whether the speaker changed."""
+    result = ladder.verdict(
+        _span(),
+        {"npvi": 55.5},
+        BANDS,
+        previous={"npvi": 55.0},  # a 0.5 change, under the 2.0 floor
+        floor=FLOOR,
+    )
+    npvi = result.for_metric("npvi")
+    assert npvi is not None
+    assert npvi.arrived
+    assert npvi.moved is False
+    assert not npvi.resolved
+
+
+def test_movement_without_arrival_is_not_resolved() -> None:
+    result = ladder.verdict(_span(), {"npvi": 70.0}, BANDS, previous={"npvi": 80.0}, floor=FLOOR)
+    npvi = result.for_metric("npvi")
+    assert npvi is not None
+    assert not npvi.arrived
+    assert npvi.moved is True
+    assert not npvi.resolved
+
+
+def test_both_bars_together_resolve() -> None:
+    result = ladder.verdict(_span(), {"npvi": 56.0}, BANDS, previous={"npvi": 65.0}, floor=FLOOR)
+    npvi = result.for_metric("npvi")
+    assert npvi is not None
+    assert npvi.resolved
+
+
+def test_a_first_attempt_has_not_moved_rather_than_failed_to_move() -> None:
+    """'First attempt' and 'did not move' are different states; only one is a failure."""
+    result = ladder.verdict(_span(), {"npvi": 56.0}, BANDS)
+    npvi = result.for_metric("npvi")
+    assert npvi is not None
+    assert npvi.moved is None
+    assert not npvi.resolved
+
+
+def test_a_rung_with_nothing_judgeable_is_not_resolved() -> None:
+    """all(()) is True and would graduate a problem the instruments could not see."""
+    result = ladder.verdict(_span(), {}, {})
+    assert result.judgeable == ()
+    assert not result.resolved
+
+
+def test_a_span_resolves_only_when_every_judgeable_metric_does() -> None:
+    result = ladder.verdict(
+        _span(),
+        {"npvi": 56.0, "pitch_range_st": 20.0},
+        BANDS,
+        previous={"npvi": 65.0, "pitch_range_st": 30.0},
+        floor=FLOOR,
+    )
+    assert result.for_metric("npvi") is not None
+    assert result.for_metric("npvi").resolved  # type: ignore[union-attr]
+    assert not result.resolved  # pitch range is nowhere near its band
+
+
+def test_the_word_rung_is_judged_on_its_own_metric_only() -> None:
+    result = ladder.verdict(_span(ladder.Rung.WORD), {"relative_duration": 1.0}, {})
+    assert [m.metric for m in result.metrics] == ["relative_duration"]
+
+
+def test_the_sound_rung_is_judged_elsewhere_and_carries_no_metrics_here() -> None:
+    """model_reference.sd50 already answers for vowel position; a second band would drift."""
+    assert ladder.Rung.SOUND not in ladder.METRICS
+    assert ladder.verdict(_span(ladder.Rung.SOUND), {}, {}).metrics == ()
