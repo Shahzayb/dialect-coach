@@ -2085,6 +2085,26 @@ def baseline_context(conn: sqlite3.Connection, *, style: str) -> BaselineContext
     )
 
 
+def refusal_reason(conn: sqlite3.Connection, measurement: Any, gate: Any) -> str:
+    """Why this measurement is not being charted, said in terms of what is actually missing.
+
+    `plot_gate` sees one normaliser and cannot tell "you have never calibrated" from "you have
+    calibrated, but for the other speech style" — it is handed the style-specific baseline and
+    a missing one looks the same either way. That distinction is the whole difference between
+    "read the passage twice" and "record this prompt again", so it is resolved here, where the
+    other styles' baselines can be looked up.
+    """
+    if gate.reason != vowel_measure.NO_BASELINE:
+        return str(gate.reason)
+    other = db.any_current_baseline(conn)
+    if other is None:
+        return vowel_measure.NO_BASELINE
+    return vowel_measure.WRONG_STYLE_BASELINE.format(
+        measured=measurement.style or vowel_measure.STYLE_READ,
+        baseline=str(other["style_tag"]),
+    )
+
+
 def render_accent_table(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
     """The four-column table for one attempt, under its result."""
     measurement = entry.measurement
@@ -2145,14 +2165,7 @@ def render_accent_table(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
         # free-speech recording cannot supply a full inventory — that is the point of the mode —
         # and the categories it does carry are exactly the ones that sentence happened to use,
         # so a centroid built from them is a centroid of the topic. Say what is missing instead.
-        st.info(
-            vowel_measure.STYLE_MISMATCH.format(
-                measured=vowel_measure.STYLE_SPONTANEOUS, baseline=vowel_measure.STYLE_READ
-            )
-            if db.any_current_baseline(conn) is not None
-            else vowel_measure.NO_BASELINE,
-            icon="📐",
-        )
+        st.info(refusal_reason(conn, measurement, gate), icon="📐")
         _render_rejections(measurement)
         return
     else:
@@ -2630,10 +2643,7 @@ def render_accent_charts(conn: sqlite3.Connection) -> None:
         baseline_style=context.style,
     )
     if not gate.ok or gate.normaliser is None:
-        st.info(
-            gate.reason or vowel_measure.NO_BASELINE,
-            icon="📐",
-        )
+        st.info(refusal_reason(conn, measurement, gate), icon="📐")
         return
     # Free speech samples the vowel space wherever the sentence went, so a lone token is not a
     # deliberate probe the way a drill token is. See `vowel_measure.minimum_tokens_for`.

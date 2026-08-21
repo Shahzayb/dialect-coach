@@ -1868,6 +1868,18 @@ def findings(
 # --- May this be drawn at all? ----------------------------------------------------------------
 
 
+WRONG_STYLE_BASELINE = (
+    "**Nothing here can be charted: there is no {measured} baseline yet.** The stored baseline "
+    "was built from {baseline} speech, and it is not borrowed — read speech and spontaneous "
+    "speech are different populations, not the same measurement made under harder conditions. "
+    "Speakers hyperarticulate when reading and reduce far more when generating language, so "
+    "vowels centralise, durations shorten and unstressed syllables collapse further toward "
+    "schwa. Every one of those is something this page measures, and normalising {measured} "
+    "speech against a {baseline} centroid would report that change of register as an accent "
+    "finding. Build a {measured} baseline on the Calibration panel below — recording the same "
+    "prompt a second time is part of what these first sessions are for."
+)
+
 NO_BASELINE = (
     "**No stored baseline, so nothing here can be charted.** Establishing the vowel space "
     "needs a full inventory from one speaker — the calibration passage, read twice. Until "
