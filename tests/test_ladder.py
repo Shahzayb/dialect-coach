@@ -544,3 +544,72 @@ def test_a_repeated_word_stays_inside_its_own_sentence() -> None:
 def test_a_genuinely_different_text_still_refuses() -> None:
     """Tolerating stumbles must not become tolerating the wrong script."""
     assert ladder.sentence_spans(WORDS, "Entirely unrelated wording appears here instead.") == []
+
+
+# --- Matching a unit across two readings of the same script ---------------------------------------
+# The native leg needs the SAME unit in a model voice's reading. Position will not do it: the
+# n-th spoken word in one reading is not the n-th in another as soon as either side stumbled,
+# and accent_charts.word_anchors stops dead at the first divergence for exactly that reason.
+
+
+def _reading(extra: str | None = None) -> list[dict[str, object]]:
+    """The same script, optionally with one word stumbled in partway through."""
+    words = [
+        _word("The", 0.0, 0.1),
+        _word("cat", 0.1, 0.3),
+        _word("sat.", 0.3, 0.6),
+        _word("It", 0.9, 1.0),
+        _word("slept", 1.0, 1.4),
+        _word("soundly.", 1.4, 1.9),
+    ]
+    if extra:
+        words.insert(1, _word(extra, 0.05, 0.09))
+    return words
+
+
+SCRIPT = "The cat sat. It slept soundly."
+
+
+def test_a_sentence_matches_its_counterpart_in_another_reading() -> None:
+    mine, theirs = _reading(), _reading()
+    my_spans = ladder.sentence_spans(mine, SCRIPT)
+    their_spans = ladder.sentence_spans(theirs, SCRIPT)
+    found = ladder.matching_span(
+        my_spans[1], ladder.align(mine, SCRIPT), ladder.align(theirs, SCRIPT), theirs, their_spans
+    )
+    assert found is not None
+    assert found.label == "It slept soundly."
+
+
+def test_a_stumble_in_one_reading_does_not_misalign_the_other() -> None:
+    """The failure this exists to prevent: every later unit matched one word to the left."""
+    mine, theirs = _reading("um"), _reading()
+    my_align, their_align = ladder.align(mine, SCRIPT), ladder.align(theirs, SCRIPT)
+    my_spans = ladder.sentence_spans(mine, SCRIPT)
+    their_spans = ladder.sentence_spans(theirs, SCRIPT)
+    found = ladder.matching_span(my_spans[1], my_align, their_align, theirs, their_spans)
+    assert found is not None
+    assert found.label == "It slept soundly."
+
+
+def test_a_word_matches_the_script_word_it_realises_not_its_position() -> None:
+    mine, theirs = _reading("um"), _reading()
+    my_align, their_align = ladder.align(mine, SCRIPT), ladder.align(theirs, SCRIPT)
+    # "slept" is index 5 in the stumbled reading and index 4 in the clean one.
+    mine_slept = next(s for s in ladder.word_spans(mine) if s.label == "slept")
+    found = ladder.matching_span(mine_slept, my_align, their_align, theirs, [])
+    assert found is not None
+    assert found.label == "slept"
+
+
+def test_an_inserted_word_has_no_counterpart_and_says_so() -> None:
+    """It stands for nothing in the script, so there is no native version of it to play."""
+    mine, theirs = _reading("um"), _reading()
+    my_align, their_align = ladder.align(mine, SCRIPT), ladder.align(theirs, SCRIPT)
+    stumble = next(s for s in ladder.word_spans(mine) if s.label == "um")
+    assert ladder.matching_span(stumble, my_align, their_align, theirs, []) is None
+
+
+def test_a_reading_of_a_different_script_aligns_to_nothing() -> None:
+    assert not ladder.align(_reading(), "Something else was said entirely here.").usable
+    assert not ladder.align(_reading(), None).usable

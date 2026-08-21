@@ -204,67 +204,113 @@ def _token_map(words: Sequence[Mapping[str, object]]) -> tuple[list[str], list[i
     return tokens, index_of_token
 
 
-def sentence_spans(words: Sequence[Mapping[str, object]], reference_text: str | None) -> list[Span]:
-    """One span per sentence of `reference_text`, mapped onto the words that were spoken.
+@dataclass(frozen=True)
+class Alignment:
+    """Which part of the script each spoken word realises.
 
-    The split itself is `shadowing.phrases`, which already merges one-word fragments and
-    returns a single phrase for a passage that does not split cleanly. Reusing it means the
-    echo track and the practice ladder can never disagree about where a sentence ends.
+    Built once and read by everything that needs to relate one reading to another: the sentence
+    a word was spoken inside, and the script word it stands for. That second map is what lets a
+    unit in the speaker's reading be matched to the same unit in a model voice's reading
+    **through the script**, rather than by position in two recognised word lists that an
+    insertion would have pushed out of step.
+    """
+
+    sentence_of_word: Mapping[int, int]
+    reference_word_of_word: Mapping[int, int]
+    phrases: tuple[str, ...]
+
+    @property
+    def usable(self) -> bool:
+        return bool(self.sentence_of_word)
+
+
+EMPTY_ALIGNMENT = Alignment(sentence_of_word={}, reference_word_of_word={}, phrases=())
+
+
+def align(words: Sequence[Mapping[str, object]], reference_text: str | None) -> Alignment:
+    """Align a reading to the script it was read from.
 
     **Aligned, not matched position for position.** Requiring the spoken tokens to equal the
     reference tokens looks safe and is not: one inserted word anywhere in the recording would
-    refuse every sentence in it. That is not hypothetical — it cost a reference voice on the
-    first real run, and a human stumbles far more than a synthesiser does. So this aligns the
-    two with `difflib`, exactly as `speech_analyzer._diff_miscue` does, and lets an insertion
-    join the sentence it fell inside rather than invalidating the passage.
+    invalidate every sentence in it. That is not hypothetical — it cost a reference voice on
+    the first real run, and a human stumbles far more than a synthesiser does. So this aligns
+    the two with `difflib`, exactly as `speech_analyzer._diff_miscue` does, and lets an
+    insertion join the sentence it fell inside.
 
-    It still refuses outright when the two texts are not the same text at all — below
-    `MIN_ALIGNMENT`, a mapping would put boundaries in meaningless places. Mode C is the
-    ordinary case for that: a prompt is not a script, and nothing was scored against it.
+    Refuses outright below `MIN_ALIGNMENT`, where the two are not the same text at all and a
+    mapping would put boundaries in meaningless places. Mode C is the ordinary case for that:
+    a prompt is not a script, and nothing was scored against it.
     """
     phrases = shadowing.phrases(reference_text)
     if not phrases:
-        return []
+        return EMPTY_ALIGNMENT
 
-    # Reference tokens, each tagged with the sentence it belongs to.
     reference: list[str] = []
     sentence_of_token: list[int] = []
+    reference_word_of_token: list[int] = []
+    reference_word = 0
     for index, phrase in enumerate(phrases):
-        for token in utils.normalise_words(phrase):
-            reference.append(token)
-            sentence_of_token.append(index)
+        for script_word in phrase.split():
+            tokens = utils.normalise_words(script_word)
+            for token in tokens:
+                reference.append(token)
+                sentence_of_token.append(index)
+                reference_word_of_token.append(reference_word)
+            if tokens:
+                reference_word += 1
     if not reference:
-        return []
+        return EMPTY_ALIGNMENT
 
     heard, index_of_token = _token_map(words)
     if not heard:
-        return []
+        return EMPTY_ALIGNMENT
 
     matcher = difflib.SequenceMatcher(None, reference, heard, autojunk=False)
     if matcher.ratio() < MIN_ALIGNMENT:
-        return []
+        return EMPTY_ALIGNMENT
 
-    # Which sentence each SPOKEN token belongs to. An insertion has no reference token of its
-    # own, so it inherits the sentence of whatever was last aligned — the sentence it was
-    # actually spoken inside.
     sentence_of_word: dict[int, int] = {}
+    reference_word_of_word: dict[int, int] = {}
     current = 0
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag in ("equal", "replace"):
             for offset, position in enumerate(range(j1, j2)):
                 source = min(i1 + offset, i2 - 1) if i2 > i1 else None
-                current = sentence_of_token[source] if source is not None else current
+                if source is not None:
+                    current = sentence_of_token[source]
+                    reference_word_of_word.setdefault(
+                        index_of_token[position], reference_word_of_token[source]
+                    )
                 sentence_of_word.setdefault(index_of_token[position], current)
         elif tag == "insert":
+            # Spoken but not in the script. It belongs to the sentence it was said inside, and
+            # stands for no script word at all — so it can never be matched across readings.
             for position in range(j1, j2):
                 sentence_of_word.setdefault(index_of_token[position], current)
         elif tag == "delete" and i2 > i1:
-            # Words in the script that were never spoken. Nothing to place, but the cursor
-            # moves so a later insertion lands in the right sentence.
+            # In the script but never spoken. Nothing to place; the cursor still moves so a
+            # later insertion lands in the right sentence.
             current = sentence_of_token[i2 - 1]
 
+    return Alignment(
+        sentence_of_word=sentence_of_word,
+        reference_word_of_word=reference_word_of_word,
+        phrases=tuple(phrases),
+    )
+
+
+def sentence_spans(words: Sequence[Mapping[str, object]], reference_text: str | None) -> list[Span]:
+    """One span per sentence of `reference_text`, mapped onto the words that were spoken.
+
+    The split itself is `shadowing.phrases`, so the echo track and the practice ladder can
+    never disagree about where a sentence ends.
+    """
+    alignment = align(words, reference_text)
+    if not alignment.usable:
+        return []
+
     grouped: dict[int, list[int]] = {}
-    for word_index, sentence in sorted(sentence_of_word.items()):
+    for word_index, sentence in sorted(alignment.sentence_of_word.items()):
         grouped.setdefault(sentence, []).append(word_index)
 
     found: list[Span] = []
@@ -278,13 +324,67 @@ def sentence_spans(words: Sequence[Mapping[str, object]], reference_text: str | 
         found.append(
             Span(
                 rung=Rung.SENTENCE,
-                label=phrases[sentence],
+                label=alignment.phrases[sentence],
                 start_s=min(start for start, _ in timed),
                 end_s=max(end for _, end in timed),
                 word_indices=tuple(covered),
             )
         )
     return found
+
+
+def matching_span(
+    span: Span,
+    mine: Alignment,
+    theirs: Alignment,
+    their_words: Sequence[Mapping[str, object]],
+    their_spans: Sequence[Span],
+) -> Span | None:
+    """The same unit in another reading of the same script. None when it has no counterpart.
+
+    Matched **through the script**, never by position: the n-th spoken word in one reading is
+    not the n-th in another as soon as either of them stumbled. A sentence matches on its
+    sentence index; a word matches on the script word it realises. An inserted word stands for
+    nothing in the script and so has no counterpart at all, which is the honest answer.
+    """
+    if span.rung is Rung.PARAGRAPH:
+        return next((other for other in their_spans if other.rung is Rung.PARAGRAPH), None)
+
+    if span.rung is Rung.SENTENCE:
+        wanted = {mine.sentence_of_word[i] for i in span.word_indices if i in mine.sentence_of_word}
+        if len(wanted) != 1:
+            return None
+        sentence = wanted.pop()
+        for other in their_spans:
+            found = {
+                theirs.sentence_of_word[i]
+                for i in other.word_indices
+                if i in theirs.sentence_of_word
+            }
+            if found == {sentence}:
+                return other
+        return None
+
+    # Word and sound rungs both live inside one word, so both match on that word.
+    index = span.word_indices[0]
+    script_word = mine.reference_word_of_word.get(index)
+    if script_word is None:
+        return None
+    for other_index, other_script in theirs.reference_word_of_word.items():
+        if other_script != script_word:
+            continue
+        times = _timing(their_words[other_index])
+        if times is None:
+            continue
+        start, end = times
+        return Span(
+            rung=Rung.WORD,
+            label=str(their_words[other_index].get("word") or ""),
+            start_s=start,
+            end_s=end,
+            word_indices=(other_index,),
+        )
+    return None
 
 
 def paragraph_span(
