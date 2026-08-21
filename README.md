@@ -2,7 +2,7 @@
 
 Records you speaking English, tells you which sounds you got wrong, and coaches you on how to fix them.
 
-Personal pet project, not a product. In progress, nowhere near done.
+Pet project, not a product. In progress, nowhere near done.
 
 ## Run
 
