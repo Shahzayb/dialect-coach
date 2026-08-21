@@ -359,14 +359,22 @@ assembles a unit; `src/ladder_reference.py` is generated.
   corrected clip was the sentence and not the 62 s recording, dropping the unit returned to
   Today with the queue intact, and no console errors.
 
-**Still missing on the ladder, and the round is not finished.** Banking a repetition (the Azure
-half of the hybrid) is not built, so `rep`-tagged attempts are wired end-to-end in the database
-and the Progress view but nothing writes one yet. Corrected timing and corrected vowel are not
-reachable from the surface, because both need the measurement a banked take would produce.
-Nothing promotes a ladder target into the practice queue, so `grade_ladder` and the automatic
-reopen are tested but not exercised by the app. And **no human has spoken into the "say it
-again" path** — the local verdict is proven against synthetic clips and the real stored reads,
-not against a live repetition.
+**Banking, keeping and the queue are wired.** A take is banked on an explicit button that
+prices the spend first and stores the attempt tagged `rep`; keeping a unit writes a ladder
+target that Today renders through `grade_ladder`, so the card and the rule cannot disagree.
+Ladder kinds are not `promotable`, so they never consume one of the three perception slots.
+Corrected vowel lengths are reachable at rung scale against the MODEL duration table.
+
+**Still open on the ladder.** **No human has spoken into the "say it again" path** — the local
+verdict is proven against synthetic clips and the real stored reads, never against a live
+repetition, and nothing has been banked. The automatic reopen is tested but has never fired on
+real data, because that needs a target resolved at one rung and then failing at the rung above.
+`corrected_vowel_in` exists and is tested but has no button. And the **by-ear check at word
+scale is unanswered**: a corrected word was produced from a real read on 2026-08-21 ("these",
+0.41 s, uncapped, containment verified against the 82.1 s recording) and handed to the speaker,
+but whether it still sounds like them at that length is theirs to settle. Pitch correction was
+confirmed by ear over a whole paragraph on 2026-08-20; a word is a much shorter span and is
+where a manipulation is most likely to sound artefactual.
 
 ## Not yet proven live
 
