@@ -217,10 +217,39 @@ def spoken_attempts(rows: Iterable[utils.RowLike]) -> list[utils.RowLike]:
     honest answer for it. Left in, it would put a point nobody spoke on the trajectory and let
     the voice's own weak sounds into "what keeps going wrong".
 
+    Banked ladder repetitions go the same way and for the same reason — see `without_reps`.
+
     Applied at every entry point rather than inside one chart, so the trajectory, the rankings
     and the last-read date cannot disagree about which attempts exist.
     """
-    return [row for row in rows if not rhythm.is_baseline_capture(row["reference_text"])]
+    return without_reps(
+        [row for row in rows if not rhythm.is_baseline_capture(row["reference_text"])]
+    )
+
+
+def is_rep(row: utils.RowLike) -> bool:
+    """Whether this attempt is a banked repetition from the practice ladder.
+
+    Tolerant of a row without the key, exactly like `is_shadowed` and for the same reason —
+    rows reach here from several readers and from tests. The safe direction differs, though:
+    an unknown attempt is NOT a rep, so it stays visible on the chart where it can be
+    questioned rather than being silently demoted out of view.
+    """
+    try:
+        return bool(row["rep"])
+    except (KeyError, IndexError, TypeError):
+        return False
+
+
+def without_reps(rows: Iterable[utils.RowLike]) -> list[utils.RowLike]:
+    """Drop banked repetitions. Applied wherever `real_attempts` is, and for the same reason.
+
+    Ten repetitions of one sentence would render as ten points in the free-practice cloud,
+    which measures that sentence rather than the speaker — the exact thing plotting arbitrary
+    texts was already rejected for. The attempts themselves are kept and stay re-derivable;
+    only the default view drops them.
+    """
+    return [row for row in rows if not is_rep(row)]
 
 
 def is_shadowed(row: utils.RowLike) -> bool:

@@ -32,6 +32,16 @@ import utils
 from shadowing import SHADOW_TAG
 from utils import Mode
 
+# A banked repetition from the practice ladder. An ordinary attempt in every other way — same
+# scores, same payload, same re-derivability — but ten repetitions of one sentence drawn into
+# the free-practice cloud would measure that sentence's difficulty rather than the speaker,
+# which is the information noise #37 is about arriving out of the feature meant to fix it.
+# Demoted from the default view, never deleted.
+#
+# Defined here rather than in `ladder`, whose import chain reaches the charting stack: `db` is
+# imported by everything and has to stay cheap.
+REP_TAG = "rep"
+
 logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
@@ -540,10 +550,12 @@ def attempt_series(conn: sqlite3.Connection) -> Sequence[sqlite3.Row]:
                a.audio_seconds, a.pron_score, a.accuracy, a.fluency, a.completeness,
                a.prosody, a.coach_source, a.offline,
                EXISTS (SELECT 1 FROM attempt_tags t
-                       WHERE t.attempt_id = a.id AND t.tag = ?) AS shadowed
+                       WHERE t.attempt_id = a.id AND t.tag = ?) AS shadowed,
+               EXISTS (SELECT 1 FROM attempt_tags t
+                       WHERE t.attempt_id = a.id AND t.tag = ?) AS rep
         FROM attempts a WHERE a.offline = 0 ORDER BY a.created_at, a.id
         """,
-        (SHADOW_TAG,),
+        (SHADOW_TAG, REP_TAG),
     ).fetchall()
 
 
@@ -557,10 +569,12 @@ def attempt_payloads(conn: sqlite3.Connection) -> Sequence[sqlite3.Row]:
         """
         SELECT a.id, a.created_at, a.mode, a.reference_text, a.azure_raw_json,
                EXISTS (SELECT 1 FROM attempt_tags t
-                       WHERE t.attempt_id = a.id AND t.tag = ?) AS shadowed
+                       WHERE t.attempt_id = a.id AND t.tag = ?) AS shadowed,
+               EXISTS (SELECT 1 FROM attempt_tags t
+                       WHERE t.attempt_id = a.id AND t.tag = ?) AS rep
         FROM attempts a WHERE a.offline = 0 ORDER BY a.created_at, a.id
         """,
-        (SHADOW_TAG,),
+        (SHADOW_TAG, REP_TAG),
     ).fetchall()
 
 

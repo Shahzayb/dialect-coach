@@ -176,3 +176,33 @@ def test_the_rule_states_both_bars_the_level_above_and_the_automatic_reopen() ->
 def test_the_paragraph_rule_does_not_promise_a_level_above_it_does_not_have() -> None:
     rule = practice_queue.graduation_rule(practice_queue.PARAGRAPH)
     assert ladder.TOP_RUNG_NOTE in rule
+
+
+# --- Banked repetitions stay measurable and stay off the chart ------------------------------------
+
+
+def test_a_banked_repetition_is_recognised_by_its_tag() -> None:
+    import progress_view
+
+    assert progress_view.is_rep({"rep": 1})
+    assert not progress_view.is_rep({"rep": 0})
+
+
+def test_an_attempt_with_no_provenance_is_not_treated_as_a_repetition() -> None:
+    """The safe direction: an unknown attempt stays visible where it can be questioned."""
+    import progress_view
+
+    assert not progress_view.is_rep({})
+    assert not progress_view.is_rep({"shadowed": 1})
+
+
+def test_repetitions_are_dropped_from_the_view_the_baseline_capture_is_dropped_from() -> None:
+    """One entry point, so the trajectory and the rankings cannot disagree about what exists."""
+    import progress_view
+
+    rows = [
+        {"reference_text": "a real read", "rep": 0},
+        {"reference_text": "a banked repetition", "rep": 1},
+    ]
+    kept = progress_view.spoken_attempts(rows)
+    assert [r["reference_text"] for r in kept] == ["a real read"]
