@@ -4854,13 +4854,15 @@ def render_ladder_practice(
             "A word you said that is not in the script has no native version by definition."
         )
 
-    render_ladder_corrections(context, span)
+    render_ladder_corrections(conn, context, span)
 
     st.divider()
     render_ladder_repeat(conn, context, unit, job, running)
 
 
-def render_ladder_corrections(context: LadderContext, span: ladder.Span) -> None:
+def render_ladder_corrections(
+    conn: sqlite3.Connection, context: LadderContext, span: ladder.Span
+) -> None:
     """The third leg. Three separate corrections, each changing exactly one thing."""
     key = f"ladder_fix_{span.rung.value}_{span.start_s:.2f}"
     pitch, timing = st.columns(2)
@@ -4885,9 +4887,27 @@ def render_ladder_corrections(context: LadderContext, span: ladder.Span) -> None
                 context.audio, span, _target_contour(model_tracks, anchors)
             )
         )
-    if timing.button("Native vowel lengths", key=f"{key}_timing"):
-        st.session_state.pop(key, None)
-        st.caption("Vowel lengths need the measurement from a banked take.")
+    measurement = measurement_for(conn, context.attempt_id)
+    # The MODEL table, never the published one: Hillenbrand's durations are citation-form
+    # words read in isolation, so stretching toward one would make every vowel about three
+    # times too long. `_duration_stretches` documents the same choice.
+    modelled = (
+        vowel_measure.reference_positions(reference_set(), source=vowel_measure.REFERENCE_VOICE)
+        if measurement is not None
+        else {}
+    )
+    has_lengths = measurement is not None and bool(modelled)
+    if timing.button("Native vowel lengths", key=f"{key}_timing", disabled=not has_lengths):
+        run(
+            lambda: ladder_practice.corrected_timing_in(
+                context.audio, span, _duration_stretches(measurement, modelled)
+            )
+        )
+    if not has_lengths:
+        timing.caption(
+            "Vowel lengths need this reading's stored vowel measurement, which only an "
+            "assessed attempt has."
+        )
 
     result = st.session_state.get(key)
     if result is None:
