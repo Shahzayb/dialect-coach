@@ -121,6 +121,12 @@ DELIVERY_LABELS: dict[str, str] = {
     "Monotone": "Flat intonation across the span",
 }
 
+# The Accent chart picker's remembered reading. A PLAIN session key, deliberately not the
+# selectbox's own key: Streamlit deletes a widget's value when the widget is not registered on
+# a pass, and any `st.rerun()` in an earlier tab ends the script before the Accent tab renders.
+# See `render_accent_charts` for the whole mechanism.
+ACCENT_CHART_CHOICE = "accent_chart_attempt_id"
+
 # Short labels + colours for the headline error-count badges (#10/#12) — distinct from
 # DELIVERY_LABELS' longer prose, which explains a fault rather than naming it.
 ERROR_BADGES: list[tuple[str, str | None, str]] = [
@@ -2040,16 +2046,52 @@ def render_accent_charts(conn: sqlite3.Connection) -> None:
         )
         for row in attempts
     }
-    attempt_id = st.selectbox(
-        "Which reading?",
-        options=list(labels),
-        format_func=lambda key: labels[key],
-        key="accent_chart_attempt",
+    # `index=` is not optional here, and the reason is worth keeping. Any `st.rerun()` raised in
+    # the Today or Practice tab ends the script before this tab is reached, so the selector is
+    # not registered on that pass and Streamlit deletes its stored value as stale
+    # (`session_state._remove_stale_widgets`). A server-initiated rerun also carries no widget
+    # states back from the browser (`st.rerun` builds `RerunData()` with none), so nothing
+    # restores it: the next full run re-registers the widget from scratch and a positional
+    # default lands on index 0 — whichever reading happens to be newest. The browser is never
+    # told, because a first registration sets neither `value_changed` nor `value_needs_reset`,
+    # so it keeps painting the label it already had. That is the 2026-08-20 mismatch, and it
+    # fired on every early-terminated rerun, not only the ones where a new attempt landed.
+    #
+    # The remembered id lives under a PLAIN session key, never a widget key: stale-widget
+    # cleanup only strips element ids, so a plain key is the one thing here that survives. The
+    # default is then resolved by identity rather than position, exactly as the shadowing
+    # passage picker already does, and the chosen reading stays chosen — a new reading appears
+    # at the top of the list without taking the selection.
+    options = list(labels)
+    remembered = st.session_state.get(ACCENT_CHART_CHOICE)
+    attempt_id = int(
+        st.selectbox(
+            "Which reading?",
+            options=options,
+            index=options.index(remembered) if remembered in labels else 0,
+            format_func=lambda key: labels[key],
+            key="accent_chart_attempt",
+        )
     )
-    measurement = measurement_for(conn, int(attempt_id))
+    st.session_state[ACCENT_CHART_CHOICE] = attempt_id
+
+    measurement = measurement_for(conn, attempt_id)
     if measurement is None:
         st.caption("That attempt's tokens could not be read back.")
         return
+
+    chosen = next(row for row in attempts if int(row["id"]) == attempt_id)
+    mismatch = vowel_measure.label_matches_measurement(int(chosen["accepted"]), measurement)
+    if mismatch:
+        st.error(mismatch, icon="🏷️")
+        return
+    # Said from the measurement that was actually loaded, not from the widget. If the selector
+    # ever lies again, this line and the label above it disagree in plain sight rather than
+    # leaving the reader to notice that n=2 cannot come out of a 138-token read.
+    st.caption(
+        f"Plotting #{attempt_id} · {len(measurement.accepted)} accepted tokens · "
+        f"{str(chosen['created_at'])[:16].replace('T', ' ')}"
+    )
 
     gate = vowel_measure.plot_gate(
         measurement,
@@ -2213,7 +2255,8 @@ def render_pitch_overlay(
         f"low voice and a synthetic one only overlay meaningfully that way, and what is left "
         f"on the chart is the SHAPE. Aligned on word starts, not by time-warping: a warp that "
         f"minimises distance would hide the timing errors this page also measures. "
-        f"{len(model_tracks)} model voice(s).",
+        f"{len(model_tracks)} model "
+        f"{'voice' if len(model_tracks) == 1 else 'voices'}.",
         accent_charts.pitch_chart(frame, boundaries) if not frame.empty else None,
         rows,
         "No pitch could be tracked in this recording.",

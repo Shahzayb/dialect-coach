@@ -1846,6 +1846,35 @@ STYLE_MISMATCH = (
     "accent. Recalibrate on the same style to compare like with like."
 )
 
+LABEL_MISMATCH = (
+    "**The reading named above and the measurement below are not the same recording.** The "
+    "label claims {labelled} accepted tokens; the tokens actually loaded number {loaded}. One "
+    "of the two is describing a different attempt, so nothing here is drawn — a chart under the "
+    "wrong label misattributes one reading's accent to another, which is worse than no chart."
+)
+
+
+def label_matches_measurement(labelled_tokens: int, measurement: Measurement) -> str:
+    """Refuse when the label's token count and the loaded measurement's disagree.
+
+    The one tell the 2026-08-20 mismatch left on screen was arithmetic: a label reading
+    "138 tokens" above a table reporting n=2 and n=1 per category, which a 138-token read
+    cannot produce. Both halves of that screen looked plausible on their own, so the check has
+    to be made rather than seen.
+
+    A tripwire, not the fix. The two counts agree by construction for one attempt id —
+    `app.measured_attempts` filters on the same `accepted = 1` flag that `Measurement.accepted`
+    reads back — so this fires only if the label and the measurement are ever resolved from
+    different ids or different snapshots again. That is exactly the class of bug it is here to
+    stop coming back silently, whatever the widget does next.
+
+    Returns the reason to refuse with, or "" to draw.
+    """
+    loaded = len(measurement.accepted)
+    if loaded == labelled_tokens:
+        return ""
+    return LABEL_MISMATCH.format(labelled=labelled_tokens, loaded=loaded)
+
 
 @dataclass(frozen=True)
 class PlotGate:
