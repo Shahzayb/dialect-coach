@@ -3556,7 +3556,7 @@ def render_today(
         return
 
     if st.session_state.get(LADDER_KEY):
-        render_ladder_practice(conn)
+        render_ladder_practice(conn, job, running)
         return
 
     targets = sync_queue(conn)
@@ -4736,7 +4736,9 @@ def _metric_line(judged: Any) -> str:
     )
 
 
-def render_ladder_practice(conn: sqlite3.Connection) -> None:
+def render_ladder_practice(
+    conn: sqlite3.Connection, job: AssessJob | None = None, running: bool = False
+) -> None:
     """Mine, native, mine-with-one-thing-changed — then say it again and see where it lands."""
     state = st.session_state.get(LADDER_KEY) or {}
     rung = ladder.Rung(str(state.get("rung") or ladder.Rung.SENTENCE.value))
@@ -4820,7 +4822,7 @@ def render_ladder_practice(conn: sqlite3.Connection) -> None:
     render_ladder_corrections(context, span)
 
     st.divider()
-    render_ladder_repeat(conn, context, unit)
+    render_ladder_repeat(conn, context, unit, job, running)
 
 
 def render_ladder_corrections(context: LadderContext, span: ladder.Span) -> None:
@@ -4862,7 +4864,11 @@ def render_ladder_corrections(context: LadderContext, span: ladder.Span) -> None
 
 
 def render_ladder_repeat(
-    conn: sqlite3.Connection, context: LadderContext, unit: ladder_practice.Unit
+    conn: sqlite3.Connection,
+    context: LadderContext,
+    unit: ladder_practice.Unit,
+    job: AssessJob | None = None,
+    running: bool = False,
 ) -> None:
     """Say it again, as many times as you like, and see where each one lands."""
     st.markdown("#### Say it again")
@@ -4908,6 +4914,69 @@ def render_ladder_repeat(
             "No movement can be called progress yet — that needs two reads of this passage "
             "to know how much these numbers wander on their own."
         )
+
+    render_ladder_bank(conn, unit, wav_bytes, job, running)
+
+
+def render_ladder_bank(
+    conn: sqlite3.Connection,
+    unit: ladder_practice.Unit,
+    wav_bytes: bytes,
+    job: AssessJob | None,
+    running: bool,
+) -> None:
+    """Spend an assessment on this take, so the dark instruments light up.
+
+    The deliberate half of the hybrid: repetition is free and unlimited, and buying the full
+    instrument set is a button you press rather than something that happens to you. Priced
+    before it is offered, per the standing rule that quota is spent deliberately and said so.
+
+    The take is stored as an ordinary attempt tagged `rep` — same scores, same payload, same
+    re-derivability — and `progress_view.without_reps` keeps it out of the free-practice cloud.
+    """
+    st.markdown("##### Bank this take")
+    seconds = audio_utils.duration_seconds(wav_bytes)
+    try:
+        audio_utils.validate_duration(seconds, Mode.DRILL)
+    except audio_utils.AudioError as exc:
+        st.caption(f"Too short or too long to assess: {exc}")
+        return
+
+    dark = ", ".join(
+        ladder.METRIC_LABELS.get(metric, metric)
+        for metric in ladder.METRICS.get(unit.span.rung, ())
+        if metric not in ladder.LOCAL_METRICS
+    )
+    st.caption(
+        f"Spends **{seconds:.1f} s** of the monthly speech allowance to score this take the "
+        f"way a full attempt is scored — which is what lights up {dark or 'the rest'}. "
+        f"{budget.summary_line(conn)}"
+    )
+    if st.button(
+        "💾 Bank this take",
+        key="ladder_bank",
+        disabled=running or utils.offline_mode(),
+        help="Repeating is free. This is the one thing here that spends anything.",
+    ):
+        try:
+            budget.preflight_stt(conn, seconds, Mode.DRILL)
+        except budget.BudgetError as exc:
+            st.warning(str(exc), icon="💸")
+            return
+        start_assessment(
+            conn,
+            wav_bytes,
+            seconds,
+            unit.span.label,
+            Mode.DRILL,
+            key=f"ladder-{unit.span.rung.value}-{unit.script_index}",
+            tags=(db.REP_TAG,),
+        )
+        st.rerun()
+    if running:
+        st.caption("An assessment is already in flight — only one runs at a time.")
+    elif utils.offline_mode():
+        st.caption("Disabled under OFFLINE_MODE, which is what stands between this and a charge.")
 
 
 def render() -> None:

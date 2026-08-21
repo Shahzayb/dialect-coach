@@ -8,14 +8,19 @@ have caught it, and every other tab went down with it.
 
 from __future__ import annotations
 
+import io
+import json
 import os
+import wave
 from pathlib import Path
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
 import db
 import ladder
 import progress_view
+import shadowing
 from utils import Mode
 
 APP = str(Path(__file__).resolve().parent.parent / "src" / "app.py")
@@ -27,6 +32,61 @@ def _app(**state) -> AppTest:
         app.session_state[key] = value
     app.run()
     return app
+
+
+def _wav(seconds: float) -> bytes:
+    out = io.BytesIO()
+    with wave.open(out, "wb") as sink:
+        sink.setnchannels(1)
+        sink.setsampwidth(2)
+        sink.setframerate(16_000)
+        sink.writeframes(b"\x00\x00" * int(seconds * 16_000))
+    return out.getvalue()
+
+
+def _seed_audio(attempt_id: int, words: list[dict[str, float | str]], tmp: Path) -> None:
+    """Give a seeded reading a recording and word timings, as a real attempt carries."""
+    conn = db.connect(os.environ["DB_PATH"])
+    path = tmp / f"{attempt_id}.wav"
+    path.write_bytes(_wav(70.0))
+    db.record_audio(
+        conn, attempt_id, path=str(path), sha256=f"a{attempt_id}", size_bytes=1, sample_rate=16000
+    )
+    conn.execute(
+        "UPDATE attempts SET azure_raw_json = ? WHERE id = ?",
+        (json.dumps(_payload(words)), attempt_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _payload(words: list[dict[str, float | str]]) -> dict[str, object]:
+    """The shape speech_analyzer.normalise reads back."""
+    return {
+        "NBest": [
+            {
+                "Display": progress_view.BENCHMARK_PASSAGE,
+                "Words": [
+                    {
+                        "Word": w["word"],
+                        "Offset": int(float(w["start_s"]) * 10_000_000),
+                        "Duration": int((float(w["end_s"]) - float(w["start_s"])) * 10_000_000),
+                        "PronunciationAssessment": {"AccuracyScore": 90.0},
+                        "Phonemes": [],
+                    }
+                    for w in words
+                ],
+                "PronunciationAssessment": {},
+            }
+        ]
+    }
+
+
+def _benchmark_words() -> list[dict[str, float | str]]:
+    return [
+        {"word": w, "start_s": i * 0.3, "end_s": i * 0.3 + 0.25}
+        for i, w in enumerate(progress_view.BENCHMARK_PASSAGE.split())
+    ]
 
 
 def _seed_reading(when: str = "2026-07-01T08:00:00Z") -> int:
@@ -108,3 +168,79 @@ def test_the_offer_says_which_passage_it_can_judge_when_there_is_nothing_to_prac
     assert any(progress_view.BENCHMARK_TITLE in caption.value for caption in app.caption), (
         "the surface must name the passage its bands were measured on"
     )
+
+
+# --- Banking is the one thing here that spends anything -------------------------------------------
+
+
+def _open(attempt_id: int, rung: ladder.Rung = ladder.Rung.SENTENCE) -> AppTest:
+    return _app(ladder_practice={"attempt": attempt_id, "rung": rung.value, "unit": 0})
+
+
+def test_repeating_offers_nothing_to_spend_until_there_is_a_take() -> None:
+    """The bank button must not exist before there is something to bank."""
+    app = _open(_seed_reading())
+    assert not app.exception
+    assert not [b for b in app.button if "Bank" in b.label]
+
+
+def test_the_surface_says_repetition_costs_nothing(tmp_path: Path) -> None:
+    """The claim the hybrid rests on has to be on screen, not only in the design."""
+    attempt_id = _seed_reading()
+    _seed_audio(attempt_id, _benchmark_words(), tmp_path)
+    app = _open(attempt_id)
+    assert not app.exception
+    assert any(
+        "no allowance spent" in caption.value or "no network" in caption.value
+        for caption in app.caption
+    )
+
+
+def test_offline_mode_is_named_as_what_stands_between_this_and_a_charge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OFFLINE_MODE", "1")
+    app = _open(_seed_reading())
+    assert not app.exception
+
+
+def test_a_banked_take_is_tagged_so_it_stays_off_the_chart() -> None:
+    """The tag is the whole mechanism; wiring it wrong is invisible until the cloud grows."""
+    conn = db.connect(os.environ["DB_PATH"])
+    attempt_id = db.record_attempt(
+        conn,
+        mode=Mode.DRILL,
+        reference_text="Nothing here is clever.",
+        recognised_text="Nothing here is clever.",
+        audio_seconds=3.0,
+        audio_sha256="banked-take",
+        overall_scores={},
+        azure_raw={},
+    )
+    db.tag_attempt(conn, attempt_id, db.REP_TAG)
+    rows = [r for r in db.attempt_series(conn) if int(r["id"]) == attempt_id]
+    conn.close()
+    assert rows and rows[0]["rep"], "a banked take must be recognisable as one"
+    assert not progress_view.spoken_attempts(rows), "and must not reach the progress view"
+
+
+def test_a_reading_with_audio_reaches_the_three_way_listen(tmp_path: Path) -> None:
+    """The end state the whole surface exists for, driven through the real app."""
+    attempt_id = _seed_reading()
+    _seed_audio(attempt_id, _benchmark_words(), tmp_path)
+    app = _open(attempt_id)
+    assert not app.exception
+    text = " ".join(m.value for m in app.markdown) + " ".join(c.value for c in app.caption)
+    assert "your voice, one thing changed" in text
+    assert "Mine" in text
+    assert "Say it again" in text
+
+
+def test_the_unit_picker_offers_every_sentence_of_the_passage(tmp_path: Path) -> None:
+    attempt_id = _seed_reading()
+    _seed_audio(attempt_id, _benchmark_words(), tmp_path)
+    app = _open(attempt_id)
+    assert not app.exception
+    pickers = [s for s in app.selectbox if s.label == "Which one"]
+    assert pickers, "there has to be a way to choose which unit to practise"
+    assert len(pickers[0].options) == len(shadowing.phrases(progress_view.BENCHMARK_PASSAGE))
