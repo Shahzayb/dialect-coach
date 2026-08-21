@@ -22,6 +22,7 @@ byte range in PCM, so it is cut here with the standard library and the trap neve
 
 from __future__ import annotations
 
+import difflib
 import io
 import statistics
 import wave
@@ -77,6 +78,11 @@ def above(rung: Rung) -> Rung | None:
 # teaches nothing, and the speaker hears it inside the word instead. `audible_span_for` is what
 # acts on this.
 AUDIBLE: frozenset[Rung] = frozenset({Rung.WORD, Rung.SENTENCE, Rung.PARAGRAPH})
+
+# How closely the spoken tokens must align with the script before sentence boundaries mean
+# anything. Well below what a stumbling read scores and well above what an unrelated text does,
+# so a bad day still gets practice and a wrong reference still refuses.
+MIN_ALIGNMENT = 0.6
 
 
 @dataclass(frozen=True)
@@ -205,27 +211,65 @@ def sentence_spans(words: Sequence[Mapping[str, object]], reference_text: str | 
     returns a single phrase for a passage that does not split cleanly. Reusing it means the
     echo track and the practice ladder can never disagree about where a sentence ends.
 
-    **Refuses rather than guesses.** If the reference text's tokens do not line up with the
-    words, the mapping is wrong in a way that would put a sentence boundary mid-phrase, so
-    this returns nothing and the caller falls back to the paragraph rung. Mode C is the
-    ordinary case: there is no reference text, only a prompt nothing was scored against.
+    **Aligned, not matched position for position.** Requiring the spoken tokens to equal the
+    reference tokens looks safe and is not: one inserted word anywhere in the recording would
+    refuse every sentence in it. That is not hypothetical — it cost a reference voice on the
+    first real run, and a human stumbles far more than a synthesiser does. So this aligns the
+    two with `difflib`, exactly as `speech_analyzer._diff_miscue` does, and lets an insertion
+    join the sentence it fell inside rather than invalidating the passage.
+
+    It still refuses outright when the two texts are not the same text at all — below
+    `MIN_ALIGNMENT`, a mapping would put boundaries in meaningless places. Mode C is the
+    ordinary case for that: a prompt is not a script, and nothing was scored against it.
     """
     phrases = shadowing.phrases(reference_text)
     if not phrases:
         return []
 
-    tokens, index_of_token = _token_map(words)
-    found: list[Span] = []
-    cursor = 0
-    for phrase in phrases:
-        wanted = utils.normalise_words(phrase)
-        if not wanted:
-            continue
-        if tokens[cursor : cursor + len(wanted)] != wanted:
-            return []
-        covered = dict.fromkeys(index_of_token[cursor : cursor + len(wanted)])
-        cursor += len(wanted)
+    # Reference tokens, each tagged with the sentence it belongs to.
+    reference: list[str] = []
+    sentence_of_token: list[int] = []
+    for index, phrase in enumerate(phrases):
+        for token in utils.normalise_words(phrase):
+            reference.append(token)
+            sentence_of_token.append(index)
+    if not reference:
+        return []
 
+    heard, index_of_token = _token_map(words)
+    if not heard:
+        return []
+
+    matcher = difflib.SequenceMatcher(None, reference, heard, autojunk=False)
+    if matcher.ratio() < MIN_ALIGNMENT:
+        return []
+
+    # Which sentence each SPOKEN token belongs to. An insertion has no reference token of its
+    # own, so it inherits the sentence of whatever was last aligned — the sentence it was
+    # actually spoken inside.
+    sentence_of_word: dict[int, int] = {}
+    current = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag in ("equal", "replace"):
+            for offset, position in enumerate(range(j1, j2)):
+                source = min(i1 + offset, i2 - 1) if i2 > i1 else None
+                current = sentence_of_token[source] if source is not None else current
+                sentence_of_word.setdefault(index_of_token[position], current)
+        elif tag == "insert":
+            for position in range(j1, j2):
+                sentence_of_word.setdefault(index_of_token[position], current)
+        elif tag == "delete" and i2 > i1:
+            # Words in the script that were never spoken. Nothing to place, but the cursor
+            # moves so a later insertion lands in the right sentence.
+            current = sentence_of_token[i2 - 1]
+
+    grouped: dict[int, list[int]] = {}
+    for word_index, sentence in sorted(sentence_of_word.items()):
+        grouped.setdefault(sentence, []).append(word_index)
+
+    found: list[Span] = []
+    for sentence in sorted(grouped):
+        covered = grouped[sentence]
         timed = [t for t in (_timing(words[i]) for i in covered) if t is not None]
         if not timed:
             # Every word in this sentence was omitted. There is no audio to play and nothing
@@ -234,15 +278,13 @@ def sentence_spans(words: Sequence[Mapping[str, object]], reference_text: str | 
         found.append(
             Span(
                 rung=Rung.SENTENCE,
-                label=phrase,
+                label=phrases[sentence],
                 start_s=min(start for start, _ in timed),
                 end_s=max(end for _, end in timed),
                 word_indices=tuple(covered),
             )
         )
-
-    # A trailing mismatch is the same failure as a leading one and is caught the same way.
-    return found if cursor == len(tokens) else []
+    return found
 
 
 def paragraph_span(
@@ -414,15 +456,29 @@ class Band:
 METRICS: Mapping[Rung, tuple[str, ...]] = {
     Rung.WORD: ("relative_duration",),
     Rung.SENTENCE: ("pitch_range_st", "terminal_slope_st", "npvi"),
-    Rung.PARAGRAPH: ("pitch_range_st", "terminal_slope_st", "npvi", "prosody"),
+    Rung.PARAGRAPH: ("pitch_range_st", "terminal_slope_st", "npvi"),
 }
+
+# **Azure's own prosody score is deliberately not a metric here**, though it is measured, stored
+# and shown everywhere else in the app. Across the sixteen reference voices it spans 89.50 to
+# 90.73 — an SD of 0.40 on a 0-100 scale, against 4% for rhythm and 20% for pitch range. That
+# spread is not a model of how far native TALKERS sit from each other; it is a measure of how
+# uniform one synthesiser is, and a black-box score gives no way to separate the two.
+#
+# Using it would have been worse than useless rather than merely weak. `Verdict.resolved`
+# requires every judgeable metric to clear, so a band a real speaker cannot land inside would
+# permanently block the paragraph rung — and every sentence beneath it, since a sentence is not
+# resolved until its paragraph survives. The whole ladder would jam above the word rung.
+#
+# The acoustic metrics do not have this problem: they are measured from the signal by this
+# project's own code, so a spread across voices is a spread in something real. Keeping prosody
+# out also removes a seam the plan had accepted — every rung is now judged by one instrument.
 
 METRIC_LABELS: Mapping[str, str] = {
     "relative_duration": "length relative to your own average word",
     "pitch_range_st": "pitch range",
     "terminal_slope_st": "terminal fall",
     "npvi": "rhythm (nPVI)",
-    "prosody": "prosody score",
 }
 
 
@@ -449,14 +505,12 @@ def scalars(
     track: Sequence[tuple[float, float]],
     *,
     divisor: float | None = None,
-    prosody: float | None = None,
 ) -> dict[str, float]:
     """Every metric measurable for `span`, keyed as `METRICS` names them.
 
     `divisor` is the reading's mean word length, passed in rather than recomputed per span —
     it is a property of the whole reading, and at word rung this would otherwise be computed
-    once per word. `prosody` is Azure's own score for the reading and only reaches the
-    paragraph rung, because it does not decompose below the utterance it was computed on.
+    once per word.
     """
     found: dict[str, float] = {}
 
@@ -481,8 +535,6 @@ def scalars(
     if measured.npvi is not None:
         found["npvi"] = float(measured.npvi)
 
-    if span.rung is Rung.PARAGRAPH and prosody is not None:
-        found["prosody"] = float(prosody)
     return found
 
 

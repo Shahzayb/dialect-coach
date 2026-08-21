@@ -60,7 +60,6 @@ import ladder  # noqa: E402
 import native_model  # noqa: E402
 import progress_view  # noqa: E402
 import shadowing  # noqa: E402
-import speech_analyzer  # noqa: E402
 import utils  # noqa: E402
 
 OUT = ROOT / "src" / "ladder_reference.py"
@@ -110,17 +109,7 @@ def measure(rendering: native_model.Rendering, text: str) -> VoiceScalars | None
 
     whole = ladder.paragraph_span(words, text)
     if whole is not None:
-        overall, _, _ = speech_analyzer.normalise(
-            rendering.payloads, rendering.reference_text, native_model.CAPTURE_MODE
-        )
-        prosody = overall.get("prosody")
-        found.paragraph = ladder.scalars(
-            whole,
-            words,
-            track,
-            divisor=divisor,
-            prosody=float(prosody) if isinstance(prosody, int | float) else None,
-        )
+        found.paragraph = ladder.scalars(whole, words, track, divisor=divisor)
 
     return found
 
@@ -179,6 +168,22 @@ def _unit_block(name: str, units: Mapping[int, Mapping[str, ladder.Band]]) -> st
     return "\n".join(lines)
 
 
+def _label_src(index: int, label: str) -> str:
+    """One SENTENCE_TEXT entry, wrapped to the line length ruff enforces.
+
+    Generated source has to pass the same lint gate as hand-written source, and a benchmark
+    sentence is comfortably longer than one line. Implicit concatenation inside parentheses is
+    what ruff format leaves alone, so the file stays stable across regenerations.
+    """
+    chunks = textwrap.wrap(label, width=80) or [label]
+    if len(chunks) == 1:
+        return f"    {index}: {label!r},"
+    joined = "\n".join(
+        f"        {(chunk if n == 0 else ' ' + chunk)!r}" for n, chunk in enumerate(chunks)
+    )
+    return f"    {index}: (\n{joined}\n    ),"
+
+
 def render_module(
     words: Mapping[int, Mapping[str, ladder.Band]],
     sentences: Mapping[int, Mapping[str, ladder.Band]],
@@ -188,7 +193,7 @@ def render_module(
 ) -> str:
     """The generated module's source. Every number in it came from a measurement above."""
     listed = "\n".join(textwrap.wrap(", ".join(sorted(voices)), width=94))
-    labels = "\n".join(f"    {index}: {label!r}," for index, label in enumerate(sentence_labels))
+    labels = "\n".join(_label_src(index, label) for index, label in enumerate(sentence_labels))
     paragraph_src = "\n".join(
         f"    {metric!r}: {_band_src(paragraph[metric])}," for metric in sorted(paragraph)
     )

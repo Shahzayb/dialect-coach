@@ -472,3 +472,75 @@ def test_the_sound_rung_is_judged_elsewhere_and_carries_no_metrics_here() -> Non
     """model_reference.sd50 already answers for vowel position; a second band would drift."""
     assert ladder.Rung.SOUND not in ladder.METRICS
     assert ladder.verdict(_span(ladder.Rung.SOUND), {}, {}).metrics == ()
+
+
+# --- The mapping has to survive real speech -------------------------------------------------------
+# Found by running the builder against the real reference capture: one voice inserted a word and
+# the strict position-for-position mapping refused every sentence in that recording. A human
+# stumbles far more than a synthesiser, so this is the ordinary case, not the edge case.
+
+
+def test_an_inserted_word_does_not_invalidate_the_passage() -> None:
+    """The exact failure GuyNeural hit: an extra word heard mid-sentence."""
+    words = [
+        _word("The", 0.0, 0.1),
+        _word("cat", 0.1, 0.3),
+        _word("um", 0.3, 0.4),  # never in the script
+        _word("sat.", 0.4, 0.7),
+        _word("It", 0.9, 1.0),
+        _word("slept", 1.0, 1.4),
+        _word("soundly.", 1.4, 1.9),
+    ]
+    found = ladder.sentence_spans(words, "The cat sat. It slept soundly.")
+    assert len(found) == 2
+    assert found[0].word_indices == (0, 1, 2, 3)
+    assert found[1].word_indices == (4, 5, 6)
+
+
+def test_an_inserted_word_joins_the_sentence_it_was_spoken_inside() -> None:
+    words = [
+        _word("The", 0.0, 0.1),
+        _word("cat", 0.1, 0.3),
+        _word("sat.", 0.3, 0.6),
+        _word("It", 0.9, 1.0),
+        _word("er", 1.0, 1.1),
+        _word("slept", 1.1, 1.4),
+        _word("soundly.", 1.4, 1.9),
+    ]
+    first, second = ladder.sentence_spans(words, "The cat sat. It slept soundly.")
+    assert 4 not in first.word_indices
+    assert 4 in second.word_indices
+
+
+def test_an_omitted_word_does_not_shift_the_sentences_after_it() -> None:
+    words = [
+        _word("The", 0.0, 0.1),
+        _word("sat.", 0.1, 0.4),  # "cat" never spoken
+        _word("It", 0.9, 1.0),
+        _word("slept", 1.0, 1.4),
+        _word("soundly.", 1.4, 1.9),
+    ]
+    first, second = ladder.sentence_spans(words, "The cat sat. It slept soundly.")
+    assert first.word_indices == (0, 1)
+    assert second.word_indices == (2, 3, 4)
+
+
+def test_a_repeated_word_stays_inside_its_own_sentence() -> None:
+    """A stumble is an Insertion to Azure, and the queue must not lose the passage over one."""
+    words = [
+        _word("The", 0.0, 0.1),
+        _word("cat", 0.1, 0.3),
+        _word("cat", 0.3, 0.5),
+        _word("sat.", 0.5, 0.8),
+        _word("It", 1.0, 1.1),
+        _word("slept", 1.1, 1.5),
+        _word("soundly.", 1.5, 2.0),
+    ]
+    first, second = ladder.sentence_spans(words, "The cat sat. It slept soundly.")
+    assert first.word_indices == (0, 1, 2, 3)
+    assert second.word_indices == (4, 5, 6)
+
+
+def test_a_genuinely_different_text_still_refuses() -> None:
+    """Tolerating stumbles must not become tolerating the wrong script."""
+    assert ladder.sentence_spans(WORDS, "Entirely unrelated wording appears here instead.") == []

@@ -107,6 +107,7 @@ module = [
     "audio_utils",
     "shadowing",
     "ladder",
+    "ladder_reference",
     "perception_trainer",
     "practice_queue",
     "phoneme_reference",
