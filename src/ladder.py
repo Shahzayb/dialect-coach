@@ -354,3 +354,45 @@ def slice_wav(wav_bytes: bytes, start_s: float, end_s: float, *, pad_s: float = 
 def cut(wav_bytes: bytes, span: Span, *, pad_s: float = PAD_S) -> bytes:
     """`slice_wav` for a span. The form callers actually want."""
     return slice_wav(wav_bytes, span.start_s, span.end_s, pad_s=pad_s)
+
+
+# --- Arrival bands ------------------------------------------------------------------------------
+# The dataclass lives here rather than in the generated module, the same way `ReferenceVowel`
+# lives in `vowel_reference` and `model_reference` reuses it: a generated file should carry
+# numbers, not type definitions, or regenerating it can silently change a contract.
+
+
+@dataclass(frozen=True)
+class Band:
+    """Where native talkers actually sit on one metric, and how far apart they sit.
+
+    `sd` is a **between-talker** spread — how far the reference voices are from each other,
+    not the variation within one voice's tokens. Those answer different questions, and `voices`
+    is how a surface can tell which it is holding. Same distinction `ReferenceVowel.voices`
+    carries for the vowel tables.
+    """
+
+    metric: str
+    mean: float
+    sd: float
+    voices: int
+
+    def contains(self, value: float | None, *, width: float = 1.0) -> bool:
+        """Whether `value` sits inside the band — arrival, in one call.
+
+        `width` is in standard deviations. One SD is the default because it is the honest
+        reading of "where native talkers sit": widening it to two would call almost anything
+        arrived, which is the flattering direction this project refuses everywhere else.
+
+        A band with no spread (every voice identical, or a single voice) cannot answer this
+        and returns False rather than accepting everything.
+        """
+        if value is None or self.sd <= 0.0:
+            return False
+        return abs(value - self.mean) <= self.sd * width
+
+    def distance(self, value: float | None) -> float | None:
+        """How far outside the band `value` sits, in SDs. Zero when inside it."""
+        if value is None or self.sd <= 0.0:
+            return None
+        return max(0.0, (abs(value - self.mean) - self.sd) / self.sd)

@@ -308,3 +308,48 @@ def test_the_cut_preserves_the_sample_rate_and_channel_count() -> None:
         assert source.getframerate() == RATE
         assert source.getnchannels() == 1
         assert source.getsampwidth() == 2
+
+
+# --- Arrival bands ------------------------------------------------------------------------------
+# The band is the "have I arrived" half of measured resolution. The "did I really move" half is
+# `vowel_measure.NoiseFloor` and is tested with it.
+
+
+def test_a_value_inside_one_sd_has_arrived() -> None:
+    band = ladder.Band(metric="npvi", mean=55.0, sd=4.0, voices=16)
+    assert band.contains(57.0)
+    assert band.contains(51.5)
+    assert band.distance(57.0) == 0.0
+
+
+def test_a_value_outside_the_band_has_not_arrived_and_says_how_far() -> None:
+    band = ladder.Band(metric="npvi", mean=55.0, sd=4.0, voices=16)
+    assert not band.contains(70.0)
+    assert band.distance(63.0) == pytest.approx(1.0)
+
+
+def test_the_band_is_symmetric() -> None:
+    """Arrival cannot be easier from one side, or the flattering direction wins."""
+    band = ladder.Band(metric="pitch_range_st", mean=10.0, sd=2.0, voices=16)
+    assert band.contains(12.0) == band.contains(8.0)
+    assert band.distance(14.0) == band.distance(6.0)
+
+
+def test_a_band_with_no_spread_refuses_rather_than_accepting_everything() -> None:
+    """One voice, or sixteen identical ones, cannot answer 'is this native-like'."""
+    band = ladder.Band(metric="npvi", mean=55.0, sd=0.0, voices=1)
+    assert not band.contains(55.0)
+    assert band.distance(55.0) is None
+
+
+def test_a_missing_measurement_never_counts_as_arrival() -> None:
+    band = ladder.Band(metric="npvi", mean=55.0, sd=4.0, voices=16)
+    assert not band.contains(None)
+    assert band.distance(None) is None
+
+
+def test_widening_the_band_is_possible_but_not_the_default() -> None:
+    """One SD by default: two would call almost anything arrived."""
+    band = ladder.Band(metric="npvi", mean=55.0, sd=4.0, voices=16)
+    assert not band.contains(62.0)
+    assert band.contains(62.0, width=2.0)
