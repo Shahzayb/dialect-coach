@@ -323,6 +323,59 @@ voice — the mismatch fired by a live assessment, and a real stumbled word — 
 `AppTest` and by hand-built payloads rather than by a recording, since neither can be produced
 from this side of the microphone.
 
+**The four-rung practice ladder (#39, in progress).** `sound → word → sentence → paragraph`,
+with a thing resolved only once it survives at the rung above (#42). Resolution is **measured
+only** — inside the native band AND past the speaker's own noise floor — so the three exits are
+measured, bailed and reopened, and there is no way to mark something done by hand.
+`src/ladder.py` holds the rungs, spans, both bars and the verdict; `src/ladder_practice.py`
+assembles a unit; `src/ladder_reference.py` is generated.
+
+- **The 16-voice reference had been lost and was re-captured on 2026-08-21.** Only 3 renderings
+  (one voice) remained in the database and only its generated `model_reference.py` survived —
+  which is exactly why the artefact is committed and the audio is gitignored. The re-capture
+  cost 14,625 TTS characters (6,118 → 20,743) and 961 STT seconds (1,403 → 2,364), landing on
+  its own estimate. The captures carry the `[tts rhythm baseline capture]` marker, so
+  `spoken_attempts` already keeps them off the Progress cloud.
+- **Arrival bands are derived locally, no Azure**: 196 word bands, 14 sentence bands, 3
+  paragraph metrics, from stored payloads and stored WAVs.
+- **Azure's `ProsodyScore` is deliberately not a metric.** Across the sixteen voices it spans
+  89.50-90.73 — SD 0.40 on a 0-100 scale, against 3.7% for nPVI and 19.9% for pitch range. That
+  measures how uniform the TTS is, not how far native talkers sit apart. It would also have
+  jammed the ladder: a span resolves only when every judgeable metric clears, so a band no real
+  speaker can reach would block the paragraph rung and every sentence beneath it.
+- **nPVI is a passage-scale measure.** `rhythm.MIN_PAIRS` is 20, so only 5 of 14 benchmark
+  sentences carry a rhythm band; the rest are judged on pitch range and terminal fall alone,
+  which `Verdict.resolved` handles by requiring only the judgeable metrics to clear.
+- **The native leg's voice is matched on median F0, not sex.** Sex-matching needs the live
+  roster; the stored medians are cleanly bimodal (104-150 Hz against 179-224 Hz), so pitch
+  matching sex-matches on its own and discriminates within a sex too.
+- **Two defects the real data found, neither visible against fixtures.** Strict
+  position-for-position sentence mapping refused an entire recording over one inserted word
+  (GuyNeural) — now aligned with `difflib`, since a human stumbles far more than a synthesiser.
+  And `bands_for` keyed on index alone handed sentence 0 of ANY text the benchmark's sentence-0
+  numbers; it now verifies the passage against the stored sentence text.
+- **Verified live in a browser on 2026-08-21** against the real database: all three legs played
+  for a real sentence — mine 6.10 s, Brian 4.59 s, corrected 6.10 s — the cap notice fired, the
+  corrected clip was the sentence and not the 62 s recording, dropping the unit returned to
+  Today with the queue intact, and no console errors.
+
+**Banking, keeping and the queue are wired.** A take is banked on an explicit button that
+prices the spend first and stores the attempt tagged `rep`; keeping a unit writes a ladder
+target that Today renders through `grade_ladder`, so the card and the rule cannot disagree.
+Ladder kinds are not `promotable`, so they never consume one of the three perception slots.
+Corrected vowel lengths are reachable at rung scale against the MODEL duration table.
+
+**Still open on the ladder.** **No human has spoken into the "say it again" path** — the local
+verdict is proven against synthetic clips and the real stored reads, never against a live
+repetition, and nothing has been banked. The automatic reopen is tested but has never fired on
+real data, because that needs a target resolved at one rung and then failing at the rung above.
+`corrected_vowel_in` exists and is tested but has no button. And the **by-ear check at word
+scale is unanswered**: a corrected word was produced from a real read on 2026-08-21 ("these",
+0.41 s, uncapped, containment verified against the 82.1 s recording) and handed to the speaker,
+but whether it still sounds like them at that length is theirs to settle. Pitch correction was
+confirmed by ear over a whole paragraph on 2026-08-20; a word is a much shorter span and is
+where a manipulation is most likely to sound artefactual.
+
 ## Not yet proven live
 
 - **The benchmark's 30-day trajectory has one real point, not several** — the first live

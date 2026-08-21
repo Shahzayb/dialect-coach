@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import ladder
 import perception_trainer
 import utils
 
@@ -338,6 +339,23 @@ def graduation_rule(kind: str) -> str:
     graduation to be visible rather than implicit, and a rule the user cannot read is
     implicit however carefully it is implemented.
     """
+    if is_ladder(kind):
+        rung = _rung_of(kind)
+        higher = ladder.above(rung)
+        survives = (
+            ladder.TOP_RUNG_NOTE
+            if higher is None
+            else (
+                f"Then it has to survive inside its {ladder.RUNG_LABELS[higher]} — in "
+                f"isolation you hyperarticulate and in context you reduce, so clearing it on "
+                f"its own is not the same as clearing it where it matters."
+            )
+        )
+        return (
+            f"Two bars, both measured, and there is no way to mark this done by hand. "
+            f"{ladder.RESOLVED_NOTE} {survives} It can also come back on its own: if it stops "
+            f"surviving one level up, it returns to the list and says which check it failed."
+        )
     if kind == SHADOW:
         return (
             f"Nothing takes this off the list. Shadowing is a standing practice, not a target "
@@ -556,3 +574,121 @@ def evidence_of(target: Mapping[str, Any]) -> dict[str, Any]:
         logger.warning("Target %s has unreadable evidence", target.get("item"))
         return {}
     return loaded if isinstance(loaded, dict) else {}
+
+
+# --- The ladder rungs -----------------------------------------------------------------------------
+# `sound → word → sentence → paragraph`. The sound rung is NOT here: it keeps the contrast and
+# vowel machinery above, which already works, and gains only the survives-in-word check. What
+# follows is for the three rungs that resolve on measurement rather than on listening trials.
+
+WORD = ladder.Rung.WORD.value
+SENTENCE = ladder.Rung.SENTENCE.value
+PARAGRAPH = ladder.Rung.PARAGRAPH.value
+
+LADDER_KINDS: frozenset[str] = frozenset({WORD, SENTENCE, PARAGRAPH})
+
+
+def is_ladder(kind: str) -> bool:
+    return kind in LADDER_KINDS
+
+
+def _rung_of(kind: str) -> ladder.Rung:
+    return ladder.Rung(kind)
+
+
+def _describe(verdict: ladder.Verdict) -> str:
+    """The per-metric state in words, so a card can say why rather than assert a verdict."""
+    if not verdict.judgeable:
+        return "nothing measurable on this recording"
+    parts: list[str] = []
+    for metric in verdict.judgeable:
+        label = ladder.METRIC_LABELS.get(metric.metric, metric.metric)
+        if not metric.arrived:
+            distance = metric.distance_sd
+            gap = f" ({distance:.1f} SD outside)" if distance is not None else ""
+            parts.append(f"{label}: not yet inside the native range{gap}")
+        elif metric.moved is None:
+            parts.append(f"{label}: inside the native range, but this is the first attempt")
+        elif not metric.moved:
+            parts.append(
+                f"{label}: inside the native range, but the change is smaller than your own "
+                f"session-to-session variation"
+            )
+        else:
+            parts.append(f"{label}: cleared both bars")
+    return "; ".join(parts)
+
+
+def grade_ladder(
+    target: Mapping[str, Any],
+    verdict: ladder.Verdict | None,
+    above: ladder.Verdict | None = None,
+) -> Decision:
+    """Decide a ladder target from its measurements. Resolution is measured only.
+
+    Three exits, and marking something resolved by hand is deliberately not one of them:
+    **measured**, **bailed** (the caller removes the target), and **reopened**.
+
+    `above` is the same problem measured at the rung above — a word inside its sentence, a
+    sentence inside its paragraph. #42's rule: in isolation the speaker hyperarticulates and
+    in context reduces, so a rung that has not been checked one level up is not finished.
+    The paragraph has nothing above it and is checked against itself.
+    """
+    kind = str(target.get("kind") or SENTENCE)
+    state = str(target.get("state") or ACTIVE)
+    passed = int(target.get("reviews_passed") or 0)
+    rung = _rung_of(kind)
+    higher = ladder.above(rung)
+
+    # The automatic reopen. A resolved rung that stops surviving above it comes back on its
+    # own — information, not punishment, so the reason names what stopped surviving.
+    if state == GRADUATED:
+        if higher is not None and above is not None and not above.resolved:
+            return Decision(
+                ACTIVE,
+                f"Back on the list: it no longer survives inside the {ladder.RUNG_LABELS[higher]} "
+                f"it came from — {_describe(above)}. That is the level-above check doing its "
+                f"job, not a step backwards.",
+                reviews_passed=0,
+                regressed=True,
+            )
+        return Decision(
+            GRADUATED, "Resolved, and still surviving one level up.", reviews_passed=passed
+        )
+
+    if verdict is None:
+        return Decision(state, "Not measured yet — no attempt on this since it was added.")
+
+    if not verdict.resolved:
+        return Decision(ACTIVE, f"Still on the list — {_describe(verdict)}.", reviews_passed=passed)
+
+    if higher is None:
+        return Decision(
+            GRADUATED,
+            f"Resolved: {_describe(verdict)}. {ladder.TOP_RUNG_NOTE}",
+            reviews_passed=passed,
+        )
+
+    if above is None:
+        return Decision(
+            ACTIVE,
+            f"Cleared both bars on the {ladder.RUNG_LABELS[rung]} itself, but it is not "
+            f"resolved until it survives inside its {ladder.RUNG_LABELS[higher]} — in "
+            f"isolation you hyperarticulate and in context you reduce. Read the "
+            f"{ladder.RUNG_LABELS[higher]} to check it.",
+            reviews_passed=passed,
+        )
+
+    if not above.resolved:
+        return Decision(
+            ACTIVE,
+            f"Right on its own, but not inside its {ladder.RUNG_LABELS[higher]} yet — "
+            f"{_describe(above)}.",
+            reviews_passed=passed,
+        )
+
+    return Decision(
+        GRADUATED,
+        f"Resolved: cleared both bars, and it survives inside its {ladder.RUNG_LABELS[higher]}.",
+        reviews_passed=passed,
+    )
