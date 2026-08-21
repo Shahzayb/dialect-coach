@@ -585,6 +585,9 @@ def _normalise_word(word: dict[str, Any]) -> dict[str, Any]:
         "accuracy": accuracy,
         "error_type": _scores(word).get("ErrorType") or "None",
         "error_source": "azure",
+        # Filled in by `_mark_repetitions` once the whole word list exists — a stumble is a
+        # relationship between two words and cannot be seen from inside one of them.
+        "disfluency": "",
         "delivery_error_types": _delivery_error_types(word),
         "prosody_detail": _prosody_detail(word),
         "syllables": [
@@ -659,6 +662,43 @@ def _diff_miscue(reference_text: str, words: list[dict[str, Any]]) -> list[dict[
     return result
 
 
+REPETITION = "repetition"
+
+
+def _mark_repetitions(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mark a word said twice in a row as a stumble — on BOTH occurrences.
+
+    Found live on 2026-08-20: the speaker said "Wednesday" twice, and the flagged-word card for
+    the first one read `/eɪ/ → sounded like /w/`, because the /eɪ/ ending the first attempt
+    aligned against the /w/ onset of the second. Azure's payload is read faithfully; what was
+    wrong was turning that alignment into advice to drill a substitution that never happened, on
+    the lowest-scoring word of the attempt. Two surfaces then told contradictory stories about
+    one word — the diff had it right and the card had it wrong.
+
+    The signal already exists: one of the pair is an Insertion, either because `enableMiscue`
+    labelled it (drill) or because `_diff_miscue` derived it (paragraph). This is the wiring, not
+    a detector. **Both** occurrences are marked, because which one the aligner calls the
+    insertion is arbitrary — difflib tags the first — while the phoneme scores that get
+    misread belong to whichever one Azure scored badly.
+
+    Only a spoken neighbour counts. An Omission was never said, so it cannot be half of a repeat,
+    and it carries no phonemes for anything to misread.
+    """
+    tokens = [utils.normalise_words(str(word.get("word") or "")) for word in words]
+    for index, word in enumerate(words):
+        if (word.get("error_type") or "None") != "Insertion" or not tokens[index]:
+            continue
+        for neighbour in (index - 1, index + 1):
+            if not 0 <= neighbour < len(words):
+                continue
+            if words[neighbour].get("error_type") == "Omission":
+                continue
+            if tokens[index] == tokens[neighbour]:
+                word["disfluency"] = REPETITION
+                words[neighbour]["disfluency"] = REPETITION
+    return words
+
+
 def _omission(word: str) -> dict[str, Any]:
     """A reference word that was never heard. It has no scores — it was not spoken."""
     return {
@@ -666,6 +706,8 @@ def _omission(word: str) -> dict[str, Any]:
         "accuracy": None,
         "error_type": "Omission",
         "error_source": "local_diff",
+        # A word that was never spoken cannot have been stumbled over.
+        "disfluency": "",
         "delivery_error_types": [],
         # Present and empty rather than absent: every normalised word has the key, so no
         # consumer needs a guard for one construction path and not the other.
@@ -788,6 +830,8 @@ def normalise(
     # Single-shot had enableMiscue on, so Azure already labelled omissions and insertions.
     if mode is not Mode.DRILL and reference_text:
         words = _diff_miscue(reference_text, words)
+    # After both paths, not inside one: the insertion this reads may be Azure's or ours.
+    words = _mark_repetitions(words)
 
     recognised_text = " ".join(t for t in (_display_text(p) for p in payloads) if t)
 

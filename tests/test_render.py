@@ -253,3 +253,35 @@ def test_omissions_sort_ahead_of_merely_bad_scores() -> None:
 def test_sorting_does_not_crash_on_a_missing_score() -> None:
     words = [word("a", None, error_type="Mispronunciation"), word("b", 50.0)]
     assert len(sorted(words, key=app_module.severity_key)) == 2
+
+
+# --- A stumble is not a substitution ------------------------------------------------------------
+
+
+def repeated(text: str, accuracy: float, phonemes) -> dict:
+    """A word the speaker said twice, as `speech_analyzer` marks it."""
+    entry = word(text, accuracy, phonemes=phonemes)
+    entry["disfluency"] = "repetition"
+    return entry
+
+
+def phoneme(symbol: str, score: float, alternate: str | None = None) -> dict:
+    return {
+        "phoneme": symbol,
+        "score": score,
+        "nbest": [{"phoneme": alternate or symbol, "score": 92.0}],
+    }
+
+
+def test_a_stumbled_word_is_not_described_as_a_substitution() -> None:
+    """The 2026-08-20 card: `wednesday — 6` with `/eɪ/ → sounded like /w/`, a substitution that
+    never happened — the /eɪ/ ending the first attempt aligned against the /w/ onset of the
+    second."""
+    stumble = repeated("wednesday", 6.0, [phoneme("w", 40.0), phoneme("eɪ", 8.0, alternate="w")])
+    assert app_module.weakest_phoneme(stumble) == ""
+
+
+def test_an_ordinary_bad_word_still_gets_its_headline_sound() -> None:
+    """The suppression must be about the stumble, not about a low score."""
+    shop = word("shop", 44.0, phonemes=[phoneme("ʃ", 31.0, alternate="s"), phoneme("p", 90.0)])
+    assert app_module.weakest_phoneme(shop) == "/ʃ/ → sounded like /s/"

@@ -762,3 +762,126 @@ def test_a_delivery_only_fault_still_flags_the_word() -> None:
 
 def test_a_word_below_the_amber_cut_is_flagged() -> None:
     assert sa.is_flagged(word("weather", utils.WORD_AMBER - 0.1))
+
+
+# --- A stumble is not a substitution ------------------------------------------------------------
+# Found live on 2026-08-20, attempt 12. The speaker said "Wednesday" twice. The script-versus-heard
+# diff handled it correctly; the flagged-word card rendered `wednesday — 6` with
+# `/eɪ/ → sounded like /w/`, because the /eɪ/ ending the first attempt aligned against the /w/
+# onset of the second. Azure's payload is being read faithfully — the card turned it into advice
+# to drill a substitution that never happened, on the lowest-scoring word of the attempt.
+
+
+def _stumble_payload() -> list[dict[str, Any]]:
+    """One utterance in which "Wednesday" is said twice, the first attempt scored badly.
+
+    Hand-built, not captured: no committed fixture holds a real disfluency, and the alignment
+    this reproduces is a property of Azure's aligner rather than of any one recording. The
+    phoneme scores and the nbest alternate are the shape the live payload carried.
+    """
+
+    def phoneme(symbol: str, score: float, alternate: str | None = None) -> dict[str, Any]:
+        node: dict[str, Any] = {
+            "Phoneme": symbol,
+            "PronunciationAssessment": {"AccuracyScore": score},
+        }
+        if alternate:
+            node["PronunciationAssessment"]["NBestPhonemes"] = [
+                {"Phoneme": alternate, "Score": 92.0},
+                {"Phoneme": symbol, "Score": score},
+            ]
+        return node
+
+    return [
+        {
+            "DisplayText": "On wednesday wednesday the shop opens late.",
+            "NBest": [
+                {
+                    "Display": "On wednesday wednesday the shop opens late.",
+                    "Words": [
+                        {"Word": "on", "PronunciationAssessment": {"AccuracyScore": 96.0}},
+                        {
+                            "Word": "wednesday",
+                            "PronunciationAssessment": {"AccuracyScore": 6.0},
+                            "Phonemes": [
+                                phoneme("w", 40.0),
+                                phoneme("ɛ", 30.0),
+                                phoneme("n", 35.0),
+                                phoneme("z", 20.0),
+                                phoneme("d", 25.0),
+                                # The tell: the word's last phoneme reads as the NEXT word's onset.
+                                phoneme("eɪ", 8.0, alternate="w"),
+                            ],
+                        },
+                        {
+                            "Word": "wednesday",
+                            "PronunciationAssessment": {"AccuracyScore": 88.0},
+                            "Phonemes": [phoneme("w", 90.0), phoneme("eɪ", 86.0)],
+                        },
+                        {"Word": "the", "PronunciationAssessment": {"AccuracyScore": 97.0}},
+                        {
+                            "Word": "shop",
+                            "PronunciationAssessment": {"AccuracyScore": 44.0},
+                            "Phonemes": [
+                                # An ordinary substitution in the same attempt: it must survive.
+                                phoneme("ʃ", 31.0, alternate="s"),
+                                phoneme("ɑ", 80.0),
+                                phoneme("p", 90.0),
+                            ],
+                        },
+                        {"Word": "opens", "PronunciationAssessment": {"AccuracyScore": 95.0}},
+                        {"Word": "late", "PronunciationAssessment": {"AccuracyScore": 93.0}},
+                    ],
+                }
+            ],
+        }
+    ]
+
+
+STUMBLE_REFERENCE = "On wednesday the shop opens late."
+
+
+@pytest.fixture
+def stumbled() -> list[dict[str, Any]]:
+    _overall, _heard, words = sa.normalise(_stumble_payload(), STUMBLE_REFERENCE, Mode.PARAGRAPH)
+    return words
+
+
+def test_the_repeat_is_still_reported_as_an_insertion(stumbled) -> None:
+    """The diff's own handling is correct and must not change — it is the signal being reused.
+
+    Which of the two occurrences difflib calls the insertion is not asserted: it tags the first
+    here, and either is a defensible reading of "said twice". That is exactly why the mark has
+    to land on both of them rather than on whichever one the aligner happened to pick.
+    """
+    repeats = [w for w in stumbled if w["word"] == "wednesday"]
+    assert len(repeats) == 2
+    assert sorted(w["error_type"] for w in repeats) == ["Insertion", "None"]
+
+
+def test_both_halves_of_a_repeated_word_are_marked_as_a_stumble(stumbled) -> None:
+    """Both, not just the inserted one. The card that lied was on the FIRST occurrence."""
+    repeats = [w for w in stumbled if w["word"] == "wednesday"]
+    assert all(w["disfluency"] == sa.REPETITION for w in repeats)
+
+
+def test_nothing_else_in_the_attempt_is_called_a_stumble(stumbled) -> None:
+    others = [w for w in stumbled if w["word"] != "wednesday"]
+    assert others, "the fixture lost its other words"
+    assert all(not w["disfluency"] for w in others)
+
+
+def test_every_normalised_word_carries_the_key(stumbled) -> None:
+    """Present and empty rather than absent, so no consumer needs a per-path guard."""
+    assert all("disfluency" in w for w in stumbled)
+
+
+def test_two_different_words_in_a_row_are_not_a_repetition() -> None:
+    """An insertion is only a stumble when it repeats what was just said."""
+    payloads = _stumble_payload()
+    payloads[0]["NBest"][0]["Words"][2]["Word"] = "thursday"
+    payloads[0]["DisplayText"] = "On wednesday thursday the shop opens late."
+    payloads[0]["NBest"][0]["Display"] = payloads[0]["DisplayText"]
+    _overall, _heard, words = sa.normalise(payloads, STUMBLE_REFERENCE, Mode.PARAGRAPH)
+    assert any(w["error_type"] == "Insertion" for w in words), "the fixture stopped inserting"
+    assert all(not w["disfluency"] for w in words)

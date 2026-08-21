@@ -477,7 +477,16 @@ def diff_html(pairs: list[tuple[str, str]]) -> str:
 
 
 def weakest_phoneme(word: dict[str, Any]) -> str:
-    """One-line summary of a word's worst sound, for the card header."""
+    """One-line summary of a word's worst sound, for the card header.
+
+    Silent on a word the speaker stumbled over. When a word is said twice the aligner reads
+    across the repeat — the /eɪ/ ending the first "Wednes-day" pairs against the /w/ onset of
+    the second — and describing that as a substitution is advice to drill a sound the speaker
+    never produced, on what will usually be the lowest-scoring word of the attempt. The
+    stumble itself is real and the card still says so; see `render_word_card`.
+    """
+    if word.get("disfluency") == speech_analyzer.REPETITION:
+        return ""
     pairs = [
         (expected, produced, score)
         for expected, produced, score in speech_analyzer.phoneme_pairs(word)
@@ -1449,9 +1458,19 @@ def render_word_card(conn: sqlite3.Connection, word: dict[str, Any], index: int)
 
         # The headline sound, before the full phoneme list. A long word can carry a dozen
         # phonemes, and the one that actually failed should not need hunting for.
-        summary = weakest_phoneme(word)
-        if summary:
-            st.markdown(f"**{summary}**")
+        if word.get("disfluency") == speech_analyzer.REPETITION:
+            # Said twice. The score is the stumble, not a sound — and the diff above already
+            # showed the repeat, so the two surfaces now tell the same story about one word.
+            st.markdown("**You said this word twice — a stumble, not a sound to drill.**")
+            st.caption(
+                "Azure aligned across the repeat, so the phonemes below pair the end of one "
+                "attempt against the start of the next. That is why the score is so low; it "
+                "is not a substitution."
+            )
+        else:
+            summary = weakest_phoneme(word)
+            if summary:
+                st.markdown(f"**{summary}**")
 
         notes = []
         if error_type != "None":

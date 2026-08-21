@@ -199,6 +199,14 @@ def _substitutions(word: dict[str, Any]) -> list[dict[str, Any]]:
     at 100: the aligner smeared one produced sound across two targets, and reporting it as
     two separate substitutions would spend two of the three fix slots on one event.
     """
+    if word.get("disfluency") == speech_analyzer.REPETITION:
+        # Said twice, so the aligner read across the repeat and every "produced" sound here is
+        # the neighbouring attempt rather than a substitution. Returning nothing keeps the pair
+        # out of `observed_pairs`, which is the only list a report may discuss — so neither
+        # coach can drill it, and the card and the report cannot disagree about a substitution.
+        # The word still reaches `flagged_words` with its score and its error type: the stumble
+        # is worth reporting, the invented substitution is not.
+        return []
     found: list[dict[str, Any]] = []
     pairs = speech_analyzer.phoneme_pairs(word)
     for index, (expected, produced, score) in enumerate(pairs):

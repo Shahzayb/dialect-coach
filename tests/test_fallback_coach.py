@@ -136,6 +136,32 @@ def test_one_produced_sound_smeared_over_two_targets_counts_once() -> None:
     assert substitutions[0]["score"] == 0.0, "the worse of the run is the one kept"
 
 
+def test_a_stumbled_word_contributes_no_substitution_to_the_payload() -> None:
+    """`observed_pairs` is the only list a report may discuss, so this is what stops either
+    coach drilling a sound the speaker never produced.
+
+    The 2026-08-20 card and the coaching report would otherwise disagree about one word, which
+    is the thing having a single definition of "what you actually produced" exists to prevent.
+    """
+    stumble = word("wednesday", 6.0, phonemes=[phoneme("eɪ", 8.0, ("w", 92.0))])
+    stumble["disfluency"] = sa.REPETITION
+    compacted = fc.compact(assessment([stumble]), Mode.PARAGRAPH)
+
+    assert compacted["observed_pairs"] == []
+    assert [w["word"] for w in compacted["flagged_words"]] == ["wednesday"], (
+        "the stumble is real and must still reach the coach as a flagged word"
+    )
+    assert compacted["flagged_words"][0]["substitutions"] == []
+
+
+def test_an_ordinary_substitution_beside_a_stumble_still_travels() -> None:
+    stumble = word("wednesday", 6.0, phonemes=[phoneme("eɪ", 8.0, ("w", 92.0))])
+    stumble["disfluency"] = sa.REPETITION
+    shop = word("shop", 44.0, phonemes=[phoneme("ʃ", 31.0, ("s", 88.0))])
+    compacted = fc.compact(assessment([stumble, shop]), Mode.PARAGRAPH)
+    assert compacted["observed_pairs"] == [["ʃ", "s"]]
+
+
 def test_two_different_substitutions_in_one_word_both_survive() -> None:
     subject = word(
         "thursday",
