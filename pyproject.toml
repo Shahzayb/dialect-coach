@@ -106,6 +106,7 @@ module = [
     "speech_analyzer",
     "audio_utils",
     "shadowing",
+    "ladder",
     "perception_trainer",
     "practice_queue",
     "phoneme_reference",
