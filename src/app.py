@@ -41,6 +41,7 @@ import acoustics
 import ai_coach
 import audio_utils
 import budget
+import content_score
 import db
 import fallback_coach
 import native_model
@@ -86,6 +87,7 @@ _DB_LOCK = threading.Lock()
 MODE_LABELS: dict[str, Mode] = {
     "Drill — one or two sentences": Mode.DRILL,
     "Paragraph — connected speech": Mode.PARAGRAPH,
+    "Unscripted — speak freely on a prompt": Mode.UNSCRIPTED,
 }
 
 # Chosen to read on both the light and the dark Streamlit theme, and to survive being set
@@ -155,6 +157,11 @@ ERROR_BADGES: list[tuple[str, str | None, str, str]] = [
 # (master plan §7): /θ/ /ð/, /v/ vs /w/, /æ/ vs /ɛ/, /ʃ/ /s/ /z/ /dʒ/, dark /l/, and final
 # consonant clusters. No digits — Azure normalises "33" and "thirty-three" differently,
 # which breaks word alignment.
+# Azure's own guidance for unscripted assessment: 15 seconds — "equivalent to more than 50
+# words" — up to 10 minutes. The target here is the middle of that, and `MAX_DURATION_SECONDS_
+# UNSCRIPTED` (300 s) is the hard ceiling the audio guard enforces.
+UNSCRIPTED_TARGET_SECONDS = (180, 240)
+
 PRESETS: dict[Mode, dict[str, str]] = {
     Mode.DRILL: {
         "Th (/θ/, /ð/)": "These three brothers thought the weather was worth the trouble.",
@@ -164,6 +171,36 @@ PRESETS: dict[Mode, dict[str, str]] = {
         ),
         "Sibilants (/s/, /ʃ/, /z/, /dʒ/)": (
             "She chose the usual visual measure just as the season closed."
+        ),
+    },
+    # **Prompts, not texts.** Nothing here is read aloud or scored against: these are subjects
+    # to talk about. Chosen for the register this project actually exists for — being
+    # understood in an interview, on a call, explaining something technical — rather than for
+    # phoneme coverage, because free speech samples the vowel space wherever the speaker's own
+    # vocabulary sends it and pretending otherwise would be the read-speech habit in disguise.
+    #
+    # Each is open enough to sustain three or four minutes and concrete enough that a speaker
+    # does not spend the first minute deciding what to say.
+    Mode.UNSCRIPTED: {
+        "Explain a technical decision": (
+            "Explain a technical decision you made recently — what the options were, what you "
+            "chose, and why — to somebody who knows the field but not this project."
+        ),
+        "Tell me about yourself": (
+            "Answer the interview opener: who you are, what you do, and what you are looking "
+            "for next. Aim for the version you would actually say out loud, not a CV."
+        ),
+        "Something that went wrong": (
+            "Describe something that went wrong at work, how you found out, and what you did "
+            "about it. Include the part where you were unsure what to do."
+        ),
+        "Explain your work to a non-specialist": (
+            "Explain what you do to somebody outside your field — a relative, a friend in a "
+            "different profession — without using jargon you would have to define first."
+        ),
+        "Argue for something you believe": (
+            "Make the case for an opinion you hold about your own field, and then give the "
+            "strongest argument against it that you can."
         ),
     },
     Mode.PARAGRAPH: {
@@ -736,6 +773,44 @@ def validate_reference(text: str) -> bool:
     return True
 
 
+def validate_prompt(text: str) -> bool:
+    """Check Mode C's prompt before anything is sent. Returns False to block the run.
+
+    A far lighter check than `validate_reference`, and deliberately so: this text is never read
+    aloud, never scored against and never aligned word-for-word, so the digit warning and the
+    length ceiling that protect a reference text have nothing to protect here. What it does
+    need is to exist — the content scorer judges topic relevance against it, and two recordings
+    are paired into a spontaneous calibration by matching it.
+    """
+    if not text.strip():
+        st.error("Choose or write a prompt first — it is what the topic score is judged against.")
+        return False
+    return True
+
+
+def render_unscripted_guidance(mode: Mode) -> None:
+    """What a good Mode C recording looks like, and what it costs. Said before the record button.
+
+    The cost line is not decoration. Mode C is the only mode that sends the audio twice, and a
+    speaker who does not know that will read the meter afterwards and think it is broken.
+    """
+    low, high = UNSCRIPTED_TARGET_SECONDS
+    ceiling = utils.max_duration_seconds(mode)
+    st.caption(
+        f"**Talk, do not read.** Azure needs at least 15 seconds — more than "
+        f"{content_score.MIN_WORDS} words — for an unscripted assessment to mean anything, and "
+        f"a topic score needs at least {content_score.MIN_SENTENCES} sentences. Aim for "
+        f"{low // 60}-{high // 60} minutes; the hard ceiling here is {ceiling / 60:.0f} minutes."
+    )
+    if utils.get_bool("UNSCRIPTED_TWO_PASS") and not utils.offline_mode():
+        st.caption(
+            "**This recording is sent to Azure twice** — once for an accurate transcript, then "
+            "again to score the pronunciation against it. Unscripted assessment runs on a "
+            "weaker recogniser, and a phoneme diagnosis against a wrong transcript blames the "
+            "wrong sounds. The cost check before the first pass already counts both."
+        )
+
+
 def prepare_audio(
     conn: sqlite3.Connection, audio: bytes, mode: Mode
 ) -> tuple[bytes, float] | tuple[None, None]:
@@ -871,12 +946,18 @@ def run_assessment_job(
 
     try:
         with audio_utils.temp_wav(wav_bytes) as wav_path:
+            # In Mode C `reference_text` is the PROMPT, so it travels as `topic` and NOT as
+            # something to score against: nothing is scored against a prompt, and passing it as
+            # a reference text would turn Mode C into a scripted assessment of a question the
+            # speaker was answering rather than reading.
+            unscripted = mode is Mode.UNSCRIPTED
             assessment = speech_analyzer.analyse(
                 wav_path,
-                reference_text,
+                "" if unscripted else reference_text,
                 mode,
                 cancel_event=cancel_event,
                 on_attempt=note_attempt,
+                topic=reference_text if unscripted else "",
             )
 
         if cancel_event.is_set():
@@ -1044,30 +1125,58 @@ def _score_bar_html(label: str, score: float | None) -> str:
     )
 
 
-def render_scores(assessment: speech_analyzer.Assessment) -> None:
+def _headline_html(label: str, score: float | None) -> str:
+    """The big banded number. `—` for a score that was not measured, never 0."""
+    colour = AZURE_BAND_COLOURS[utils.azure_score_band(score)]
+    text = f"{score:.0f}" if isinstance(score, (int, float)) else "—"
+    return (
+        '<div style="text-align:center;">'
+        f'<div style="font-size:0.9rem;opacity:0.75;">{html.escape(label)}</div>'
+        f'<div style="font-size:2.75rem;font-weight:700;color:{colour};">'
+        f"{html.escape(text)}</div></div>"
+    )
+
+
+def render_scores(assessment: speech_analyzer.Assessment, mode: Mode = Mode.PARAGRAPH) -> None:
     """Pronunciation headline + Completeness, then the Accuracy/Fluency/Prosody breakdown.
 
     Banding is presentation only: `overall_scores` keeps the raw floats `normalise()`
     produced, and `utils.azure_score_band` is applied here, at render time, against Azure's
     own 0-59/60-79/80-89/90-100 convention — a different set of cut points from the
     word/phoneme colours in `colour_coded_html`, which are this project's own heuristics.
+
+    **Mode C has no Completeness and the panel says so in words**, rather than rendering a dash
+    that reads as a failed measurement. There is nothing for unscripted speech to be complete
+    against: Azure's own unscripted results table omits the score, and the composite for the
+    speaking scenario is defined without it.
     """
     scores = assessment.overall_scores
-    pron_score = scores.get("pron_score")
-    pron_colour = AZURE_BAND_COLOURS[utils.azure_score_band(pron_score)]
-    pron_text = f"{pron_score:.0f}" if isinstance(pron_score, (int, float)) else "—"
+    unscripted = mode is Mode.UNSCRIPTED
 
     left, right = st.columns(2)
     with left:
         st.markdown(
-            '<div style="text-align:center;">'
-            '<div style="font-size:0.9rem;opacity:0.75;">Pronunciation</div>'
-            f'<div style="font-size:2.75rem;font-weight:700;color:{pron_colour};">'
-            f"{html.escape(pron_text)}</div></div>",
-            unsafe_allow_html=True,
+            _headline_html("Pronunciation", scores.get("pron_score")), unsafe_allow_html=True
         )
     with right:
-        _metric("Completeness", scores.get("completeness"))
+        if unscripted:
+            st.markdown(
+                '<div style="text-align:center;">'
+                '<div style="font-size:0.9rem;opacity:0.75;">Completeness</div>'
+                '<div style="font-size:1.1rem;font-weight:600;opacity:0.7;'
+                'padding-top:0.9rem;">not applicable</div></div>',
+                unsafe_allow_html=True,
+            )
+            st.caption(
+                "Unscripted speech has no script to be complete against.",
+                help=(
+                    "Azure's own results table for unscripted assessment carries no "
+                    "CompletenessScore, and the pronunciation composite for the speaking "
+                    "scenario is defined without one."
+                ),
+            )
+        else:
+            _metric("Completeness", scores.get("completeness"))
 
     st.markdown("**Score breakdown**")
     st.markdown(
@@ -1086,6 +1195,149 @@ def render_scores(assessment: speech_analyzer.Assessment) -> None:
         "good, 90-100 excellent. A different convention from the word/phoneme colours "
         "further down, which are heuristics this tool chose."
     )
+
+
+CONTENT_BARS: tuple[tuple[str, str], ...] = (
+    ("Vocabulary score", "vocabulary"),
+    ("Grammar score", "grammar"),
+    ("Topic score", "topic"),
+)
+
+# Where the content numbers come from, said on the page. Not a footnote: these are NOT Azure
+# scores — Azure retired content assessment at Speech SDK 1.46.0 and this project pins 1.51.1 —
+# and a reader who assumes they are will over-trust them against the pronunciation scores beside
+# them, which are measurements of a signal rather than a model's reading of a transcript.
+CONTENT_SOURCE_CAPTION: dict[str, str] = {
+    content_score.SOURCE_GEMINI: (
+        "Scored by Gemini against Microsoft's own published rubric, from the transcript above — "
+        "**not by Azure**, which retired content assessment at Speech SDK 1.46.0. It is a "
+        "model's reading of what you said, not a measurement of the audio, and it deserves less "
+        "weight than the pronunciation scores above it."
+    ),
+    content_score.SOURCE_AZURE: (
+        "Returned by Azure itself. Unexpected — content assessment is documented as retired "
+        "from Speech SDK 1.46.0 and this project pins 1.51.1 — and worth recording as a fact."
+    ),
+}
+
+
+def render_content_scores(scores: Any) -> None:
+    """The Content score panel: Vocabulary, Grammar, Topic — or why there are none.
+
+    **Never a blank and never a substitute.** An empty panel teaches the reader that the feature
+    is broken; a panel that says "no Gemini key" teaches them what to do. And a scripted-mode
+    number standing in here would be a different measurement wearing this one's label.
+
+    The headline is the plain mean of the three and is captioned as exactly that. Azure never
+    published its own aggregate weighting, so it is not reconstructed: a mean that admits it is
+    a mean is honest, and an invented composite that looks official is not.
+    """
+    st.markdown("**Content score**")
+    if not scores.available:
+        st.info(
+            f"**Content scores are unavailable for this attempt** — {scores.reason}",
+            icon="🚫",
+        )
+        return
+
+    st.markdown(_headline_html("Content", scores.overall), unsafe_allow_html=True)
+    st.caption("The plain mean of the three below. Azure never published its own weighting.")
+    st.markdown(
+        "".join(_score_bar_html(label, getattr(scores, key)) for label, key in CONTENT_BARS),
+        unsafe_allow_html=True,
+    )
+    if scores.notes:
+        st.caption(scores.notes)
+    st.caption(CONTENT_SOURCE_CAPTION.get(scores.source, ""))
+
+
+NOT_ASKED = (
+    "no call has been made for this attempt yet. Content scoring spends one free-tier Gemini "
+    "call, so it is a click rather than something every assessment does."
+)
+
+
+def _content_asked(key: str) -> bool:
+    """Whether a content-scoring call has already been bought for this attempt.
+
+    The same rule the coaching button follows: a call that was spent and came back unusable
+    must not be re-buyable, so this tracks the ATTEMPT rather than the outcome.
+    """
+    return bool(lru_get(_session_cache("content_asked"), key))
+
+
+def content_scores_for(conn: sqlite3.Connection, entry: CachedAttempt, *, ask_model: bool) -> Any:
+    """This attempt's content scores: from Azure, from storage, from Gemini, or unavailable.
+
+    Order matters. **Azure first**, in the one case it ever answers — if the retired fields
+    under `UNSCRIPTED_CONTENT_PROBE` come back with numbers, those are a measurement from the
+    service and no model needs asking. Then the stored verdict, so re-rendering never means
+    re-asking and an "unavailable, because 429" survives a rerun as the fact it is.
+    """
+    azure = entry.assessment.overall_scores.get("content")
+    if isinstance(azure, dict) and azure:
+        return content_score.from_azure(azure)
+
+    cache = _session_cache("content_scores")
+    cached = lru_get(cache, entry.key)
+    if cached is not None and (not ask_model or _content_asked(entry.key)):
+        return cached
+
+    if cached is None and entry.attempt_id is not None:
+        stored = content_score.Scores.from_json(db.content_score_for(conn, entry.attempt_id))
+        if stored is not None and not ask_model:
+            lru_put(cache, entry.key, stored, CACHE_LIMIT)
+            return stored
+
+    if not ask_model:
+        _, why_not = content_score.available()
+        reason = why_not or content_score.too_short(entry.assessment.recognised_text) or NOT_ASKED
+        scores = content_score.Scores.unavailable(reason)
+        lru_put(cache, entry.key, scores, CACHE_LIMIT)
+        return scores
+
+    # Marked before the call, not after: a call that reached Gemini and came back unusable has
+    # already been spent, and keying this off the result would let the same failure be bought
+    # over and over.
+    lru_put(_session_cache("content_asked"), entry.key, True, CACHE_LIMIT)
+    with st.spinner("Scoring the content…"):
+        scores = content_score.score(entry.assessment.recognised_text, entry.reference_text)
+    lru_put(cache, entry.key, scores, CACHE_LIMIT)
+    if entry.attempt_id is not None:
+        with _DB_LOCK:
+            db.attach_content_score(conn, entry.attempt_id, scores=scores)
+    return scores
+
+
+def render_content(conn: sqlite3.Connection, entry: CachedAttempt) -> None:
+    """The Content score panel and the button that buys it. Mode C only.
+
+    Content scores exist for unscripted speech and nothing else: there is no vocabulary or
+    grammar of your own in a passage somebody wrote for you to read.
+    """
+    if entry.mode is not Mode.UNSCRIPTED:
+        return
+
+    azure = entry.assessment.overall_scores.get("content")
+    if isinstance(azure, dict) and azure:
+        render_content_scores(content_scores_for(conn, entry, ask_model=False))
+        return
+
+    usable, _ = content_score.available()
+    short = content_score.too_short(entry.assessment.recognised_text)
+    asked = st.button(
+        "✨ Score the content with Gemini",
+        key=f"content-{entry.key}",
+        disabled=not usable or bool(short) or _content_asked(entry.key),
+        help="One free-tier call. Vocabulary, grammar and topic relevance.",
+    )
+    render_content_scores(content_scores_for(conn, entry, ask_model=asked))
+    if usable and not short:
+        st.caption(
+            "Sends the transcript above and your prompt to Google — never your audio. "
+            "Free-tier prompts and responses may be used to improve Google's products, so "
+            "this is a click rather than something every assessment does."
+        )
 
 
 def error_count_badges(assessment: speech_analyzer.Assessment) -> list[tuple[int, str]]:
@@ -1484,14 +1736,24 @@ def render_diff(assessment: speech_analyzer.Assessment, reference_text: str) -> 
         st.markdown(f"**Heard**\n\n{assessment.recognised_text}")
 
 
-def render_colour_coded(assessment: speech_analyzer.Assessment) -> None:
+def render_colour_coded(
+    assessment: speech_analyzer.Assessment, mode: Mode = Mode.PARAGRAPH
+) -> None:
     st.subheader("Word by word")
     st.markdown(colour_coded_html(assessment.words), unsafe_allow_html=True)
+    # The omission/insertion half of the legend describes marks that only a miscue diff can
+    # produce, and Mode C deliberately runs none — see `speech_analyzer.normalise`. Promising
+    # them here would have the reader hunting for marks the mode cannot draw.
+    marks = (
+        ""
+        if mode is Mode.UNSCRIPTED
+        else " Struck through: never spoken. Italic: heard but not in the script."
+    )
     st.caption(
         f"Hover any word for its score and phoneme breakdown. Red below {utils.WORD_RED:g}, "
-        f"amber below {utils.WORD_AMBER:g}, green above. Struck through: never spoken. "
-        f"Italic: heard but not in the script. These cut points are heuristics chosen for "
-        f'this tool — Azure returns a 0-100 score and says nothing about where "bad" starts.'
+        f"amber below {utils.WORD_AMBER:g}, green above.{marks} These cut points are "
+        f"heuristics chosen for this tool — Azure returns a 0-100 score and says nothing "
+        f'about where "bad" starts.'
     )
 
 
@@ -1658,17 +1920,64 @@ def render_rhythm(assessment: speech_analyzer.Assessment, reference_text: str) -
         )
 
 
+def render_transcript(entry: CachedAttempt) -> None:
+    """What Mode C's phoneme diagnosis was actually scored against.
+
+    **Shown before anything derived from it**, because everything below is only as good as
+    this: the second pass scores each phoneme against the word this transcript says was there.
+    If a word here is wrong, the sounds blamed for it are wrong too, and the reader is the only
+    one who can notice. Modes A and B already show the reference text the user typed; this is
+    the equivalent for the mode where nobody typed one.
+    """
+    if entry.mode is not Mode.UNSCRIPTED:
+        return
+    st.subheader("What Azure heard")
+    transcript = entry.assessment.scored_against or entry.assessment.recognised_text
+    st.markdown(f"> {transcript}" if transcript else "_Nothing was transcribed._")
+    if utils.get_bool("UNSCRIPTED_TWO_PASS"):
+        st.caption(
+            "Transcribed by standard Azure speech-to-text, then used as the reference text for "
+            "the pronunciation assessment — the two-pass flow Microsoft recommends, because "
+            "unscripted assessment runs on a weaker recogniser. Every sound named below was "
+            "scored against these words, so a wrong word here means a wrongly blamed sound."
+        )
+    else:
+        st.caption(
+            "UNSCRIPTED_TWO_PASS is off, so this came from the unscripted assessment's own "
+            "recogniser — which Microsoft documents as weaker than standard Azure "
+            "speech-to-text. Treat the phoneme diagnosis below with correspondingly less "
+            "confidence."
+        )
+
+
 def render_result(conn: sqlite3.Connection, entry: CachedAttempt, source: Any) -> None:
     assessment, reference_text = entry.assessment, entry.reference_text
-    render_scores(assessment)
+    if entry.mode is Mode.UNSCRIPTED:
+        st.caption(f"Prompt: _{reference_text}_" if reference_text else "No prompt recorded.")
+    render_transcript(entry)
+    render_scores(assessment, entry.mode)
+    render_content(conn, entry)
     render_error_counts(assessment)
     # Directly under the scores: what to do about them comes before the evidence for them.
     render_coaching(conn, entry)
-    render_diff(assessment, reference_text)
-    render_colour_coded(assessment)
+    # **No script-versus-heard diff in Mode C.** There is no script: `reference_text` holds the
+    # PROMPT, and diffing a prompt against what somebody freely said would strike through every
+    # word of the prompt and italicise every word they spoke. `render_transcript` above is what
+    # answers "what did Azure hear" for this mode.
+    if entry.mode is not Mode.UNSCRIPTED:
+        render_diff(assessment, reference_text)
+    render_colour_coded(assessment, entry.mode)
 
     st.subheader("Hear the whole thing")
-    playback_buttons(conn, reference_text, key_prefix="whole", label="the full text")
+    # Mode C synthesises the TRANSCRIPT, not `reference_text` — the prompt was never spoken and
+    # hearing a native reading of "Explain a technical decision" teaches nothing. Modes A and B
+    # keep the script for the reason `techContext` already records: the reference text is what
+    # they were trying to say, and a re-reading of what they actually said would not be a target.
+    spoken = assessment.scored_against or assessment.recognised_text
+    playback_text = spoken if entry.mode is Mode.UNSCRIPTED else reference_text
+    playback_buttons(conn, playback_text, key_prefix="whole", label="the full text")
+    if entry.mode is Mode.UNSCRIPTED and playback_text:
+        st.caption("A native rendering of your own words, so the target is what you tried to say.")
     if source is not None:
         # Your own recording directly beneath the native rendering, so the two can be
         # compared back to back without leaving the page. That comparison is the feature.
@@ -2111,8 +2420,7 @@ would render exactly that wander as progress.
 def render_baseline(conn: sqlite3.Connection) -> None:
     """The stored baselines — one per speech style — each with its chart and its noise floor."""
     stored = [
-        (style, db.current_baseline(conn, style=style))
-        for style in (STYLE_READ, STYLE_SPONTANEOUS)
+        (style, db.current_baseline(conn, style=style)) for style in (STYLE_READ, STYLE_SPONTANEOUS)
     ]
     present = [(style, row) for style, row in stored if row is not None]
     if not present:
@@ -2323,8 +2631,7 @@ def render_accent_charts(conn: sqlite3.Connection) -> None:
     )
     if not gate.ok or gate.normaliser is None:
         st.info(
-            gate.reason
-            or vowel_measure.NO_BASELINE,
+            gate.reason or vowel_measure.NO_BASELINE,
             icon="📐",
         )
         return
@@ -4104,20 +4411,27 @@ def render_practice(conn: sqlite3.Connection, job: AssessJob | None, running: bo
         )
 
     mode = MODE_LABELS[st.radio("Mode", list(MODE_LABELS), horizontal=True)]
-    st.caption(
-        "Unscripted mode — free speech with vocabulary, grammar and topic scores — is not "
-        "built yet."
-    )
+    unscripted = mode is Mode.UNSCRIPTED
 
     presets = PRESETS[mode]
     st.selectbox(
-        "Practice text",
+        "Prompt" if unscripted else "Practice text",
         ["Write my own", *presets],
         key=PRESET_KEY,
         on_change=_apply_preset,
         args=(mode,),
     )
-    reference_text = st.text_area("Reference text", key=TEXT_KEY, height=140)
+    # **The same widget, holding a different kind of thing.** In Mode C this is the PROMPT: it
+    # is never read aloud, never scored against, and never sent to Azure as a reference text.
+    # It is stored so two recordings on one prompt can be paired into a spontaneous
+    # calibration, and it is what the content scorer uses as the title to judge relevance.
+    reference_text = st.text_area(
+        "Prompt — talk about this, do not read it" if unscripted else "Reference text",
+        key=TEXT_KEY,
+        height=140,
+    )
+    if unscripted:
+        render_unscripted_guidance(mode)
 
     audio = st.audio_input("Record", key=f"recording-{_generation('recording')}")
     if audio is not None:
@@ -4157,8 +4471,8 @@ def render_practice(conn: sqlite3.Connection, job: AssessJob | None, running: bo
     # one. Without this a fast double-click starts two assessments.
     if assess_clicked and not running and source is not None:  # noqa: SIM102
         # Kept nested deliberately: the guard above is about session state, this one is
-        # about the input, and `validate_reference` renders the error as a side effect.
-        if validate_reference(reference_text):
+        # about the input, and both validators render their error as a side effect.
+        if (validate_prompt if unscripted else validate_reference)(reference_text):
             audio_bytes = source.getvalue()
             key = utils.attempt_hash(reference_text, audio_bytes, mode)
             st.session_state[RESULT_OWNER_KEY] = PRACTICE_OWNER

@@ -1343,10 +1343,7 @@ def _tag_style(findings: Sequence[Finding], style: str) -> list[Finding]:
     """
     if not style:
         return list(findings)
-    return [
-        replace(row, user=_COUNT_SUFFIX.sub(rf"(n=\1, {style})", row.user))
-        for row in findings
-    ]
+    return [replace(row, user=_COUNT_SUFFIX.sub(rf"(n=\1, {style})", row.user)) for row in findings]
 
 
 def _position_findings(
@@ -1837,9 +1834,7 @@ def findings_by_instrument(
         STRESS: _stress_findings(stress_contrasts(accepted, normaliser, centroid)),
         REJECTED: rejection_findings(measurement.tokens),
     }
-    return {
-        instrument: _tag_style(rows, measurement.style) for instrument, rows in grouped.items()
-    }
+    return {instrument: _tag_style(rows, measurement.style) for instrument, rows in grouped.items()}
 
 
 def findings(

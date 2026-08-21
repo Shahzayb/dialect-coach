@@ -83,7 +83,8 @@ def main() -> int:
         return 1
 
     with audio_utils.temp_wav(wav_bytes) as wav_path:
-        payloads, _, attempts = speech_analyzer.recognise(wav_path, reference_text, mode)
+        recognition = speech_analyzer.recognise(wav_path, reference_text, mode)
+    payloads, attempts = recognition.payloads, recognition.attempts
 
     # Charge the meter for what this actually consumed, so the app's remaining-allowance
     # figure stays honest rather than silently ignoring fixture captures.

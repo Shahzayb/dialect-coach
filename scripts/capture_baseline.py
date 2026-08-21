@@ -135,7 +135,8 @@ def main() -> int:
         return 1
 
     with audio_utils.temp_wav(wav_bytes) as temp_path:
-        payloads, _, attempts = speech_analyzer.recognise(temp_path, text, MODE)
+        recognition = speech_analyzer.recognise(temp_path, text, MODE)
+    payloads, attempts = recognition.payloads, recognition.attempts
 
     # Marked, so the Progress tab can never plot the synthesiser's reading as the user's own.
     # Recorded rather than skipped because this really was billable seconds and the meter

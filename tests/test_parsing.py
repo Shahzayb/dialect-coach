@@ -354,10 +354,11 @@ def test_continuous_completeness_is_locally_recomputed(
 
 def test_offline_mode_replays_the_fixture_without_a_network_call(reference: str) -> None:
     """conftest forces OFFLINE_MODE, and no credentials are set — this must still work."""
-    payloads, offline, attempts = sa.recognise("/nonexistent.wav", reference, Mode.DRILL)
-    assert offline is True
-    assert attempts == 0, "a fixture replay never reaches Azure, so it charges nothing"
-    assert payloads and "NBest" in payloads[0]
+    result = sa.recognise("/nonexistent.wav", reference, Mode.DRILL)
+    assert result.offline is True
+    assert result.attempts == 0, "a fixture replay never reaches Azure, so it charges nothing"
+    assert result.payloads and "NBest" in result.payloads[0]
+    assert result.scored_against == reference
 
 
 def test_offline_analyse_produces_a_complete_result(reference: str) -> None:
@@ -369,22 +370,21 @@ def test_offline_analyse_produces_a_complete_result(reference: str) -> None:
 
 
 def test_offline_paragraph_replays_the_continuous_fixture(reference: str) -> None:
-    payloads, _, _ = sa.recognise("/nonexistent.wav", reference, Mode.PARAGRAPH)
-    assert isinstance(payloads, list) and payloads
+    result = sa.recognise("/nonexistent.wav", reference, Mode.PARAGRAPH)
+    assert isinstance(result.payloads, list) and result.payloads
 
 
-def test_unscripted_mode_is_refused_rather_than_half_working(
-    monkeypatch: pytest.MonkeyPatch, reference: str
-) -> None:
-    """Mode C needs Azure content assessment, which is a separate chunk.
+def test_offline_unscripted_is_scored_against_the_transcript_not_the_prompt() -> None:
+    """Mode C has no reference text, so `scored_against` is what Azure heard, not what was typed.
 
-    Offline replays the drill fixture for any mode, so the guard has to be checked with
-    OFFLINE_MODE off. No network call happens: `recognise` raises on the mode before it
-    touches the SDK or the credentials.
+    Every downstream surface reads that field to say what the phoneme diagnosis was measured
+    against, and in this mode the caller never supplied it.
     """
-    monkeypatch.setenv("OFFLINE_MODE", "false")
-    with pytest.raises(sa.AssessmentError, match="not implemented"):
-        sa.recognise("/nonexistent.wav", reference, Mode.UNSCRIPTED)
+    result = sa.recognise("/nonexistent.wav", "Explain a technical decision", Mode.UNSCRIPTED)
+    assert result.offline is True
+    assert result.scored_against
+    assert "Explain a technical decision" not in result.scored_against
+    assert result.scored_against == sa._joined_display(result.payloads)
 
 
 def test_quota_exhaustion_is_a_type_not_a_marker_string() -> None:
