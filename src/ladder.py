@@ -357,6 +357,15 @@ class LadderError(ValueError):
 PAD_S = 0.02
 
 
+def _framerate(wav_bytes: bytes) -> int:
+    """The recording's sample rate, read from its own header rather than assumed."""
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as source:
+            return int(source.getframerate())
+    except (wave.Error, EOFError) as exc:
+        raise LadderError("That recording could not be read as WAV audio.") from exc
+
+
 def slice_wav(wav_bytes: bytes, start_s: float, end_s: float, *, pad_s: float = PAD_S) -> bytes:
     """The audio between `start_s` and `end_s`, as its own WAV.
 
@@ -396,9 +405,41 @@ def slice_wav(wav_bytes: bytes, start_s: float, end_s: float, *, pad_s: float = 
     return out.getvalue()
 
 
+def cut_with_offset(wav_bytes: bytes, span: Span, *, pad_s: float = PAD_S) -> tuple[bytes, float]:
+    """The span's audio, and where its t=0 sits on the full recording's clock.
+
+    The offset is frame-exact rather than `span.start_s - pad_s`: `slice_wav` truncates to a
+    whole frame, and a correction rebased on the un-truncated number would sit up to one frame
+    out. Sub-millisecond, and exactly the kind of drift that is invisible until a formant shift
+    lands on the wrong side of a boundary — so the arithmetic has one definition and both the
+    cut and the rebase read it from here.
+    """
+    rate = _framerate(wav_bytes)
+    offset = max(0, int((span.start_s - pad_s) * rate)) / rate
+    return slice_wav(wav_bytes, span.start_s, span.end_s, pad_s=pad_s), offset
+
+
 def cut(wav_bytes: bytes, span: Span, *, pad_s: float = PAD_S) -> bytes:
     """`slice_wav` for a span. The form callers actually want."""
     return slice_wav(wav_bytes, span.start_s, span.end_s, pad_s=pad_s)
+
+
+def rebase(
+    times: Sequence[tuple[float, ...]], offset: float, duration: float
+) -> list[tuple[float, ...]]:
+    """Shift times from the full recording's clock onto a cut span's, dropping what falls out.
+
+    Every correction in `accent_resynth` takes times on the clock of the audio it is handed.
+    Feeding it full-recording times alongside a one-second cut would place every point past
+    the end, which reads as "the model contour does not overlap this recording" rather than as
+    the arithmetic error it is.
+    """
+    moved: list[tuple[float, ...]] = []
+    for row in times:
+        shifted = (*(value - offset for value in row[:-1]), row[-1])
+        if all(0.0 <= value <= duration for value in shifted[:-1]):
+            moved.append(shifted)
+    return moved
 
 
 # --- Arrival bands ------------------------------------------------------------------------------
