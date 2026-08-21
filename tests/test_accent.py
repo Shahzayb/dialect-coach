@@ -483,3 +483,91 @@ def test_the_charts_refuse_before_a_baseline_exists(
         block.value for block in app.markdown
     )
     assert "calibration passage" in text or "No stored baseline" in text
+
+
+# --- Which reading is on screen ------------------------------------------------------------------
+# The 2026-08-20 defect: the tab drew attempt 12's acoustics under attempt 10's label. The cause
+# is not "the render where `options` grows" — it is that `st.rerun()` builds `RerunData` with no
+# widget states (`streamlit/commands/execution_control.py`), a `RerunException` is not a premature
+# stop (`scriptrunner/exec_code.py`), and any rerun raised in Today or Practice ends the script
+# before the Accent tab renders. The selector is then stale, its stored value is deleted, and the
+# next full run re-registers it from scratch — landing on positional index 0, the newest reading,
+# while the browser still paints the label it already had.
+
+
+def _seed_reading(measurement, *, when: str, sha: str) -> int:
+    """One more measured reading, stored the way a finished assessment stores it."""
+    import os
+
+    conn = db.connect(os.environ["DB_PATH"])
+    attempt_id = db.record_attempt(
+        conn,
+        mode=Mode.PARAGRAPH,
+        reference_text=progress_view.BENCHMARK_PASSAGE,
+        recognised_text=progress_view.BENCHMARK_PASSAGE,
+        audio_seconds=90.0,
+        audio_sha256=sha,
+        overall_scores={"snr_db_min": 30.0},
+        azure_raw={},
+        created_at=when,
+    )
+    db.tag_attempt(conn, attempt_id, "read")
+    db.record_vowel_measurements(conn, attempt_id, vowel_measure.token_rows(measurement))
+    conn.close()
+    return attempt_id
+
+
+def _reading_picker(app: AppTest):
+    return next(box for box in app.selectbox if box.label == "Which reading?")
+
+
+def _calibrated(calibration_pair, monkeypatch: pytest.MonkeyPatch) -> tuple[AppTest, int, int]:
+    monkeypatch.setenv("GA_REFERENCE_SET", "men")
+    older, newer = _seed_calibration(calibration_pair, minutes_apart=15)
+    app = _app()
+    [b for b in app.button if "Set the baseline" in b.label][0].click().run()
+    assert not app.exception
+    return app, older, newer
+
+
+def test_a_rerun_that_never_reaches_the_accent_tab_keeps_the_chosen_reading(
+    calibration_pair, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The selection must survive a rerun raised before this tab is reached.
+
+    `🎧 Shadow this passage` calls `st.rerun()` from the Today tab, which is the same shape as
+    the assessment poll that was running when this was found live: the script ends, the Accent
+    tab never registers its selector, and a server-initiated rerun carries nothing back from the
+    browser to restore it with.
+    """
+    app, older, _newer = _calibrated(calibration_pair, monkeypatch)
+
+    _reading_picker(app).set_value(older).run()
+    assert _reading_picker(app).value == older, "the picker would not take an explicit choice"
+
+    next(b for b in app.button if "Shadow this passage" in b.label).click().run()
+    assert not app.exception
+    assert _reading_picker(app).value == older, (
+        "a rerun raised before the Accent tab silently moved the selection"
+    )
+
+
+def test_a_newly_stored_reading_does_not_steal_the_selection(
+    calibration_pair, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live symptom: a new attempt lands and the charts quietly switch to it."""
+    app, older, _newer = _calibrated(calibration_pair, monkeypatch)
+
+    _reading_picker(app).set_value(older).run()
+    latest = _seed_reading(calibration_pair[0], when="2026-07-01T09:00:00Z", sha="later-read")
+
+    next(b for b in app.button if "Shadow this passage" in b.label).click().run()
+    assert not app.exception
+    picker = _reading_picker(app)
+    assert latest in picker.options or any(f"#{latest}" in option for option in picker.options), (
+        "the new reading never reached the picker, so this proves nothing"
+    )
+    assert picker.value == older, "the newest reading took the selection without being chosen"
+    assert any(f"Plotting #{older}" in c.value for c in app.caption), (
+        "the page must state which reading it drew, sourced from the measurement it loaded"
+    )

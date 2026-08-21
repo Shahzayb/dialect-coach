@@ -121,14 +121,34 @@ DELIVERY_LABELS: dict[str, str] = {
     "Monotone": "Flat intonation across the span",
 }
 
+# The Accent chart picker's remembered reading. A PLAIN session key, deliberately not the
+# selectbox's own key: Streamlit deletes a widget's value when the widget is not registered on
+# a pass, and any `st.rerun()` in an earlier tab ends the script before the Accent tab renders.
+# See `render_accent_charts` for the whole mechanism.
+ACCENT_CHART_CHOICE = "accent_chart_attempt_id"
+
+# What a badge's number counts. Not a bool, so the row reads as what it is.
+COUNT_WORDS = "words"
+COUNT_STRETCHES = "stretches"
+
 # Short labels + colours for the headline error-count badges (#10/#12) — distinct from
 # DELIVERY_LABELS' longer prose, which explains a fault rather than naming it.
-ERROR_BADGES: list[tuple[str, str | None, str]] = [
-    # (badge label, delivery_summary() key or None for the mispronunciation count, colour)
-    ("Mispronunciations", None, "#c07f16"),
-    ("Unexpected break", "UnexpectedBreak", "#d6455d"),
-    ("Missing break", "MissingBreak", "#8a8a8a"),
-    ("Monotone", "Monotone", "#6a4fa0"),
+#
+# The unit is part of the badge, because the row used to count words for all four and two of
+# those counts do not mean the same thing. "2 Mispronunciations" is two independently wrong
+# words; "28 Monotone" was ONE flat stretch spanning 28 words — which is exactly how the
+# Delivery panel below words the same fault. Read together the row implied the monotone problem
+# was fourteen times the articulation problem, and because prose comes in spans the monotone
+# badge is structurally always the largest and least informative number on the row.
+#
+# A break stays a word count on purpose: an unexpected or missing break is a point event
+# located at a word, not a span, so two flagged words are two breaks.
+ERROR_BADGES: list[tuple[str, str | None, str, str]] = [
+    # (badge label, delivery_summary() key or None for the mispronunciation count, colour, unit)
+    ("Mispronunciations", None, "#c07f16", COUNT_WORDS),
+    ("Unexpected break", "UnexpectedBreak", "#d6455d", COUNT_WORDS),
+    ("Missing break", "MissingBreak", "#8a8a8a", COUNT_WORDS),
+    ("Monotone", "Monotone", "#6a4fa0", COUNT_STRETCHES),
 ]
 
 # Chosen to load the sounds most likely to be substituted by Urdu/Punjabi L1 speakers
@@ -471,7 +491,16 @@ def diff_html(pairs: list[tuple[str, str]]) -> str:
 
 
 def weakest_phoneme(word: dict[str, Any]) -> str:
-    """One-line summary of a word's worst sound, for the card header."""
+    """One-line summary of a word's worst sound, for the card header.
+
+    Silent on a word the speaker stumbled over. When a word is said twice the aligner reads
+    across the repeat — the /eɪ/ ending the first "Wednes-day" pairs against the /w/ onset of
+    the second — and describing that as a substitution is advice to drill a sound the speaker
+    never produced, on what will usually be the lowest-scoring word of the attempt. The
+    stumble itself is real and the card still says so; see `render_word_card`.
+    """
+    if word.get("disfluency") == speech_analyzer.REPETITION:
+        return ""
     pairs = [
         (expected, produced, score)
         for expected, produced, score in speech_analyzer.phoneme_pairs(word)
@@ -1053,18 +1082,53 @@ def render_scores(assessment: speech_analyzer.Assessment) -> None:
     )
 
 
+def error_count_badges(assessment: speech_analyzer.Assessment) -> list[tuple[int, str]]:
+    """The headline row as (count, label) pairs. Streamlit-free, so the units are assertable.
+
+    A stretch badge says `1 · Monotone stretch (28 words)`, because that is the true thing: one
+    flat passage spanning 28 words, worded the way the Delivery panel below already words it.
+    The word count stays in the label rather than becoming a second badge — this is a headline
+    count row, not a second copy of the Delivery panel's detail.
+
+    The stretch count is `delivery_faults`' own `runs`, never recomputed here, so the row and
+    the panel below it cannot disagree about how many stretches there were.
+    """
+    mispronounced = speech_analyzer.mispronounced_words(assessment.words)
+    summary = speech_analyzer.delivery_summary(assessment.words)
+    runs = {
+        str(fault["fault"]): fault["runs"]
+        for fault in speech_analyzer.delivery_faults(assessment.words)
+    }
+
+    badges: list[tuple[int, str]] = []
+    for label, fault_key, _colour, unit in ERROR_BADGES:
+        if fault_key is None:
+            badges.append((len(mispronounced), label))
+            continue
+        words = summary.get(fault_key, [])
+        if unit != COUNT_STRETCHES:
+            badges.append((len(words), label))
+            continue
+        stretches = runs.get(fault_key, [])
+        if not stretches:
+            badges.append((0, f"{label} stretches"))
+            continue
+        noun = "stretch" if len(stretches) == 1 else "stretches"
+        plural = "word" if len(words) == 1 else "words"
+        badges.append((len(stretches), f"{label} {noun} ({len(words)} {plural})"))
+    return badges
+
+
 def render_error_counts(assessment: speech_analyzer.Assessment) -> None:
     """Headline counts for #10/#12: Mispronunciations, Unexpected break, Missing break,
     Monotone. Counts only — which words carry each fault is already shown by the flagged-
     word cards (mispronunciations) and `render_delivery` below (the other three), so this
     is not a second copy of that detail, just the number every issue image puts up top.
     """
-    mispronounced = speech_analyzer.mispronounced_words(assessment.words)
-    summary = speech_analyzer.delivery_summary(assessment.words)
-
     cells = []
-    for label, fault_key, colour in ERROR_BADGES:
-        count = len(mispronounced) if fault_key is None else len(summary.get(fault_key, []))
+    for (count, label), (_label, _fault_key, colour, _unit) in zip(
+        error_count_badges(assessment), ERROR_BADGES
+    ):
         cells.append(
             '<div style="display:flex;align-items:center;gap:0.4rem;margin:0.2rem 1.3rem '
             '0.2rem 0;">'
@@ -1443,9 +1507,19 @@ def render_word_card(conn: sqlite3.Connection, word: dict[str, Any], index: int)
 
         # The headline sound, before the full phoneme list. A long word can carry a dozen
         # phonemes, and the one that actually failed should not need hunting for.
-        summary = weakest_phoneme(word)
-        if summary:
-            st.markdown(f"**{summary}**")
+        if word.get("disfluency") == speech_analyzer.REPETITION:
+            # Said twice. The score is the stumble, not a sound — and the diff above already
+            # showed the repeat, so the two surfaces now tell the same story about one word.
+            st.markdown("**You said this word twice — a stumble, not a sound to drill.**")
+            st.caption(
+                "Azure aligned across the repeat, so the phonemes below pair the end of one "
+                "attempt against the start of the next. That is why the score is so low; it "
+                "is not a substitution."
+            )
+        else:
+            summary = weakest_phoneme(word)
+            if summary:
+                st.markdown(f"**{summary}**")
 
         notes = []
         if error_type != "None":
@@ -2040,16 +2114,52 @@ def render_accent_charts(conn: sqlite3.Connection) -> None:
         )
         for row in attempts
     }
-    attempt_id = st.selectbox(
-        "Which reading?",
-        options=list(labels),
-        format_func=lambda key: labels[key],
-        key="accent_chart_attempt",
+    # `index=` is not optional here, and the reason is worth keeping. Any `st.rerun()` raised in
+    # the Today or Practice tab ends the script before this tab is reached, so the selector is
+    # not registered on that pass and Streamlit deletes its stored value as stale
+    # (`session_state._remove_stale_widgets`). A server-initiated rerun also carries no widget
+    # states back from the browser (`st.rerun` builds `RerunData()` with none), so nothing
+    # restores it: the next full run re-registers the widget from scratch and a positional
+    # default lands on index 0 — whichever reading happens to be newest. The browser is never
+    # told, because a first registration sets neither `value_changed` nor `value_needs_reset`,
+    # so it keeps painting the label it already had. That is the 2026-08-20 mismatch, and it
+    # fired on every early-terminated rerun, not only the ones where a new attempt landed.
+    #
+    # The remembered id lives under a PLAIN session key, never a widget key: stale-widget
+    # cleanup only strips element ids, so a plain key is the one thing here that survives. The
+    # default is then resolved by identity rather than position, exactly as the shadowing
+    # passage picker already does, and the chosen reading stays chosen — a new reading appears
+    # at the top of the list without taking the selection.
+    options = list(labels)
+    remembered = st.session_state.get(ACCENT_CHART_CHOICE)
+    attempt_id = int(
+        st.selectbox(
+            "Which reading?",
+            options=options,
+            index=options.index(remembered) if remembered in labels else 0,
+            format_func=lambda key: labels[key],
+            key="accent_chart_attempt",
+        )
     )
-    measurement = measurement_for(conn, int(attempt_id))
+    st.session_state[ACCENT_CHART_CHOICE] = attempt_id
+
+    measurement = measurement_for(conn, attempt_id)
     if measurement is None:
         st.caption("That attempt's tokens could not be read back.")
         return
+
+    chosen = next(row for row in attempts if int(row["id"]) == attempt_id)
+    mismatch = vowel_measure.label_matches_measurement(int(chosen["accepted"]), measurement)
+    if mismatch:
+        st.error(mismatch, icon="🏷️")
+        return
+    # Said from the measurement that was actually loaded, not from the widget. If the selector
+    # ever lies again, this line and the label above it disagree in plain sight rather than
+    # leaving the reader to notice that n=2 cannot come out of a 138-token read.
+    st.caption(
+        f"Plotting #{attempt_id} · {len(measurement.accepted)} accepted tokens · "
+        f"{str(chosen['created_at'])[:16].replace('T', ' ')}"
+    )
 
     gate = vowel_measure.plot_gate(
         measurement,
@@ -2213,7 +2323,8 @@ def render_pitch_overlay(
         f"low voice and a synthetic one only overlay meaningfully that way, and what is left "
         f"on the chart is the SHAPE. Aligned on word starts, not by time-warping: a warp that "
         f"minimises distance would hide the timing errors this page also measures. "
-        f"{len(model_tracks)} model voice(s).",
+        f"{len(model_tracks)} model "
+        f"{'voice' if len(model_tracks) == 1 else 'voices'}.",
         accent_charts.pitch_chart(frame, boundaries) if not frame.empty else None,
         rows,
         "No pitch could be tracked in this recording.",

@@ -127,6 +127,38 @@ def test_matching_styles_carry_no_warning(drill_measurement, inventory_normalise
     assert gate.style_warning == ""
 
 
+# --- Which reading is being drawn ---------------------------------------------------------------
+# The 2026-08-20 mismatch left exactly one tell on screen: a label reading "138 tokens" above a
+# table reporting n=2 per category, which a 138-token read cannot produce. Checked rather than
+# left to be noticed, because both halves of that screen looked plausible on their own.
+
+
+def test_a_label_that_disagrees_with_the_loaded_tokens_refuses_the_draw(
+    drill_measurement, inventory_measurement
+) -> None:
+    """A three-word drill charted under a full inventory's label is not a chart to draw."""
+    labelled = len(inventory_measurement.accepted)
+    reason = vowel_measure.label_matches_measurement(labelled, drill_measurement)
+    assert reason, "a label from one reading over another's tokens must refuse"
+    assert str(labelled) in reason
+    assert str(len(drill_measurement.accepted)) in reason
+    assert labelled != len(drill_measurement.accepted), "the fixtures make this vacuous"
+
+
+def test_the_matching_case_draws(drill_measurement) -> None:
+    assert (
+        vowel_measure.label_matches_measurement(len(drill_measurement.accepted), drill_measurement)
+        == ""
+    )
+
+
+def test_a_reading_whose_tokens_were_all_refused_is_still_caught(inventory_normaliser) -> None:
+    """Zero loaded against a label claiming any tokens at all is the same disagreement."""
+    empty = vowel_measure.Measurement(tokens=(), ceiling_hz=5000.0, snr_db_min=30.0, style="read")
+    assert vowel_measure.label_matches_measurement(12, empty)
+    assert vowel_measure.label_matches_measurement(0, empty) == ""
+
+
 # --- Slicing the findings ---------------------------------------------------------------------
 
 
