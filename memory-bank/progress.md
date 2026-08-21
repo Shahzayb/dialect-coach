@@ -61,8 +61,7 @@ plus Completeness, then Accuracy/Fluency/Prosody as banded bars, against Azure's
 0-59/60-79/80-89/90-100 convention. `render_error_counts` adds a headline count row
 (Mispronunciations, Unexpected break, Missing break, Monotone). Hovering a word shows its
 score plus its phoneme symbols and their scores as two aligned rows. Content score
-(vocabulary/grammar/topic) is out of scope — scripted assessment never returns it; Mode C
-(unscripted) is not built.
+(vocabulary/grammar/topic) arrives with Mode C, from Gemini rather than Azure — see below.
 
 **Progress view.** The Progress tab charts pronunciation, accuracy, fluency and prosody
 across every stored attempt, plus recurring substitutions and flagged words. A fixed
@@ -195,6 +194,73 @@ phoneme payload, both coaches answer with a bridging phrase (a sentence forcing 
 varied consonant contexts, never a word list), and one click fills the practice textarea while a
 second promotes it to the queue as a `vowel` target with its evidence.
 
+**Mode C — unscripted speech, two-pass diagnosis, and content scores (v0.12.0).** The third
+recording mode, and the only one that measures the register this project is about: generating
+language and monitoring pronunciation at the same time. Pick a prompt — an interview answer, a
+call, explaining something technical — talk for three or four minutes, and get accuracy, fluency
+and prosody down to the phoneme, plus vocabulary, grammar and topic.
+
+- **It sends the audio twice, on purpose.** Unscripted assessment (an empty `referenceText`)
+  runs on a weaker speech-to-text model than standard Azure STT, so this follows Microsoft's own
+  recommendation: transcribe with standard STT first, then run a *scripted* assessment against
+  that transcript. A phoneme diagnosis against a wrong transcript is worse than no diagnosis,
+  because it confidently blames the wrong sounds. `UNSCRIPTED_TWO_PASS` turns it off; the surface
+  then says out loud that the transcript came from the weaker recogniser.
+- **The transcript is shown above everything derived from it.** Every sound named below it was
+  scored against those words, and the reader is the only one who can notice a wrong one.
+- **No completeness score, ever.** There is nothing to be complete against, and the real capture
+  proves the suppression is load-bearing rather than cosmetic: pass 2 IS a scripted assessment,
+  so Azure does return a `CompletenessScore` — computed against the machine's own transcript, so
+  ~100 by construction. It is a number measuring the recogniser agreeing with itself.
+- **No miscue diff either**, for the same reason: a diff against the machine's transcript reports
+  one recogniser disagreeing with another as a speaker error. Repetitions are still caught, from
+  adjacency alone — free speech is where stumbles actually happen.
+- **Content scores come from Gemini, not Azure, and every surface says so.** Vocabulary, grammar
+  and topic on Azure's own 0-59/60-79/80-89/90-100 banding, with the headline stated as the plain
+  mean of the three because Azure never published its weighting. Behind a button, like the Gemini
+  coach, so the spend stays deliberate; the verdict is stored so re-rendering never means
+  re-asking. Every unavailability renders **with its reason** — offline, no key, 429, a transcript
+  under Azure's own 50-word / 3-sentence floor — never a blank and never a scripted number
+  standing in.
+
+**Verified live on 2026-08-21, and the budget claim came out exact.** A 35.7 s synthesised
+monologue through the real two-pass flow: `passes_for(Mode C)` returned 2 and the pre-flight
+priced **71 s before the first pass was sent**; the run reported `attempts=2`; the meter moved
+0 → 71 s, **exactly 2.00× the clip**. Pre-flight and post-hoc agree. Scores came back
+93.2/95.2/92.6/89.7 with `completeness: None`, and Gemini scored the content 88 vocabulary /
+85 grammar / 95 topic, quoting the speaker's own words in its note. `tests/fixtures/
+sample_azure_unscripted.json` is that capture, verbatim.
+
+**Read and spontaneous speech are kept apart, structurally.** Spontaneous speech is not read
+speech measured under harder conditions — it is a systematically different population: speakers
+hyperarticulate when reading and reduce far more when generating language, so vowels centralise,
+durations shorten and unstressed syllables collapse further toward schwa. Every one of those is
+something v0.10.0 measures. The `read`/`spontaneous` tag has been written on every attempt since
+then; this is what made it load-bearing.
+
+- **One current baseline per style.** `save_baseline` supersedes only within its own style, so a
+  spontaneous calibration no longer silently retires the read baseline every Mode B reading is
+  normalised against. `current_baseline(conn, style=...)` requires the style and never guesses.
+- **The LPC ceiling stays style-agnostic** (`any_current_baseline`): it tracks vocal tract length,
+  not register, and a second sweep would produce formants incomparable with everything stored.
+- **`plot_gate` refuses a style mismatch rather than warning above the chart.** It used to draw
+  the numbers with a caveat over them, which is not enough — the numbers still looked comparable
+  against last month's, and a caveat is the first thing a reader skips.
+- **A spontaneous baseline is built from the same PROMPT twice**, ≥ `CALIBRATION_GAP_MINUTES`
+  apart. The content is not identical, so the floor carries content variation on top of
+  measurement noise and comes out **wider than the read floor** — an upper bound, which is the
+  conservative direction: it can only refuse to call something progress until the change is
+  bigger. The surface says so.
+- **Mode-aware per-vowel token floor.** A drill token at n=1 is a deliberate probe of a sound the
+  speaker chose to work on; a lone free-speech token is whichever vowel the sentence happened to
+  reach for. Read speech keeps `minimum=1` against a stored baseline (that is what makes the
+  measure-drill-remeasure loop possible); spontaneous readings are held to
+  `MIN_TOKENS_PER_CATEGORY`, and a category below it is refused rather than drawn as a lonely
+  confident dot.
+- **The four-column table carries the style beside the token count** — `873 Hz (n=6, read)`. The
+  one addition the v0.10.0 contract takes, because in this mode the number cannot be interpreted
+  without knowing which population produced it.
+
 **The four defects the 2026-08-20 manual session found are fixed, and one of them was
 diagnosed wrong when it was filed.** Each carries a test that fails against the bug it covers.
 Shadowing (the fifth) is untouched and still open.
@@ -280,6 +346,16 @@ from this side of the microphone.
   and `fallback_coach` wrote a coherent drill quoting the real span. The first live capture
   was attempt 9. Both were second-or-later reads in a sitting.
 
+- **No human has spoken into Mode C yet.** The two-pass flow, the meter arithmetic, the content
+  scoring and the fixture were all verified against a **synthesised** monologue on 2026-08-21 —
+  a neural voice pushed back through the pipeline, which is the same trick `model_reference`
+  uses. That proves the plumbing, the billing and the parsing. It does not prove the thing Mode C
+  exists to measure: a synthesiser does not hesitate, does not reduce under cognitive load and
+  does not centralise its vowels while deciding what to say next. The register confound is
+  precisely what a synthetic voice cannot exercise.
+- **No spontaneous baseline exists**, so every Mode C accent surface currently refuses. Building
+  one needs the same prompt recorded twice, at least `CALIBRATION_GAP_MINUTES` apart — which is
+  partly what the first real Mode C session is for.
 - **The one-click drill has not been used by a human.** The charts and the resynthesis
   players now have (see below); the drill is still proven only against synthetic audio and an
   `AppTest` run.
@@ -320,8 +396,32 @@ is unreachable from the running app. `app.py`'s `if entry.attempt_id:` treats id
 - **Reading `word["ErrorType"]` from the Azure payload.** It sits inside the word's
   `PronunciationAssessment`, so the top-level read silently returns nothing. The docs' flat
   REST example is what misleads here.
-- **`enable_content_assessment_with_topic`** is not in SDK 1.51.1 despite the master plan
-  citing it for Mode C. Do not plan Mode C's content scoring around it without checking first.
+- **Azure's content assessment, by any route.** `enable_content_assessment_with_topic` is not in
+  SDK 1.51.1 — and the reason is not that it was renamed. **Microsoft retired content assessment
+  at Speech SDK 1.46.0** and this project pins 1.51.1. Established four ways on 2026-08-21, none
+  of them from memory:
+  - `dir(PronunciationAssessmentConfig)` in the built image returns exactly `apply_to`,
+    `enable_prosody_assessment`, `nbest_phoneme_count`, `phoneme_alphabet`, `reference_text`,
+    `to_json`. `PronunciationAssessmentResult` exposes no vocabulary/grammar/topic;
+    `PropertyId` carries no content entry.
+  - A string scan of the native `.so` files finds only `referenceText`, `gradingSystem`,
+    `granularity`, `enableMiscue`, `enableProsodyAssessment`, `phonemeAlphabet`,
+    `nbestPhonemeCount` — no `contentAssessment`, no `contentTopic`, at all.
+  - Microsoft Learn says so in as many words: *"Content assessment (preview) is retired from
+    Speech SDK versions 1.46.0 and later."* Their documented replacement is a chat model given a
+    grading rubric that returns `{"vocabulary","grammar","topic"}` 0-100.
+  - **And the JSON route was tried live, once, and answered no.** The config DOES still carry
+    unknown keys — `PronunciationAssessmentConfig(json_string=...)` round-trips
+    `enableContentAssessment` / `contentTopic` back out of `to_json()` untouched, so the client
+    can still send them. A real unscripted call on 2026-08-21 sent exactly
+    `{"referenceText":"", ..., "enableContentAssessment":true, "contentTopic":"my hobby"}` and
+    came back with `PronunciationAssessment` keys `AccuracyScore, CompletenessScore,
+    FluencyScore, PronScore, ProsodyScore` and nothing else. **The service ignores them.**
+  The flag that sends them (`UNSCRIPTED_CONTENT_PROBE`) and the script that uses it
+  (`scripts/content_probe.py`) are kept so the question can be re-asked cheaply if Azure ever
+  changes its mind, and `speech_analyzer.azure_content_scores` still reads the fields if they
+  ever appear. Content scores in this project come from Gemini against Microsoft's own
+  published rubric, and every surface says so rather than presenting them as Azure's.
 - **Planning v0.11.0 against a typed `parselmouth.Manipulation` class.** It does not exist —
   the bindings are Sound, Pitch, Formant, Intensity, Spectrum. PSOLA resynthesis, PitchTier
   replacement and DurationTier time-scaling are reachable only through the untyped
