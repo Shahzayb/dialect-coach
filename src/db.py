@@ -136,6 +136,29 @@ CREATE TABLE IF NOT EXISTS attempt_tags (
 
 CREATE INDEX IF NOT EXISTS idx_attempt_tags_tag ON attempt_tags(tag);
 
+-- Vocabulary/grammar/topic for one unscripted attempt, or the stated reason there are none.
+--
+-- **Its own table, not a column on `attempts`, for exactly the reason written above
+-- `attempt_tags`**: that table is created with CREATE TABLE IF NOT EXISTS and `_migrate` has no
+-- upgrade path, so a new column would need a real ALTER TABLE. Additive here, so an existing
+-- database gains it on the next connect() and `user_version` never moves.
+--
+-- `source` is not decoration and is never derivable later. These numbers do not come from Azure
+-- — content assessment was retired from the Speech SDK at 1.46.0 and this project pins 1.51.1 —
+-- so they are Gemini's reading of the transcript against Microsoft's own published rubric, and
+-- a stored score whose provenance was forgotten is a score that will eventually be presented as
+-- Azure's. `unavailable` rows are stored too, with their reason: "we asked and could not get
+-- one, because X" is a fact about the attempt, and re-rendering it must not mean re-asking.
+CREATE TABLE IF NOT EXISTS attempt_content_scores (
+  attempt_id  INTEGER PRIMARY KEY REFERENCES attempts(id) ON DELETE CASCADE,
+  created_at  TEXT    NOT NULL,
+  source      TEXT    NOT NULL,   -- 'gemini' | 'azure' | 'unavailable'
+  vocabulary  REAL,               -- NULL when unavailable; never 0.0 standing in for absent
+  grammar     REAL,
+  topic       REAL,
+  payload     TEXT    NOT NULL    -- the scores plus their notes and reason, verbatim
+);
+
 -- Where an attempt's recording is on disk. The bytes are NOT in the database: a WAV per
 -- attempt would grow the file past the point where the WAL and the verbatim payloads are
 -- comfortable, and a file on disk is what parselmouth and ffmpeg both want anyway.
@@ -394,6 +417,49 @@ def attach_coaching(
         ),
     )
     conn.commit()
+
+
+def attach_content_score(
+    conn: sqlite3.Connection,
+    attempt_id: int,
+    *,
+    scores: Any,
+    created_at: str | None = None,
+) -> None:
+    """Store one attempt's content scores, or the stated reason it has none.
+
+    `scores` is a `content_score.Scores`; it is passed structurally rather than imported so
+    `db` keeps knowing nothing about the coaching layer. Replaces on re-score — an attempt has
+    one content verdict, and a second one supersedes rather than accumulates.
+    """
+    conn.execute(
+        """
+        INSERT OR REPLACE INTO attempt_content_scores (
+            attempt_id, created_at, source, vocabulary, grammar, topic, payload
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            int(attempt_id),
+            created_at or utc_now_iso(),
+            scores.source,
+            scores.vocabulary,
+            scores.grammar,
+            scores.topic,
+            json.dumps(scores.to_json(), ensure_ascii=False),
+        ),
+    )
+    conn.commit()
+
+
+def content_score_for(conn: sqlite3.Connection, attempt_id: int) -> dict[str, Any] | None:
+    """The stored content verdict for one attempt, as the payload it was written from."""
+    row = conn.execute(
+        "SELECT payload FROM attempt_content_scores WHERE attempt_id = ?", (int(attempt_id),)
+    ).fetchone()
+    if row is None:
+        return None
+    loaded: dict[str, Any] = json.loads(row["payload"])
+    return loaded
 
 
 def record_tts_usage(
