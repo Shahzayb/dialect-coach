@@ -90,8 +90,10 @@ def test_a_drill_actually_produces_rows_through_the_gate(
         minimum=gate.minimum_tokens,
     )
     assert rows, "a drill measured against a stored baseline produced no findings at all"
-    # Thin evidence must look thin: every user cell built from a position carries its count.
-    assert any("(n=1)" in row.user for row in rows)
+    # Thin evidence must look thin: every user cell built from a position carries its count,
+    # and — since v0.12.0 — the speech style beside it, because a number from read speech and
+    # the same number from spontaneous speech are not comparable.
+    assert any("(n=1, read)" in row.user for row in rows)
 
 
 def test_a_measurement_with_nothing_usable_is_refused_even_with_a_baseline(
@@ -103,10 +105,16 @@ def test_a_measurement_with_nothing_usable_is_refused_even_with_a_baseline(
     assert "could be measured" in gate.reason
 
 
-def test_a_style_mismatch_is_a_caveat_and_not_a_refusal(
+def test_a_style_mismatch_is_a_refusal_and_not_a_caveat(
     drill_measurement, inventory_normaliser
 ) -> None:
-    """A read-speech baseline normalises read speech. Silently mixing populations is the bug."""
+    """A read-speech baseline normalises read speech, and nothing else.
+
+    This used to draw the chart with a warning above it. That was not enough: the numbers were
+    still rendered and still looked comparable against last month's, and a caveat is the first
+    thing a reader skips. Spontaneous speech is normalised against a spontaneous baseline or it
+    is not normalised at all.
+    """
     spontaneous = vowel_measure.Measurement(
         tokens=drill_measurement.tokens,
         ceiling_hz=drill_measurement.ceiling_hz,
@@ -116,15 +124,32 @@ def test_a_style_mismatch_is_a_caveat_and_not_a_refusal(
     gate = vowel_measure.plot_gate(
         spontaneous, baseline_normaliser=inventory_normaliser, baseline_style="read"
     )
-    assert gate.ok, "a style mismatch must not refuse the plot"
-    assert "spontaneous" in gate.style_warning and "read" in gate.style_warning
+    assert not gate.ok, "a read baseline must not be borrowed for spontaneous speech"
+    assert gate.normaliser is None, "a refusal must not hand back a normaliser to use anyway"
+    assert "spontaneous" in gate.reason and "read" in gate.reason
 
 
-def test_matching_styles_carry_no_warning(drill_measurement, inventory_normaliser) -> None:
+def test_matching_styles_are_drawn(drill_measurement, inventory_normaliser) -> None:
     gate = vowel_measure.plot_gate(
         drill_measurement, baseline_normaliser=inventory_normaliser, baseline_style="read"
     )
-    assert gate.style_warning == ""
+    assert gate.ok and gate.normaliser is inventory_normaliser
+
+
+def test_free_speech_is_held_to_a_higher_token_floor_than_a_drill() -> None:
+    """A drill token at n=1 is a deliberate probe; a free-speech token is an accident.
+
+    Free speech samples the vowel space wherever the sentence went, so token counts per category
+    come out wildly uneven and some categories get none. Plotting a category on one accidental
+    token is a lonely confident dot — worse than a gap, because a gap is visibly a gap.
+    """
+    assert vowel_measure.minimum_tokens_for(vowel_measure.STYLE_READ, 1) == 1
+    assert (
+        vowel_measure.minimum_tokens_for(vowel_measure.STYLE_SPONTANEOUS, 1)
+        == vowel_measure.MIN_TOKENS_PER_CATEGORY
+    )
+    # Never lowers a floor the gate already raised.
+    assert vowel_measure.minimum_tokens_for(vowel_measure.STYLE_READ, 3) == 3
 
 
 # --- Which reading is being drawn ---------------------------------------------------------------

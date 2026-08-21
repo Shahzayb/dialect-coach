@@ -12,7 +12,14 @@ not under it.
 
 A single-page Streamlit app. `app.py` holds UI only and makes no API calls; it orchestrates
 `speech_analyzer` (Azure STT), `tts` (Azure neural TTS), `audio_utils`, `budget`, `db`,
-`utils`, and the coaching layer — `phoneme_reference`, `fallback_coach`, `ai_coach`.
+`utils`, and the coaching layer — `phoneme_reference`, `fallback_coach`, `ai_coach`,
+`content_score`.
+
+`content_score.py` is a sibling of `ai_coach.py`, not part of it, and the separation is
+deliberate: vocabulary/grammar/topic are a reading of a transcript rather than a measurement of
+a signal, they apply only to Mode C, and they must never start travelling inside the coaching
+report where the two would be read with equal weight. It owes `ai_coach` only the error
+classifier and the model name.
 
 `app.py` holds the rendering helpers that are specific to the UI — `colour_coded_html`,
 `reference_vs_heard`, `severity_key` — kept free of Streamlit so what the user sees is
@@ -390,9 +397,30 @@ app's own History panel, or its `Recorded attempt` log lines, instead.
 - **The canonical Hillenbrand host serves an invalid certificate.**
   `homepages.wmich.edu` presents `CN=redirect.wmich.edu`; the vowel data comes from the
   `santiagobarreda/hillenbrand_et_al_1995` mirror instead.
-- **`enable_content_assessment_with_topic` does not exist in SDK 1.51.1.** The master plan
-  says it arrived in 1.33; it is on neither `PronunciationAssessmentConfig` nor the module.
-  Mode C's content scoring has to find another route — verify before planning that chunk.
+- **Azure content assessment is retired, and there is no route back.** The master plan cites
+  `enable_content_assessment_with_topic`; it exists on neither `PronunciationAssessmentConfig`
+  nor the module, because **Microsoft retired the feature at Speech SDK 1.46.0** and this
+  project pins 1.51.1. The JSON config still passes unknown keys through untouched — they
+  round-trip out of `to_json()` — so the retired fields CAN be sent, and on 2026-08-21 they
+  were, on a real unscripted call: the response carried `AccuracyScore`, `CompletenessScore`,
+  `FluencyScore`, `PronScore`, `ProsodyScore` and nothing else. Content scores therefore come
+  from Gemini against Microsoft's own published replacement rubric, labelled as such on every
+  surface. `UNSCRIPTED_CONTENT_PROBE` + `scripts/content_probe.py` re-ask the question cheaply
+  if that ever changes.
+- **Unscripted assessment uses a weaker speech-to-text model than standard Azure STT**, which
+  Microsoft says in its own docs. Mode C therefore runs two passes — standard STT for an
+  accurate transcript, then a *scripted* assessment against it — and `budget.passes_for`
+  prices the recording at two passes before the first is sent. Verified live 2026-08-21: the
+  meter moved exactly 2.00× the clip length.
+- **A Mode C second pass returns a `CompletenessScore` and it means nothing.** It is a scripted
+  assessment against the machine's own transcript, so completeness is ~100 by construction — the
+  recogniser agreeing with itself. `normalise` discards it for this mode; the committed fixture
+  carries it so the discard cannot be quietly dropped.
+- **Read speech and spontaneous speech are different populations and are never pooled** — not
+  into one baseline, one centroid or one trend line. There is one current `speaker_baseline` per
+  `style_tag`, `plot_gate` refuses a mismatch rather than warning, and the per-vowel token floor
+  is style-aware. The LPC ceiling is the one thing shared across styles: it tracks vocal tract
+  length, not register.
 - **The SDK's JSON nests `ErrorType` and `Feedback` inside each word's
   `PronunciationAssessment`**, not at the word's top level as the docs' flat REST example
   shows. Reading `word["ErrorType"]` returns nothing and every word parses as clean — a

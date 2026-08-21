@@ -197,7 +197,7 @@ def test_a_baseline_round_trips_and_retires_the_one_it_replaces(calibration_pair
             attempt_ids=(1, 2),
         )
     assert len(db.baseline_history(conn)) == 2
-    current = db.current_baseline(conn)
+    current = db.current_baseline(conn, style="read")
     assert current is not None
     # Exactly one row is current, or every z-score on screen is ambiguous about its space.
     assert sum(1 for row in db.baseline_history(conn) if row["superseded_at"] is None) == 1
@@ -328,12 +328,12 @@ def test_a_proper_calibration_stores_a_baseline_and_a_noise_floor(
 
     app = _app()
     assert not app.exception
-    calibrate = [b for b in app.button if "Set the baseline" in b.label]
+    calibrate = [b for b in app.button if "Set the read baseline" in b.label]
     assert calibrate, "no calibration button offered"
     calibrate[0].click().run()
 
     conn = db.connect(os.environ["DB_PATH"])
-    row = db.current_baseline(conn)
+    row = db.current_baseline(conn, style="read")
     assert row is not None, "no baseline was stored"
     assert row["reference_set"] == "men"
     assert row["style_tag"] == "read"
@@ -355,7 +355,7 @@ def test_the_baseline_renders_a_chart_and_states_what_the_band_forbids(
     _seed_calibration(calibration_pair, minutes_apart=15)
 
     app = _app()
-    [b for b in app.button if "Set the baseline" in b.label][0].click().run()
+    [b for b in app.button if "Set the read baseline" in b.label][0].click().run()
     assert not app.exception
 
     markdown = " ".join(block.value for block in app.markdown)
@@ -439,7 +439,7 @@ def test_the_accent_page_charts_a_reading_once_a_baseline_exists(
 
     app = _app()
     assert not app.exception
-    calibrate = [b for b in app.button if "Set the baseline" in b.label]
+    calibrate = [b for b in app.button if "Set the read baseline" in b.label]
     calibrate[0].click().run()
     assert not app.exception
 
@@ -464,7 +464,7 @@ def test_the_page_says_it_is_post_hoc_rather_than_live(
     monkeypatch.setenv("GA_REFERENCE_SET", "men")
     _seed_calibration(calibration_pair, minutes_apart=15)
     app = _app()
-    [b for b in app.button if "Set the baseline" in b.label][0].click().run()
+    [b for b in app.button if "Set the read baseline" in b.label][0].click().run()
     text = " ".join(block.value for block in app.caption) + " ".join(
         block.value for block in app.markdown
     )
@@ -525,7 +525,7 @@ def _calibrated(calibration_pair, monkeypatch: pytest.MonkeyPatch) -> tuple[AppT
     monkeypatch.setenv("GA_REFERENCE_SET", "men")
     older, newer = _seed_calibration(calibration_pair, minutes_apart=15)
     app = _app()
-    [b for b in app.button if "Set the baseline" in b.label][0].click().run()
+    [b for b in app.button if "Set the read baseline" in b.label][0].click().run()
     assert not app.exception
     return app, older, newer
 

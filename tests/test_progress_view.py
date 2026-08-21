@@ -934,3 +934,46 @@ def test_the_gap_chart_draws_a_rule_at_zero() -> None:
     frame = pv.shadow_pairs(shadow_rows({}, {"shadowed": 1}))
     spec = json.dumps(pv.shadow_gap_chart(frame).to_dict())
     assert "rule" in spec
+
+
+def test_a_modes_point_shape_does_not_depend_on_which_other_modes_exist() -> None:
+    """Mode C exposed this: the shape range used to be a positional slice.
+
+    `range=["triangle-up", "circle", "square"][: len(modes)]` is correct only while every mode
+    is present. With no paragraph reads stored, Mode C silently inherited the circle Mode B had
+    had — so the same glyph meant two different registers across two databases, and a reader
+    comparing them would be comparing read speech against spontaneous speech without knowing it.
+    A speaker can perfectly well have Drill and Unscripted attempts and no Paragraph ones.
+    """
+    import re
+
+    def shapes(modes: list[str]) -> dict[str, str]:
+        frame = pd.DataFrame(
+            [
+                {
+                    "when": pd.Timestamp("2026-08-21T09:00:00Z"),
+                    "attempt_id": index,
+                    "metric": "Pronunciation",
+                    "value": 80.0,
+                    "series": pv.FREE_SERIES,
+                    "mode": mode,
+                    "label": "x",
+                    "shadowed": "No",
+                }
+                for index, mode in enumerate(modes)
+            ]
+        )
+        spec = json.dumps(json.loads(pv.score_chart(frame).to_json()))
+        found = re.search(r'"domain": (\[[^]]*\]), "range": (\[[^]]*\])', spec)
+        assert found, "the free-practice layer must encode shape by mode"
+        return dict(zip(json.loads(found.group(1)), json.loads(found.group(2))))
+
+    drill, paragraph, unscripted = (
+        pv.MODE_LABELS[mode.value] for mode in (Mode.DRILL, Mode.PARAGRAPH, Mode.UNSCRIPTED)
+    )
+    everything = shapes([drill, paragraph, unscripted])
+    assert shapes([paragraph, unscripted])[unscripted] == everything[unscripted]
+    assert shapes([drill, unscripted])[unscripted] == everything[unscripted]
+    assert shapes([drill, unscripted])[drill] == everything[drill]
+    # And the three are actually distinguishable from each other.
+    assert len(set(everything.values())) == 3

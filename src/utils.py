@@ -36,7 +36,12 @@ class RowLike(Protocol):
 
 
 class Mode(str, Enum):
-    """The three recording modes. Mode C is declared but not implemented yet."""
+    """The three recording modes.
+
+    Mode C is the one that measures the register this project is about: generating language and
+    monitoring pronunciation at the same time. It is not a longer paragraph — it is a different
+    speech population, which is why every attempt carries a style tag.
+    """
 
     DRILL = "drill"
     PARAGRAPH = "paragraph"
@@ -191,6 +196,7 @@ _DEFAULTS: dict[str, str] = {
     "MAX_DURATION_SECONDS_PARAGRAPH": "180",
     "MAX_DURATION_SECONDS_UNSCRIPTED": "300",
     "UNSCRIPTED_TWO_PASS": "true",
+    "UNSCRIPTED_CONTENT_PROBE": "false",
     "OFFLINE_MODE": "false",
     "MONTHLY_BUDGET_USD": "0.00",
     "AZURE_TIER_CONFIRMED_F0": "false",

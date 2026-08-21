@@ -4,19 +4,34 @@
     {
       "name": "coach",
       "runtimeExecutable": "docker",
-      "runtimeArgs": ["compose", "up", "--build"],
+      "runtimeArgs": [
+        "compose",
+        "up",
+        "--build"
+      ],
       "port": 8501
     },
     {
       "name": "coach-seeded-demo",
       "runtimeExecutable": "docker",
       "runtimeArgs": [
-        "compose", "run", "--rm", "--service-ports",
-        "-e", "DB_PATH=data/seed_demo.db",
-        "-e", "OFFLINE_MODE=true",
+        "compose",
+        "run",
+        "--rm",
+        "--service-ports",
+        "-e",
+        "DB_PATH=data/seed_demo.db",
+        "-e",
+        "OFFLINE_MODE=true",
+        "-e",
+        "GA_REFERENCE_SET=men",
         "app",
-        "streamlit", "run", "src/app.py",
-        "--server.port=8501", "--server.address=0.0.0.0", "--server.headless=true"
+        "streamlit",
+        "run",
+        "src/app.py",
+        "--server.port=8501",
+        "--server.address=0.0.0.0",
+        "--server.headless=true"
       ],
       "port": 8501
     }

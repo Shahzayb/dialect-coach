@@ -44,9 +44,10 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 import statistics
 from collections.abc import Collection, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import acoustics
@@ -103,6 +104,14 @@ MIN_VOICED_FRACTION = 0.6
 # Below this many tokens a vowel category has no usable mean, and below this many categories
 # there is no usable speaker centroid — Lobanov is a statement about a whole inventory.
 MIN_TOKENS_PER_CATEGORY = 3
+
+# The speech-style tags. **They live here, not in `app.py`, because they are a property of a
+# measurement rather than of a page**: every token row, every baseline and every gate decision
+# is scoped by one of them, and this module is the Streamlit-free one all three go through.
+# Read speech and spontaneous speech are never pooled — not into one baseline, one centroid or
+# one trend line.
+STYLE_READ = "read"
+STYLE_SPONTANEOUS = "spontaneous"
 MIN_CATEGORIES = 8
 
 # Formant estimation degrades badly with room reverb and a poor microphone. Gated on Azure's
@@ -162,6 +171,14 @@ class Token:
     coda_voiceless: bool | None  # None when the vowel is not followed by a consonant
     accepted: bool
     rejected_reason: str = ""
+    # Which speech population this token came from, when it was rebuilt from a stored row.
+    #
+    # Empty for a token `extract` just produced: within one recording the style is uniform and
+    # lives on the `Measurement` that wraps it, so duplicating it per token there would be a
+    # second copy to disagree. It matters on the way BACK, where tokens from two different
+    # attempts are combined into one baseline and there is no longer a single Measurement to
+    # ask — which is exactly where mixing read and spontaneous speech has to be refused.
+    style: str = ""
 
     @property
     def trajectory_usable(self) -> bool:
@@ -364,7 +381,7 @@ def extract(
     *,
     ceiling_hz: float | None = None,
     snr_db_min: float | None = None,
-    style: str = "read",
+    style: str = STYLE_READ,
 ) -> Measurement:
     """Measure every vowel in one recording.
 
@@ -1306,6 +1323,29 @@ def _with_count(text: str, count: int) -> str:
     return f"{text} (n={count})"
 
 
+# Finds the token count `_with_count` wrote, so the style can be appended inside the same
+# parenthesis rather than in a second one beside it.
+_COUNT_SUFFIX = re.compile(r"\(n=(\d+)\)$")
+
+
+def _tag_style(findings: Sequence[Finding], style: str) -> list[Finding]:
+    """Append the speech style to every User Realization cell that carries a token count.
+
+    **The one addition the four-column contract takes**, and it is not decoration. Read speech
+    and spontaneous speech are different populations, so a reader comparing this month's
+    spontaneous vowel space against last month's read one and seeing it "get worse" has learned
+    nothing except that they read aloud more carefully than they speak — which was never in
+    doubt. In this mode the number cannot be interpreted without knowing which population
+    produced it, and the table is the only place that can say so.
+
+    Applied to the count, not to every cell: a row whose user column is "—" measured nothing,
+    and a style tag on nothing is noise. Columns and their order are untouched.
+    """
+    if not style:
+        return list(findings)
+    return [replace(row, user=_COUNT_SUFFIX.sub(rf"(n=\1, {style})", row.user)) for row in findings]
+
+
 def _position_findings(
     speaker: Mapping[str, VowelPosition],
     reference: Mapping[str, VowelPosition],
@@ -1780,7 +1820,7 @@ def findings_by_instrument(
     reference = reference_positions(reference_set)
     centroid = reduction(accepted, normaliser)
 
-    return {
+    grouped = {
         RHOTICITY: _rhoticity_findings(
             speaker, _hertz_reference(reference_set, rhoticity_source, reference)
         ),
@@ -1794,6 +1834,7 @@ def findings_by_instrument(
         STRESS: _stress_findings(stress_contrasts(accepted, normaliser, centroid)),
         REJECTED: rejection_findings(measurement.tokens),
     }
+    return {instrument: _tag_style(rows, measurement.style) for instrument, rows in grouped.items()}
 
 
 def findings(
@@ -1827,6 +1868,18 @@ def findings(
 # --- May this be drawn at all? ----------------------------------------------------------------
 
 
+WRONG_STYLE_BASELINE = (
+    "**Nothing here can be charted: there is no {measured} baseline yet.** The stored baseline "
+    "was built from {baseline} speech, and it is not borrowed — read speech and spontaneous "
+    "speech are different populations, not the same measurement made under harder conditions. "
+    "Speakers hyperarticulate when reading and reduce far more when generating language, so "
+    "vowels centralise, durations shorten and unstressed syllables collapse further toward "
+    "schwa. Every one of those is something this page measures, and normalising {measured} "
+    "speech against a {baseline} centroid would report that change of register as an accent "
+    "finding. Build a {measured} baseline on the Calibration panel below — recording the same "
+    "prompt a second time is part of what these first sessions are for."
+)
+
 NO_BASELINE = (
     "**No stored baseline, so nothing here can be charted.** Establishing the vowel space "
     "needs a full inventory from one speaker — the calibration passage, read twice. Until "
@@ -1840,10 +1893,15 @@ NOTHING_MEASURABLE = (
 )
 
 STYLE_MISMATCH = (
-    "**This is {measured} speech measured against a baseline built from {baseline} speech.** "
-    "A baseline built from read speech normalises read speech; the two are different "
-    "populations, and the gap below carries some of that difference rather than only your "
-    "accent. Recalibrate on the same style to compare like with like."
+    "**Nothing here can be charted: this is {measured} speech and the only stored baseline was "
+    "built from {baseline} speech.** These are not the same measurement made under harder "
+    "conditions, they are different populations — speakers hyperarticulate when reading and "
+    "reduce far more when generating language, so vowels centralise, durations shorten and "
+    "unstressed syllables collapse further toward schwa. Every one of those is something this "
+    "page measures. Normalising {measured} speech against a {baseline} centroid would report "
+    "that change of register as an accent finding. A {measured} reading is normalised against a "
+    "{measured} baseline or it is not normalised at all, so establishing one is part of what "
+    "these first sessions are for."
 )
 
 LABEL_MISMATCH = (
@@ -1876,6 +1934,26 @@ def label_matches_measurement(labelled_tokens: int, measurement: Measurement) ->
     return LABEL_MISMATCH.format(labelled=labelled_tokens, loaded=loaded)
 
 
+def minimum_tokens_for(style: str, gate_minimum: int) -> int:
+    """The per-vowel token floor for one reading, given the gate's own minimum.
+
+    Spontaneous speech does not sample the vowel space evenly. Token counts per category come
+    out wildly uneven and some categories get none at all, because free speech goes wherever the
+    sentence goes rather than where a passage was written to send it. A single accidental token
+    is therefore not the same object as a single drilled one: the drill token is a deliberate
+    probe of a sound the speaker chose to work on, and the free-speech token is whichever vowel
+    happened to fall out of a word they reached for.
+
+    So read speech keeps the gate's minimum — 1, once a stored baseline supplies the space —
+    and spontaneous speech is held to `MIN_TOKENS_PER_CATEGORY`. A vowel below the floor is
+    refused rather than drawn: a lonely confident dot is worse than a gap, because a gap is
+    visibly a gap.
+    """
+    if style == STYLE_SPONTANEOUS:
+        return max(gate_minimum, MIN_TOKENS_PER_CATEGORY)
+    return gate_minimum
+
+
 @dataclass(frozen=True)
 class PlotGate:
     """Whether this measurement may be drawn, and in whose vowel space.
@@ -1896,9 +1974,6 @@ class PlotGate:
     normaliser: Normaliser | None
     minimum_tokens: int
     tokens: int
-    # Not a refusal. A stated caveat, because a baseline built from read speech normalises read
-    # speech and saying so is the difference between a comparison and a category error.
-    style_warning: str = ""
 
 
 def plot_gate(
@@ -1929,18 +2004,31 @@ def plot_gate(
             minimum_tokens=1,
             tokens=0,
         )
-    warning = ""
     if baseline_style and measurement.style and measurement.style != baseline_style:
-        warning = STYLE_MISMATCH.format(measured=measurement.style, baseline=baseline_style)
+        # **A refusal, not a caveat.** This used to draw the chart with a warning above it, on
+        # the reasoning that a stated caveat is honest. It is not enough: the numbers are still
+        # rendered, still comparable-looking against last month's, and a caveat is the first
+        # thing a reader skips. A read baseline normalises read speech, full stop.
+        return PlotGate(
+            ok=False,
+            reason=STYLE_MISMATCH.format(measured=measurement.style, baseline=baseline_style),
+            normaliser=None,
+            minimum_tokens=MIN_TOKENS_PER_CATEGORY,
+            tokens=len(accepted),
+        )
     return PlotGate(
         ok=True,
         reason="",
         normaliser=baseline_normaliser,
         # One token is enough once the SPACE it sits in came from somewhere else. The count
         # travels on every point and every row, so thin evidence looks thin.
+        #
+        # That holds for a DELIBERATE token — a three-word drill aimed at one sound, which is
+        # what makes the measure-drill-remeasure loop possible. It does not hold for free
+        # speech, which samples the vowel space wherever the sentence happened to go; there the
+        # caller raises the floor. See `minimum_tokens_for` and its call site.
         minimum_tokens=1,
         tokens=len(accepted),
-        style_warning=warning,
     )
 
 
@@ -2363,6 +2451,7 @@ def tokens_from_rows(rows: Iterable[Mapping[str, Any]]) -> list[Token]:
                 coda_voiceless=None if coda is None else bool(coda),
                 accepted=bool(row.get("accepted")),
                 rejected_reason=str(row.get("rejected_reason") or ""),
+                style=str(row.get("style_tag") or ""),
             )
         )
     return rebuilt
@@ -2378,7 +2467,7 @@ def calibrate(
     *,
     reference_set: str,
     ceiling_hz: float,
-    style: str = "read",
+    style: str = STYLE_READ,
     attempt_ids: Sequence[int] = (),
     measured_at: str = "",
 ) -> Baseline:
@@ -2398,6 +2487,26 @@ def calibrate(
         raise CalibrationRefused(
             "A baseline needs two readings of the calibration passage. One of them has no "
             "usable vowel measurements."
+        )
+
+    # **Both readings must be the same speech style.** A baseline mixed from one read and one
+    # spontaneous recording has a centroid that belongs to neither population, and the
+    # displacement between them would be read as measurement noise when most of it is the
+    # change of register. `style` is what the baseline is then stored and matched under, so a
+    # mislabelled pair silently mis-normalises every later reading of both styles.
+    styles = {token.style for token in list(first) + list(second) if token.style}
+    if len(styles) > 1:
+        raise CalibrationRefused(
+            f"Those two readings are not the same speech style ({', '.join(sorted(styles))}). "
+            f"Read speech and spontaneous speech are different populations, so a baseline "
+            f"built across both describes neither. Calibrate each style from two readings of "
+            f"its own."
+        )
+    if styles and style not in styles:
+        raise CalibrationRefused(
+            f"Those readings are {', '.join(sorted(styles))} speech but the baseline was asked "
+            f"for as {style}. A baseline stored under the wrong style is applied to the wrong "
+            f"readings, so nothing is stored."
         )
 
     normaliser = lobanov(list(first), categories=REFERENCE_CATEGORIES)

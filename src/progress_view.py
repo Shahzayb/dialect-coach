@@ -284,6 +284,18 @@ MODE_LABELS: Mapping[str, str] = {
     Mode.UNSCRIPTED.value: "Unscripted (Mode C)",
 }
 
+# The point shape for each mode, **keyed by the mode and not by its position in a filtered
+# list**. It used to be a positional slice of `["triangle-up", "circle", "square"]`, which is
+# correct only while every mode is present: with no paragraph reads stored, Mode C silently
+# inherited the circle Mode B had had, so the same glyph meant two different registers across
+# two databases. Mode C is the mode that exposed it — a speaker can perfectly well have Mode A
+# and Mode C attempts and no Mode B ones.
+MODE_SHAPES: Mapping[str, str] = {
+    "Drill (Mode A)": "triangle-up",
+    "Paragraph (Mode B)": "circle",
+    "Unscripted (Mode C)": "square",
+}
+
 # (column in `attempts`, label on the chart). Completeness is deliberately absent: it is a
 # function of how much of the script was read, not of how well it was pronounced, and on the
 # benchmark it should be 100 every time.
@@ -385,8 +397,8 @@ def score_chart(frame: pd.DataFrame) -> alt.Chart:
     x = alt.X("when:T", title=None)
     y = alt.Y("value:Q", title=None, scale=alt.Scale(domain=[0, 100]), axis=alt.Axis(tickCount=5))
 
-    # Only the modes actually present get a shape. Mode C is declared in `utils.Mode` but is
-    # not built, and a legend entry for it would advertise something that cannot happen.
+    # Only the modes actually present get a legend entry: advertising a mode with nothing in it
+    # invites the reader to look for points that are not there.
     modes = [label for label in MODE_LABELS.values() if label in set(frame.get("mode", []))]
 
     # Free practice: points only, never joined. Shape carries the mode, so Mode A and Mode B
@@ -400,9 +412,7 @@ def score_chart(frame: pd.DataFrame) -> alt.Chart:
             shape=alt.Shape(
                 "mode:N",
                 title="Free practice",
-                scale=alt.Scale(
-                    domain=modes, range=["triangle-up", "circle", "square"][: len(modes)]
-                ),
+                scale=alt.Scale(domain=modes, range=[MODE_SHAPES[mode] for mode in modes]),
             ),
             color=alt.value("#8a8a8a"),
             tooltip=[

@@ -10,10 +10,17 @@ silently returns nothing useful:
 3. `enableMiscue` is only honoured by single-shot recognition. In continuous mode it does
    not produce Omission/Insertion, so those are diffed locally instead (see `_diff_miscue`).
 
+4. **Mode C sends the audio twice, on purpose.** Unscripted assessment (an empty
+   `referenceText`) runs on a weaker speech-to-text model than standard Azure STT, so this
+   module follows Microsoft's own recommendation: transcribe with standard STT first, then run
+   a *scripted* assessment against that transcript. A phoneme diagnosis against a wrong
+   transcript is worse than no diagnosis — it confidently blames the wrong sounds.
+
 The assessment config is built from JSON rather than constructor kwargs: `phoneme_alphabet`
 and `nbest_phoneme_count` are properties, not constructor parameters, and `grading_system`
 / `granularity` take enum members rather than strings. JSON is the one form that sets every
-field the same way across SDK versions.
+field the same way across SDK versions — and it is also the only way left to send the retired
+content-assessment fields, since the JSON config passes unknown keys through untouched.
 """
 
 from __future__ import annotations
@@ -57,11 +64,23 @@ FIXTURE_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 FIXTURES: dict[Mode, str] = {
     Mode.DRILL: "sample_azure_response.json",
     Mode.PARAGRAPH: "sample_azure_continuous.json",
+    # A real two-pass Mode C capture, taken 2026-08-21: standard STT for the transcript, then a
+    # scripted assessment against it. Two utterances, 117 words. NOTE that it DOES carry a
+    # `CompletenessScore` — the second pass is a scripted assessment, so Azure computes one
+    # against the machine's own transcript — which is exactly why `normalise` discards it for
+    # this mode rather than passing it through.
+    Mode.UNSCRIPTED: "sample_azure_unscripted.json",
 }
 
 # How long to wait for continuous recognition to report session_stopped. Generous: it is a
 # backstop against a hung SDK callback, not a processing budget.
 CONTINUOUS_TIMEOUT_SECONDS = 300.0
+
+# Mode C gets its own, longer backstop. `MAX_DURATION_SECONDS_UNSCRIPTED` is 300 s, so a
+# paragraph-sized 300 s wait leaves no headroom at all for a recording at the ceiling — and
+# Mode C pays for that timeout twice, once per pass. A backstop that can fire on a legitimate
+# recording is worse than no backstop: it throws away audio Azure has already been sent.
+UNSCRIPTED_TIMEOUT_SECONDS = 900.0
 
 # How often the continuous wait wakes up to notice a cancellation. Short enough that Stop
 # feels immediate, long enough that the wait is not a busy loop.
@@ -103,8 +122,13 @@ class Assessment:
     words: list[dict[str, Any]] = field(default_factory=list)
     offline: bool = False
     # How many times the audio was actually sent. Retries re-upload it and can consume
-    # allowance even when they fail, so the meter multiplies by this rather than by 1.
+    # allowance even when they fail, so the meter multiplies by this rather than by 1. Mode C
+    # sends the audio twice by design, and both passes are counted here.
     attempts: int = 1
+    # The text the assessment was actually scored against. The caller's reference text for
+    # Modes A and B; for Mode C it is the transcript pass 1 produced, which the caller never
+    # supplied and every surface has to name for the diagnosis to be readable.
+    scored_against: str = ""
 
     def as_normalised(self) -> dict[str, Any]:
         """The shape master plan §4 specifies."""
@@ -130,28 +154,48 @@ def _speech_config() -> Any:
     return config
 
 
-def assessment_config_json(reference_text: str, mode: Mode) -> str:
-    """The assessment config as JSON. Separated out so a test can assert its contents."""
-    return json.dumps(
-        {
-            "referenceText": reference_text or "",
-            "gradingSystem": "HundredMark",
-            "granularity": "Phoneme",
-            "phonemeAlphabet": "IPA",
-            "nBestPhonemeCount": NBEST_PHONEME_COUNT,
-            # Only honoured single-shot. True alongside continuous recognition is
-            # unsupported and may be rejected outright.
-            "enableMiscue": mode is Mode.DRILL,
-            "enableProsodyAssessment": True,
-        }
-    )
+def assessment_config_json(reference_text: str, mode: Mode, *, topic: str = "") -> str:
+    """The assessment config as JSON. Separated out so a test can assert its contents.
+
+    An **empty `referenceText` switches Azure into unscripted assessment**: accuracy, fluency
+    and prosody with nothing to compare against, so no completeness score. That is the shape
+    Mode C uses when `UNSCRIPTED_TWO_PASS` is off, and the shape the content probe uses. With
+    two-pass on, Mode C's second pass is an ordinary SCRIPTED config whose reference text is
+    the transcript pass 1 produced, so it does not come through this branch.
+
+    `UNSCRIPTED_CONTENT_PROBE` adds `enableContentAssessment` / `contentTopic`. **Azure retired
+    content assessment at Speech SDK 1.46.0** and 1.51.1 exposes no method, no result field and
+    no property id for it — checked by introspecting the installed package and its native
+    libraries, not recalled. What survives is that
+    `PronunciationAssessmentConfig(json_string=...)` passes unknown keys through verbatim (they
+    come back out of `to_json()` unchanged), so the client can still SEND the retired fields.
+    Whether the service still answers them is a live-call question, which is what the flag is
+    for; it defaults off so the standing path stays clean and the probe is a deliberate spend.
+    """
+    config: dict[str, Any] = {
+        "referenceText": reference_text or "",
+        "gradingSystem": "HundredMark",
+        "granularity": "Phoneme",
+        "phonemeAlphabet": "IPA",
+        "nBestPhonemeCount": NBEST_PHONEME_COUNT,
+        # Only honoured single-shot. True alongside continuous recognition is
+        # unsupported and may be rejected outright. Mode C never sets it: its reference text
+        # is a machine transcript, so a miscue would be two recognisers disagreeing.
+        "enableMiscue": mode is Mode.DRILL,
+        "enableProsodyAssessment": True,
+    }
+    if mode is Mode.UNSCRIPTED and utils.get_bool("UNSCRIPTED_CONTENT_PROBE"):
+        config["enableContentAssessment"] = True
+        if topic:
+            config["contentTopic"] = topic
+    return json.dumps(config)
 
 
-def _pron_config(reference_text: str, mode: Mode) -> Any:
+def _pron_config(reference_text: str, mode: Mode, *, topic: str = "") -> Any:
     import azure.cognitiveservices.speech as speechsdk
 
     return speechsdk.PronunciationAssessmentConfig(
-        json_string=assessment_config_json(reference_text, mode)
+        json_string=assessment_config_json(reference_text, mode, topic=topic)
     )
 
 
@@ -258,25 +302,23 @@ def _assess_single_shot(wav_path: str, reference_text: str) -> list[dict[str, An
     raise AssessmentError(f"Unexpected recognition result: {result.reason}")
 
 
-def _assess_continuous(
-    wav_path: str, reference_text: str, cancel_event: threading.Event | None = None
+def _continuous_session(
+    recognizer: Any,
+    cancel_event: threading.Event | None,
+    timeout_seconds: float,
 ) -> list[dict[str, Any]]:
-    """Mode B. Accumulate `recognized` events, stop on session_stopped or canceled.
+    """Drive one continuous recognition to completion and return its verbatim payloads.
 
-    Returns one payload per utterance; merging them is `_merge_overall` further down.
+    Shared by every continuous path — the paragraph assessment, Mode C's scripted second pass,
+    and Mode C's plain-STT first pass — because the callback wiring, the cancellation poll and
+    the timeout backstop are the fiddly part and having two copies of them is how one of them
+    quietly stops honouring Stop.
 
-    This is the only recognition path that can be stopped part-way. `cancel_event` is
-    polled while waiting rather than waited on directly, because the SDK signals
-    completion through `done` and the caller signals cancellation through `cancel_event`:
+    `cancel_event` is polled while waiting rather than waited on directly: the SDK signals
+    completion through `done` and the caller signals cancellation through `cancel_event`, and
     with two independent events there is nothing to block on but both in turn.
     """
     import azure.cognitiveservices.speech as speechsdk
-
-    recognizer = speechsdk.SpeechRecognizer(
-        speech_config=_speech_config(),
-        audio_config=speechsdk.AudioConfig(filename=wav_path),
-    )
-    _pron_config(reference_text, Mode.PARAGRAPH).apply_to(recognizer)
 
     payloads: list[dict[str, Any]] = []
     failure: list[Exception] = []
@@ -304,7 +346,7 @@ def _assess_continuous(
 
     recognizer.start_continuous_recognition_async().get()
     try:
-        deadline = time.monotonic() + CONTINUOUS_TIMEOUT_SECONDS
+        deadline = time.monotonic() + timeout_seconds
         while not done.wait(timeout=CANCEL_POLL_SECONDS):
             if cancel_event is not None and cancel_event.is_set():
                 # Audio has already been streamed to Azure by this point, so the caller is
@@ -325,6 +367,59 @@ def _assess_continuous(
             "and that the clip is not silence."
         )
     return payloads
+
+
+def _assess_continuous(
+    wav_path: str,
+    reference_text: str,
+    cancel_event: threading.Event | None = None,
+    *,
+    mode: Mode = Mode.PARAGRAPH,
+    topic: str = "",
+) -> list[dict[str, Any]]:
+    """Mode B, and Mode C's assessed pass. One payload per utterance.
+
+    Merging the utterances is `_merge_overall` further down.
+    """
+    import azure.cognitiveservices.speech as speechsdk
+
+    recognizer = speechsdk.SpeechRecognizer(
+        speech_config=_speech_config(),
+        audio_config=speechsdk.AudioConfig(filename=wav_path),
+    )
+    # Mandatory. Without it the transcript comes back and the assessment block does not.
+    _pron_config(reference_text, mode, topic=topic).apply_to(recognizer)
+    return _continuous_session(recognizer, cancel_event, _timeout_for(mode))
+
+
+def _timeout_for(mode: Mode) -> float:
+    return UNSCRIPTED_TIMEOUT_SECONDS if mode is Mode.UNSCRIPTED else CONTINUOUS_TIMEOUT_SECONDS
+
+
+def _transcribe_continuous(
+    wav_path: str, cancel_event: threading.Event | None = None
+) -> list[dict[str, Any]]:
+    """Mode C, pass 1: **standard STT with no pronunciation config applied at all.**
+
+    Microsoft's own note on unscripted assessment says the speech-to-text model behind it is
+    different from — and weaker than — Azure STT, and recommends calling standard STT first for
+    an accurate transcript and then running a SCRIPTED assessment against it. This is that call.
+
+    It roughly doubles audio-hour consumption for the recording and it is worth it: a phoneme
+    diagnosis against a wrong transcript is worse than no diagnosis, because it confidently
+    blames the wrong sounds. `budget.passes_for` already prices the recording at two passes
+    before the first one is sent.
+
+    Deliberately does NOT apply a `PronunciationAssessmentConfig`: this pass wants words, not
+    scores, and the prosody add-on is a charge on top of the base STT rate.
+    """
+    import azure.cognitiveservices.speech as speechsdk
+
+    recognizer = speechsdk.SpeechRecognizer(
+        speech_config=_speech_config(),
+        audio_config=speechsdk.AudioConfig(filename=wav_path),
+    )
+    return _continuous_session(recognizer, cancel_event, UNSCRIPTED_TIMEOUT_SECONDS)
 
 
 def _load_fixture(mode: Mode) -> list[dict[str, Any]]:
@@ -358,6 +453,103 @@ def _load_fixture(mode: Mode) -> list[dict[str, Any]]:
     return data if isinstance(data, list) else [data]
 
 
+@dataclass(frozen=True)
+class Recognition:
+    """What one recognition run produced, before any normalisation.
+
+    A dataclass rather than a tuple because Mode C added a fourth thing worth returning —
+    `scored_against`, the text the assessment was actually run against. For Modes A and B that
+    is the caller's own reference text; for Mode C's two-pass flow it is the transcript pass 1
+    produced, which is not knowable to the caller and is the thing every downstream surface has
+    to name if the diagnosis is to be readable at all.
+    """
+
+    payloads: list[dict[str, Any]]
+    offline: bool
+    attempts: int
+    scored_against: str = ""
+
+
+class _AttemptMeter:
+    """Counts attempts across several `retry_transient` calls that each restart at 1.
+
+    Mode C sends the audio twice, and `retry_transient` numbers the tries within ONE call. So
+    the running total is "everything finished passes used, plus where this pass has got to",
+    and a pass is closed with `finished()` when it returns. Adding the raw attempt numbers
+    together instead would report a two-pass recording as one — which is exactly how the usage
+    meter would drift low by the length of every Mode C attempt.
+    """
+
+    def __init__(self, on_attempt: Callable[[int], None] | None) -> None:
+        self._closed = 0
+        self._current = 0
+        self._on_attempt = on_attempt
+
+    def count(self, attempt: int) -> None:
+        self._current = attempt
+        if self._on_attempt is not None:
+            self._on_attempt(self.total)
+
+    def finished(self) -> None:
+        self._closed += self._current
+        self._current = 0
+
+    @property
+    def total(self) -> int:
+        return self._closed + self._current
+
+
+def _recognise_unscripted(
+    wav_path: str,
+    topic: str,
+    cancel_event: threading.Event | None,
+    meter: _AttemptMeter,
+) -> Recognition:
+    """Mode C. Two passes by default, one when `UNSCRIPTED_TWO_PASS` is off.
+
+    Pass 1 is standard STT for an accurate transcript; pass 2 is an ordinary SCRIPTED assessment
+    against that transcript. See `_transcribe_continuous` for why, in Microsoft's own words.
+
+    **Both passes' attempt counts are summed into one number.** That is not bookkeeping: the
+    usage meter is `attempts.audio_seconds`, which `app.run_assessment_job` writes as
+    `seconds * attempts`, so a two-pass recording metered at one pass would understate the month
+    by the length of every Mode C attempt and quietly loosen every later pre-flight.
+    """
+    if not utils.get_bool("UNSCRIPTED_TWO_PASS"):
+        # One pass, empty referenceText: Azure's unscripted assessment. Accuracy, fluency and
+        # prosody against its own weaker transcript, and no completeness — there is nothing to
+        # compare against.
+        payloads = utils.retry_transient(
+            lambda: _assess_continuous(
+                wav_path, "", cancel_event, mode=Mode.UNSCRIPTED, topic=topic
+            ),
+            on_attempt=meter.count,
+        )
+        meter.finished()
+        return Recognition(payloads, False, meter.total, _joined_display(payloads))
+
+    transcript_payloads = utils.retry_transient(
+        lambda: _transcribe_continuous(wav_path, cancel_event), on_attempt=meter.count
+    )
+    # Closed before the second pass starts, so pass 2's attempt 1 adds to pass 1's total
+    # instead of replacing it.
+    meter.finished()
+    transcript = _joined_display(transcript_payloads)
+    if not transcript:
+        raise NoSpeechDetected(
+            "Azure transcribed no words from that recording, so there is nothing to assess "
+            "the pronunciation against."
+        )
+    logger.info("Mode C pass 1 transcribed %d characters", len(transcript))
+
+    payloads = utils.retry_transient(
+        lambda: _assess_continuous(wav_path, transcript, cancel_event, mode=Mode.UNSCRIPTED),
+        on_attempt=meter.count,
+    )
+    meter.finished()
+    return Recognition(payloads, False, meter.total, transcript)
+
+
 def recognise(
     wav_path: str,
     reference_text: str,
@@ -365,30 +557,40 @@ def recognise(
     *,
     cancel_event: threading.Event | None = None,
     on_attempt: Callable[[int], None] | None = None,
-) -> tuple[list[dict[str, Any]], bool, int]:
+    topic: str = "",
+) -> Recognition:
     """Run the assessment for `mode`.
-
-    Returns (verbatim payloads, came_from_fixture, attempts_that_reached_azure).
 
     `cancel_event` is checked before anything is dispatched and, in continuous mode, while
     waiting for Azure to finish. `on_attempt` fires before each attempt reaches Azure, so a
     caller can tell "nothing was sent" from "something was sent and then abandoned" —
     `retry_transient` already needs the same hook to meter retries.
+
+    `topic` is Mode C's prompt. It is never a reference text — nothing is scored against it —
+    and it only reaches Azure at all under `UNSCRIPTED_CONTENT_PROBE`.
     """
     if cancel_event is not None and cancel_event.is_set():
         raise Cancelled("Assessment cancelled before it started.", reached_azure=False)
 
     if utils.offline_mode():
         logger.info("OFFLINE_MODE: replaying the %s fixture instead of calling Azure", mode.value)
-        return _load_fixture(mode), True, 0
+        payloads = _load_fixture(mode)
+        scored = reference_text if mode is not Mode.UNSCRIPTED else _joined_display(payloads)
+        return Recognition(payloads, True, 0, scored)
+
+    # Summed across passes, not replaced: Mode C sends the audio twice and each pass restarts
+    # `retry_transient`'s numbering at 1.
+    meter = _AttemptMeter(on_attempt)
 
     if mode is Mode.UNSCRIPTED:
-        raise AssessmentError(
-            "Unscripted mode is not implemented yet — it needs Azure's content assessment, "
-            "which is a separate chunk of work."
-        )
-
-    made = 0
+        result = _recognise_unscripted(wav_path, topic, cancel_event, meter)
+        expected = 2 if utils.get_bool("UNSCRIPTED_TWO_PASS") else 1
+        if result.attempts > expected:
+            logger.warning(
+                "Mode C took %d attempts across its passes; all of them may have cost quota.",
+                result.attempts,
+            )
+        return result
 
     def call() -> list[dict[str, Any]]:
         if mode is Mode.DRILL:
@@ -397,16 +599,11 @@ def recognise(
             return _assess_single_shot(wav_path, reference_text)
         return _assess_continuous(wav_path, reference_text, cancel_event)
 
-    def count(attempt: int) -> None:
-        nonlocal made
-        made = attempt
-        if on_attempt is not None:
-            on_attempt(attempt)
-
-    payloads = utils.retry_transient(call, on_attempt=count)
-    if made > 1:
-        logger.warning("Assessment took %d attempts; all of them may have cost quota.", made)
-    return payloads, False, made
+    payloads = utils.retry_transient(call, on_attempt=meter.count)
+    meter.finished()
+    if meter.total > 1:
+        logger.warning("Assessment took %d attempts; all of them may have cost quota.", meter.total)
+    return Recognition(payloads, False, meter.total, reference_text)
 
 
 # --- Normalisation ------------------------------------------------------------------------
@@ -434,6 +631,11 @@ def _best(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _display_text(payload: dict[str, Any]) -> str:
     return (payload.get("DisplayText") or _best(payload).get("Display") or "").strip()
+
+
+def _joined_display(payloads: list[dict[str, Any]]) -> str:
+    """Every utterance's display text, in order, as one string."""
+    return " ".join(text for text in (_display_text(p) for p in payloads) if text)
 
 
 def _delivery_error_types(word: dict[str, Any]) -> list[str]:
@@ -665,6 +867,30 @@ def _diff_miscue(reference_text: str, words: list[dict[str, Any]]) -> list[dict[
 REPETITION = "repetition"
 
 
+def _mark_adjacent_repetitions(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Mark a word said twice in a row as a stumble, from adjacency alone. Mode C's path.
+
+    `_mark_repetitions` below needs one of the pair to be labelled `Insertion`, which comes
+    either from `enableMiscue` (drill) or from `_diff_miscue` (paragraph). Mode C has neither:
+    its reference text is a machine transcript, so a diff against it would measure two
+    recognisers disagreeing rather than the speaker stumbling, and it is deliberately not run.
+
+    Adjacency is enough on its own here. Two neighbouring tokens that are the same word are a
+    stumble whether or not an aligner labelled one of them — and free speech is precisely where
+    stumbles happen, so losing them in the one mode that produces them would be the wrong
+    trade. Both occurrences are marked, for the same reason `_mark_repetitions` marks both: the
+    phonemes that get misread belong to whichever one Azure scored badly, and which of the two
+    that is cannot be known from the pair.
+    """
+    tokens = [utils.normalise_words(str(word.get("word") or "")) for word in words]
+    for index in range(len(words) - 1):
+        if not tokens[index] or tokens[index] != tokens[index + 1]:
+            continue
+        words[index]["disfluency"] = REPETITION
+        words[index + 1]["disfluency"] = REPETITION
+    return words
+
+
 def _mark_repetitions(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Mark a word said twice in a row as a stumble — on BOTH occurrences.
 
@@ -734,7 +960,10 @@ def _weighted(pairs: Sequence[tuple[float | None, float]]) -> float | None:
 
 
 def _merge_overall(
-    payloads: list[dict[str, Any]], reference_text: str, words: list[dict[str, Any]]
+    payloads: list[dict[str, Any]],
+    reference_text: str,
+    words: list[dict[str, Any]],
+    mode: Mode = Mode.PARAGRAPH,
 ) -> dict[str, Any]:
     """Combine per-utterance scores into one set.
 
@@ -762,7 +991,15 @@ def _merge_overall(
         )
 
     reference_words = utils.normalise_words(reference_text)
-    if reference_words:
+    if mode is Mode.UNSCRIPTED:
+        # **No completeness score, ever, in Mode C — there is nothing to compare against.**
+        # Azure's own unscripted results table omits it, and the pronunciation composite for
+        # the speaking scenario is defined without it. With two-pass on, the reference text
+        # here is the machine's own transcript, so a completeness figure derived from it would
+        # be ~100 by construction: a number that measures the recogniser agreeing with itself.
+        # None, never 0.0 or 100.0 — the surface renders "not applicable".
+        merged["completeness"] = None
+    elif reference_words:
         omitted = sum(1 for w in words if w.get("error_type") == "Omission")
         merged["completeness"] = round(
             100.0 * max(0, len(reference_words) - omitted) / len(reference_words), 1
@@ -773,7 +1010,46 @@ def _merge_overall(
         )
 
     merged.update(_snr(payloads))
+    content = azure_content_scores(payloads)
+    if content is not None:
+        merged["content"] = content
     return merged
+
+
+CONTENT_KEYS: tuple[tuple[str, str], ...] = (
+    ("vocabulary", "VocabularyScore"),
+    ("grammar", "GrammarScore"),
+    ("topic", "TopicScore"),
+)
+
+
+def azure_content_scores(payloads: list[dict[str, Any]]) -> dict[str, float] | None:
+    """Vocabulary/grammar/topic, if Azure ever sends them. Almost always None.
+
+    **Content assessment is retired from Speech SDK 1.46.0 and later** and this project pins
+    1.51.1, so nothing here is expected to fire. It is read anyway, and read from the verbatim
+    payload rather than from the SDK's typed result (which has no such fields at all), because
+    `UNSCRIPTED_CONTENT_PROBE` can still put the retired request keys on the wire — the JSON
+    config passes unknown keys through untouched. If the service answers, the numbers arrive
+    here and the surface labels them as Azure's. If it does not, `content_score` asks Gemini
+    against Microsoft's own published rubric and the surface says so instead.
+
+    Takes the LAST payload that carries them: these are whole-utterance scores, and in
+    continuous mode the final utterance is the one that has heard everything.
+    """
+    for payload in reversed(payloads):
+        scores = _scores(_best(payload))
+        content = scores.get("ContentAssessment") or payload.get("ContentAssessment")
+        source = content if isinstance(content, dict) else scores
+        found = {
+            out_key: float(source[in_key])
+            for out_key, in_key in CONTENT_KEYS
+            if isinstance(source.get(in_key), (int, float))
+        }
+        if found:
+            logger.info("Azure returned content scores: %s", sorted(found))
+            return found
+    return None
 
 
 def _snr(payloads: list[dict[str, Any]]) -> dict[str, float | None]:
@@ -828,12 +1104,20 @@ def normalise(
         words.extend(_normalise_word(w) for w in _best(payload).get("Words") or [])
 
     # Single-shot had enableMiscue on, so Azure already labelled omissions and insertions.
-    if mode is not Mode.DRILL and reference_text:
-        words = _diff_miscue(reference_text, words)
-    # After both paths, not inside one: the insertion this reads may be Azure's or ours.
-    words = _mark_repetitions(words)
+    #
+    # **Mode C runs no diff at all.** Its reference text is the transcript standard STT
+    # produced, so every disagreement the diff could find is one recogniser disagreeing with
+    # another, reported as though the speaker had omitted or inserted a word. That is exactly
+    # the class of confidently-wrong claim this project exists to delete.
+    if mode is Mode.UNSCRIPTED:
+        words = _mark_adjacent_repetitions(words)
+    else:
+        if mode is not Mode.DRILL and reference_text:
+            words = _diff_miscue(reference_text, words)
+        # After both paths, not inside one: the insertion this reads may be Azure's or ours.
+        words = _mark_repetitions(words)
 
-    recognised_text = " ".join(t for t in (_display_text(p) for p in payloads) if t)
+    recognised_text = _joined_display(payloads)
 
     # Drill is the only path where Azure's own overall scores can be trusted as-is: it is
     # single-shot, so enableMiscue was honoured and CompletenessScore reflects the whole
@@ -854,7 +1138,7 @@ def normalise(
             **_snr(payloads[:1]),
         }
     else:
-        overall = _merge_overall(payloads, reference_text, words)
+        overall = _merge_overall(payloads, reference_text, words, mode)
 
     return overall, recognised_text, words
 
@@ -866,19 +1150,31 @@ def analyse(
     *,
     cancel_event: threading.Event | None = None,
     on_attempt: Callable[[int], None] | None = None,
+    topic: str = "",
 ) -> Assessment:
-    """Assess one recording end to end: recognise, then normalise. No storage, no UI."""
-    payloads, offline, attempts = recognise(
-        wav_path, reference_text, mode, cancel_event=cancel_event, on_attempt=on_attempt
+    """Assess one recording end to end: recognise, then normalise. No storage, no UI.
+
+    `topic` is Mode C's prompt and is never scored against — see `recognise`.
+    """
+    result = recognise(
+        wav_path,
+        reference_text,
+        mode,
+        cancel_event=cancel_event,
+        on_attempt=on_attempt,
+        topic=topic,
     )
-    overall, recognised_text, words = normalise(payloads, reference_text, mode)
+    # Mode C is normalised against what it was actually scored against, which is pass 1's
+    # transcript rather than anything the caller supplied.
+    overall, recognised_text, words = normalise(result.payloads, result.scored_against, mode)
     return Assessment(
-        raw=payloads,
+        raw=result.payloads,
         overall_scores=overall,
         recognised_text=recognised_text,
         words=words,
-        offline=offline,
-        attempts=attempts,
+        offline=result.offline,
+        attempts=result.attempts,
+        scored_against=result.scored_against,
     )
 
 
