@@ -203,7 +203,9 @@ def test_the_error_counts_reflect_the_fixtures_real_mispronunciations(run_app) -
     # a synthetic payload instead, the same way the rest of the delivery-fault code is.
     assert ">0</span><span>Unexpected break</span>" in rendered
     assert ">0</span><span>Missing break</span>" in rendered
-    assert ">0</span><span>Monotone</span>" in rendered
+    # "stretches", not "Monotone": the badge counts flat passages, not the words inside them.
+    # With none to count there is no word total to put in brackets either.
+    assert ">0</span><span>Monotone stretches</span>" in rendered
 
 
 def test_the_result_diffs_the_script_against_what_azure_heard(run_app) -> None:

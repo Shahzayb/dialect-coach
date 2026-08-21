@@ -9,6 +9,7 @@ from __future__ import annotations
 import pytest
 
 import app as app_module
+import speech_analyzer
 import utils
 from utils import AzureBand, Band
 
@@ -253,6 +254,58 @@ def test_omissions_sort_ahead_of_merely_bad_scores() -> None:
 def test_sorting_does_not_crash_on_a_missing_score() -> None:
     words = [word("a", None, error_type="Mispronunciation"), word("b", 50.0)]
     assert len(sorted(words, key=app_module.severity_key)) == 2
+
+
+# --- The headline count row ---------------------------------------------------------------------
+# `render_error_counts` counted words for every badge, but "2 Mispronunciations" means two
+# independently wrong words while "28 Monotone" means ONE flat stretch spanning 28 words — which
+# is how the Delivery panel below already words it. Side by side the row implied the monotone
+# problem was fourteen times the articulation problem, and because prose comes in spans the
+# monotone badge will always be the largest and least informative number on the row.
+
+
+def flat(*texts: str) -> list[dict]:
+    return [word(text, 90.0, delivery=["Monotone"]) for text in texts]
+
+
+def badges(words: list[dict]) -> dict[str, int]:
+    assessment = speech_analyzer.Assessment(
+        raw=[], overall_scores={}, recognised_text="", words=words
+    )
+    return {label: count for count, label in app_module.error_count_badges(assessment)}
+
+
+def test_one_flat_passage_is_one_stretch_not_twenty_eight_words() -> None:
+    counted = badges(flat(*(f"w{n}" for n in range(28))))
+    assert counted["Monotone stretch (28 words)"] == 1
+
+
+def test_two_flat_passages_are_two_stretches_and_the_noun_agrees() -> None:
+    """A gap means the fault stopped and started again — `delivery_faults` already cuts there."""
+    words = flat("one", "two") + [word("clear", 99.0)] + flat("three", "four", "five")
+    counted = badges(words)
+    assert counted["Monotone stretches (5 words)"] == 2
+
+
+def test_mispronunciations_are_still_counted_as_words() -> None:
+    """Two independently wrong words really are two problems. Only the span badge changes."""
+    words = [
+        word("thursday", 41.0, error_type="Mispronunciation"),
+        word("weather", 38.0, error_type="Mispronunciation"),
+    ]
+    assert badges(words)["Mispronunciations"] == 2
+
+
+def test_a_break_stays_a_word_count() -> None:
+    """A break is a point event located at a word, not a span."""
+    words = [word(t, 90.0, delivery=["UnexpectedBreak"]) for t in ("one", "two", "three")]
+    assert badges(words)["Unexpected break"] == 3
+
+
+def test_a_clean_attempt_shows_zero_stretches_without_inventing_a_word_count() -> None:
+    counted = badges([word("weather", 99.0)])
+    assert counted["Monotone stretches"] == 0
+    assert counted["Mispronunciations"] == 0
 
 
 # --- A stumble is not a substitution ------------------------------------------------------------

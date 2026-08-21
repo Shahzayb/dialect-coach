@@ -127,14 +127,28 @@ DELIVERY_LABELS: dict[str, str] = {
 # See `render_accent_charts` for the whole mechanism.
 ACCENT_CHART_CHOICE = "accent_chart_attempt_id"
 
+# What a badge's number counts. Not a bool, so the row reads as what it is.
+COUNT_WORDS = "words"
+COUNT_STRETCHES = "stretches"
+
 # Short labels + colours for the headline error-count badges (#10/#12) — distinct from
 # DELIVERY_LABELS' longer prose, which explains a fault rather than naming it.
-ERROR_BADGES: list[tuple[str, str | None, str]] = [
-    # (badge label, delivery_summary() key or None for the mispronunciation count, colour)
-    ("Mispronunciations", None, "#c07f16"),
-    ("Unexpected break", "UnexpectedBreak", "#d6455d"),
-    ("Missing break", "MissingBreak", "#8a8a8a"),
-    ("Monotone", "Monotone", "#6a4fa0"),
+#
+# The unit is part of the badge, because the row used to count words for all four and two of
+# those counts do not mean the same thing. "2 Mispronunciations" is two independently wrong
+# words; "28 Monotone" was ONE flat stretch spanning 28 words — which is exactly how the
+# Delivery panel below words the same fault. Read together the row implied the monotone problem
+# was fourteen times the articulation problem, and because prose comes in spans the monotone
+# badge is structurally always the largest and least informative number on the row.
+#
+# A break stays a word count on purpose: an unexpected or missing break is a point event
+# located at a word, not a span, so two flagged words are two breaks.
+ERROR_BADGES: list[tuple[str, str | None, str, str]] = [
+    # (badge label, delivery_summary() key or None for the mispronunciation count, colour, unit)
+    ("Mispronunciations", None, "#c07f16", COUNT_WORDS),
+    ("Unexpected break", "UnexpectedBreak", "#d6455d", COUNT_WORDS),
+    ("Missing break", "MissingBreak", "#8a8a8a", COUNT_WORDS),
+    ("Monotone", "Monotone", "#6a4fa0", COUNT_STRETCHES),
 ]
 
 # Chosen to load the sounds most likely to be substituted by Urdu/Punjabi L1 speakers
@@ -1068,18 +1082,53 @@ def render_scores(assessment: speech_analyzer.Assessment) -> None:
     )
 
 
+def error_count_badges(assessment: speech_analyzer.Assessment) -> list[tuple[int, str]]:
+    """The headline row as (count, label) pairs. Streamlit-free, so the units are assertable.
+
+    A stretch badge says `1 · Monotone stretch (28 words)`, because that is the true thing: one
+    flat passage spanning 28 words, worded the way the Delivery panel below already words it.
+    The word count stays in the label rather than becoming a second badge — this is a headline
+    count row, not a second copy of the Delivery panel's detail.
+
+    The stretch count is `delivery_faults`' own `runs`, never recomputed here, so the row and
+    the panel below it cannot disagree about how many stretches there were.
+    """
+    mispronounced = speech_analyzer.mispronounced_words(assessment.words)
+    summary = speech_analyzer.delivery_summary(assessment.words)
+    runs = {
+        str(fault["fault"]): fault["runs"]
+        for fault in speech_analyzer.delivery_faults(assessment.words)
+    }
+
+    badges: list[tuple[int, str]] = []
+    for label, fault_key, _colour, unit in ERROR_BADGES:
+        if fault_key is None:
+            badges.append((len(mispronounced), label))
+            continue
+        words = summary.get(fault_key, [])
+        if unit != COUNT_STRETCHES:
+            badges.append((len(words), label))
+            continue
+        stretches = runs.get(fault_key, [])
+        if not stretches:
+            badges.append((0, f"{label} stretches"))
+            continue
+        noun = "stretch" if len(stretches) == 1 else "stretches"
+        plural = "word" if len(words) == 1 else "words"
+        badges.append((len(stretches), f"{label} {noun} ({len(words)} {plural})"))
+    return badges
+
+
 def render_error_counts(assessment: speech_analyzer.Assessment) -> None:
     """Headline counts for #10/#12: Mispronunciations, Unexpected break, Missing break,
     Monotone. Counts only — which words carry each fault is already shown by the flagged-
     word cards (mispronunciations) and `render_delivery` below (the other three), so this
     is not a second copy of that detail, just the number every issue image puts up top.
     """
-    mispronounced = speech_analyzer.mispronounced_words(assessment.words)
-    summary = speech_analyzer.delivery_summary(assessment.words)
-
     cells = []
-    for label, fault_key, colour in ERROR_BADGES:
-        count = len(mispronounced) if fault_key is None else len(summary.get(fault_key, []))
+    for (count, label), (_label, _fault_key, colour, _unit) in zip(
+        error_count_badges(assessment), ERROR_BADGES
+    ):
         cells.append(
             '<div style="display:flex;align-items:center;gap:0.4rem;margin:0.2rem 1.3rem '
             '0.2rem 0;">'
