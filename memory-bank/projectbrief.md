@@ -53,6 +53,14 @@ Speaking means all three registers — short drills, longer passages, and unscri
 unscripted is the one that matters most, because generating language and controlling pronunciation
 at the same time is the thing I actually need to do.
 
+**The unit of practice is the sentence. The word is the way in, not the destination.** Fixing a
+single sound in a single word is the easy half; saying the whole sentence — its rhythm, its
+stresses, where it links and where it reduces, its melody — is the hard half, and it is the half
+that decides whether I sound native. A word said correctly on its own is not fixed yet, because
+in isolation I hyperarticulate and in a sentence I don't. So a word is only resolved once it
+survives inside the sentence it came from, and a sentence only once it survives inside the
+paragraph.
+
 ## Core requirements
 
 - **Analyse as deeply as possible, from as many angles as possible.** This is the strong part of
@@ -63,11 +71,15 @@ at the same time is the thing I actually need to do.
 - **Every problem comes with the exercise attached.** Naming a fault without handing me the drill
   is half a feature.
 - **Three-way listening as the practice surface**: what I said, a native saying it, and my own
-  voice corrected — at word or sentence granularity.
+  voice corrected — for a word, and just as importantly for a whole sentence or paragraph, where
+  the correction is the delivery rather than one sound.
 - **Repetition is the normal case.** The tenth attempt at one word must be as cheap and fast as
   the first, ideally with feedback during or immediately after each one.
 - **Moving on is a first-class outcome**, equal to resolving. Abandoning a problem and taking a
   different one must never stall the loop or read as failure.
+- **Sentence-level delivery is a first-class problem, not a footnote to the sounds.** Rhythm,
+  stress, linking, reduction and intonation get the same treatment segmental faults get: named,
+  demonstrated, drilled, re-measured.
 - **Progress is measured, not asserted.** No change smaller than my own session-to-session
   variation is ever called improvement, including in the flattering direction.
 - Keep history locally in SQLite and show it back over time.
