@@ -3595,6 +3595,7 @@ def render_today(
         # your own recordings flagged, so there is nothing for it to wait for.
         st.divider()
         render_ladder_offer(conn)
+        render_ladder_targets(conn)
         st.divider()
         render_shadow_offer(conn, targets, now=now)
         return
@@ -3643,6 +3644,7 @@ def render_today(
 
     st.divider()
     render_ladder_offer(conn)
+    render_ladder_targets(conn)
 
     st.divider()
     render_shadow_offer(conn, targets, now=now)
@@ -3674,6 +3676,39 @@ def render_today(
         )
         for target in graduated:
             render_target_card(conn, target, still_flagged)
+
+
+def render_ladder_targets(conn: sqlite3.Connection) -> None:
+    """Ladder targets on the queue: what each one still needs, in its own words.
+
+    Rendered through `practice_queue.grade_ladder`, which is where the two bars and the
+    level-above rule live — so the card and the rule cannot disagree about what would take it
+    off the list.
+    """
+    with _DB_LOCK:
+        rows = [dict(row) for row in db.targets(conn)]
+    ladders = [t for t in rows if practice_queue.is_ladder(str(t["kind"]))]
+    if not ladders:
+        return
+
+    st.markdown("#### On the ladder")
+    for target in ladders:
+        # No verdict is passed: it needs a fresh take, and grading one here would mean
+        # re-measuring every target on every rerun. The card says so rather than implying a
+        # measurement it has not made.
+        decision = practice_queue.grade_ladder(target, None)
+        evidence = practice_queue.evidence_of(target)
+        st.markdown(f"**{target['item']}**")
+        with st.expander("Why is this here, and what takes it off?"):
+            st.markdown(f"**Why it is here.** {evidence.get('why') or 'No evidence recorded.'}")
+            st.markdown(
+                f"**What takes it off.** {practice_queue.graduation_rule(str(target['kind']))}"
+            )
+            st.markdown(f"**Where it stands.** {decision.reason}")
+        if st.button("Take it off the list", key=f"ladder_drop_{target['id']}"):
+            with _DB_LOCK:
+                db.remove_target(conn, int(target["id"]))
+            st.rerun()
 
 
 def render_ladder_offer(conn: sqlite3.Connection) -> None:
@@ -4916,6 +4951,55 @@ def render_ladder_repeat(
         )
 
     render_ladder_bank(conn, unit, wav_bytes, job, running)
+    render_ladder_keep(conn, context, unit, judged)
+
+
+def render_ladder_keep(
+    conn: sqlite3.Connection,
+    context: LadderContext,
+    unit: ladder_practice.Unit,
+    judged: ladder.Verdict,
+) -> None:
+    """Put this unit on the queue so it comes back, or say why it does not need to.
+
+    The queue is what makes a session more than a session — without it, working on a sentence
+    and closing the app is thirty separate first sessions, which is the thing `practice_queue`
+    exists to stop. Nothing is promoted automatically: dropping a unit has to stay free of
+    consequences, so keeping it is the deliberate act.
+    """
+    if unit.script_index is None or not unit.judgeable:
+        return
+    unresolved = [m for m in judged.judgeable if not m.arrived]
+    st.markdown("##### Keep working on this")
+    if not unresolved:
+        st.caption(
+            "Everything measurable here is already inside the native range on this take. "
+            "Keeping it is still fine — it would come back for the check one level up."
+        )
+    if st.button("📌 Keep this on the list", key="ladder_keep"):
+        db.upsert_target(
+            conn,
+            item=f"{unit.span.label[:60]} · {ladder.RUNG_LABELS[unit.span.rung]}",
+            kind=unit.span.rung.value,
+            evidence={
+                "why": (
+                    f"You worked on it from reading #{context.attempt_id}. "
+                    + (
+                        "Nothing measurable was outside the native range on that take."
+                        if not unresolved
+                        else "Outside the native range on that take: "
+                        + ", ".join(
+                            ladder.METRIC_LABELS.get(m.metric, m.metric) for m in unresolved
+                        )
+                        + "."
+                    )
+                ),
+                "rung": unit.span.rung.value,
+                "script_index": unit.script_index,
+                "attempt_id": context.attempt_id,
+            },
+        )
+        st.success("On the list. It comes back until it resolves, or you take it off.", icon="📌")
 
 
 def render_ladder_bank(

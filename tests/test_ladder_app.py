@@ -19,6 +19,7 @@ from streamlit.testing.v1 import AppTest
 
 import db
 import ladder
+import practice_queue
 import progress_view
 import shadowing
 from utils import Mode
@@ -244,3 +245,64 @@ def test_the_unit_picker_offers_every_sentence_of_the_passage(tmp_path: Path) ->
     pickers = [s for s in app.selectbox if s.label == "Which one"]
     assert pickers, "there has to be a way to choose which unit to practise"
     assert len(pickers[0].options) == len(shadowing.phrases(progress_view.BENCHMARK_PASSAGE))
+
+
+# --- Ladder targets on the queue ------------------------------------------------------------------
+
+
+def _seed_target(item: str = "Nothing here is clever. · sentence") -> int:
+    conn = db.connect(os.environ["DB_PATH"])
+    target_id = db.upsert_target(
+        conn,
+        item=item,
+        kind="sentence",
+        evidence={
+            "why": "Outside the native range on that take: terminal fall.",
+            "rung": "sentence",
+        },
+    )
+    conn.close()
+    return target_id
+
+
+def test_a_ladder_target_appears_on_today_with_its_rule() -> None:
+    _seed_target()
+    app = _app()
+    assert not app.exception
+    assert any("On the ladder" in m.value for m in app.markdown)
+
+
+def test_the_card_states_the_rule_that_would_take_it_off() -> None:
+    """The brief requires the rule be readable, not implicit however carefully implemented."""
+    _seed_target()
+    app = _app()
+    text = " ".join(m.value for m in app.markdown)
+    assert "no way to mark this done by hand" in text
+    assert "survive inside its paragraph" in text
+    assert "come back on its own" in text
+
+
+def test_a_target_with_no_fresh_take_says_so_rather_than_implying_a_measurement() -> None:
+    _seed_target()
+    app = _app()
+    assert any("Not measured yet" in m.value for m in app.markdown)
+
+
+def test_a_ladder_target_can_be_taken_off_the_list() -> None:
+    """Bailing on a target has to be as available as bailing mid-session."""
+    _seed_target()
+    app = _app()
+    remove = [b for b in app.button if b.label == "Take it off the list"]
+    assert remove
+    remove[0].click().run()
+    assert not app.exception
+    conn = db.connect(os.environ["DB_PATH"])
+    remaining = [r for r in db.targets(conn) if str(r["kind"]) == "sentence"]
+    conn.close()
+    assert not remaining
+
+
+def test_a_ladder_target_does_not_consume_one_of_the_three_perception_slots() -> None:
+    """MAX_ACTIVE_TARGETS is about what you can hold in your head while speaking."""
+    _seed_target()
+    assert not practice_queue.promotable("sentence")
