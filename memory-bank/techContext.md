@@ -1022,3 +1022,94 @@ silently short.
 **The noise floor is the point of reading the passage twice.** Stored beside the baseline, and
 nothing smaller than the band is ever reported as change — including when it moves the
 flattering way. Two back-to-back reads are refused, with the reason on screen.
+
+### Mode C — unscripted assessment
+
+Landed 2026-08-21 (milestone v0.12.0, closing #12). The third recording mode, and the only one
+that measures the register this project exists for: generating language and monitoring
+pronunciation at the same time. Reading aloud does not test that.
+
+**Content assessment was retired by Microsoft, and the route was closed before it was planned
+around.** The master plan cites `enable_content_assessment_with_topic`; it exists on neither
+`PronunciationAssessmentConfig` nor the module, because the feature was retired at Speech SDK
+1.46.0 and this project pins 1.51.1. The JSON config still passes unknown keys through untouched
+— they round-trip out of `to_json()` — so the retired fields *can* be sent, and on 2026-08-21
+they were, on a real unscripted call. The response carried `AccuracyScore`, `CompletenessScore`,
+`FluencyScore`, `PronScore`, `ProsodyScore` and nothing else. Content scores therefore come from
+Gemini against Microsoft's own published replacement rubric, and `content_score.Scores.source`
+carries that distinction into storage so a stored score can never later be presented as Azure's.
+`UNSCRIPTED_CONTENT_PROBE` plus `scripts/content_probe.py` re-ask the question cheaply if that
+ever changes; `speech_analyzer.azure_content_scores` still reads the fields if they reappear.
+
+**Two passes, because one would diagnose the wrong sounds.** Unscripted assessment runs on a
+weaker speech-to-text model than standard Azure STT — Microsoft's own documentation says so and
+recommends the fix. So `_transcribe_continuous` buys an accurate transcript first with no
+pronunciation config applied at all, and `_assess_continuous` then runs an ordinary *scripted*
+assessment against it. It roughly doubles audio-hour consumption for the recording and it is
+worth it: a phoneme diagnosis against a wrong transcript is worse than none, because it
+confidently blames the wrong sounds. `Assessment.scored_against` carries the transcript so every
+surface can name what the diagnosis was measured against.
+
+**The meter counts both passes, and that is one number rather than a second multiplier.**
+`budget.passes_for` and `preflight_stt` already priced Mode C at two passes before the first was
+sent; the gap was post-hoc, since the meter is `attempts.audio_seconds` written as
+`seconds × attempts`. `_AttemptMeter` closes each pass explicitly as it returns, so both passes'
+`retry_transient` numberings — each of which restarts at 1 — add rather than replace. Verified
+live 2026-08-21: a 35.7 s clip, pre-flight priced 71 s before pass 1, `attempts=2`, meter moved
+0 → 71 s. **Exactly 2.00×.**
+
+**What Mode C refuses to report.** No completeness score, ever — there is nothing to be complete
+against, and the committed fixture proves the suppression is load-bearing rather than cosmetic:
+pass 2 *is* a scripted assessment, so Azure returns a `CompletenessScore` computed against the
+machine's own transcript, ~100 by construction. No miscue diff either, for the same reason — a
+diff there reports one recogniser disagreeing with another as a speaker error. Repetitions are
+still caught, by `_mark_adjacent_repetitions`, from adjacency alone: free speech is where
+stumbles actually happen, and losing them in the one mode that produces them would be the wrong
+trade.
+
+**`reference_text` holds the PROMPT in this mode.** It is never read aloud, never scored against
+and never sent to Azure as a reference text. It is stored because the content scorer judges topic
+relevance against it and because two recordings are paired into a spontaneous calibration by
+matching it — and because it is the only thing that makes a Mode C row readable in the history
+table. The column comment says so.
+
+### Read and spontaneous speech are never pooled
+
+Spontaneous speech is not read speech measured under harder conditions — it is a systematically
+different population. Speakers hyperarticulate when reading and reduce far more when generating
+language: vowels centralise, durations shorten, unstressed syllables collapse further toward
+schwa. Every one of those is something the accent measurement measures, so pooling them makes a
+change of register look like a regression toward the middle of the vowel space. The
+`read`/`spontaneous` tag has been on every attempt since v0.10.0; v0.12.0 is what made it
+load-bearing.
+
+- **One current `speaker_baseline` per `style_tag`.** `save_baseline` supersedes only within its
+  own style; `current_baseline(conn, style=...)` requires the style and has no default, because a
+  default is a guess about which population a reading belongs to. Two current rows is the correct
+  state and neither is ever averaged into the other.
+- **The LPC ceiling is the one thing shared across styles** (`any_current_baseline`, oldest
+  first). It tracks vocal tract length, not register, and a second sweep would produce formants
+  incomparable with every reading already stored.
+- **`plot_gate` refuses a style mismatch rather than warning above the chart.** The warning was
+  the original design and it was not enough: the numbers were still drawn, still looked
+  comparable against last month's, and a caveat is the first thing a reader skips.
+- **`refusal_reason` names what is actually missing.** `plot_gate` is handed the style-specific
+  baseline, so "never calibrated" and "calibrated, but for the other style" look identical to it
+  — and those need opposite advice. The distinction is resolved in `app.py`, where the other
+  styles can be looked up.
+- **A spontaneous baseline is built from the same PROMPT twice**, at least
+  `CALIBRATION_GAP_MINUTES` apart. The content is not identical, so its floor carries content
+  variation on top of measurement noise and is **wider than the read floor by construction** — an
+  upper bound, which is the conservative direction: it can only refuse to call something progress
+  until the change is bigger. The surface says which of the two it is looking at.
+- **The per-vowel token floor is style-aware** (`minimum_tokens_for`). Read speech keeps
+  `minimum=1` against a stored baseline, because a drill token is a deliberate probe of a sound
+  the speaker chose — that is what makes the measure-drill-remeasure loop possible. Free speech
+  samples the vowel space wherever the sentence went, so a lone token is not a probe of anything;
+  spontaneous readings are held to `MIN_TOKENS_PER_CATEGORY` and a category below it is refused
+  rather than drawn as a lonely confident dot.
+- **The four-column contract takes one addition**: the style joins the token count in the User
+  Realization column — `873 Hz (n=6, read)` — applied by `_tag_style` to cells that carry a
+  count. Columns and their order are untouched. Without it the reader cannot tell which
+  population a number came from, and comparing this month's spontaneous vowel space against last
+  month's read one teaches nothing except that they read aloud more carefully than they speak.
