@@ -54,13 +54,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-import accent_charts  # noqa: E402
 import accent_resynth  # noqa: E402
 import db  # noqa: E402
 import ladder  # noqa: E402
 import native_model  # noqa: E402
 import progress_view  # noqa: E402
-import rhythm  # noqa: E402
 import shadowing  # noqa: E402
 import speech_analyzer  # noqa: E402
 import utils  # noqa: E402
@@ -71,11 +69,8 @@ OUT = ROOT / "src" / "ladder_reference.py"
 # for a reference set, and for the same stated reason.
 MIN_VOICES = native_model.MIN_VOICES_PER_SET
 
-# The metrics each rung is judged on. Named here rather than inferred from whatever came back,
-# so a metric that silently stopped being measurable shows up as a missing band.
-WORD_METRICS: tuple[str, ...] = ("relative_duration",)
-SENTENCE_METRICS: tuple[str, ...] = ("pitch_range_st", "terminal_slope_st", "npvi")
-PARAGRAPH_METRICS: tuple[str, ...] = ("pitch_range_st", "terminal_slope_st", "npvi", "prosody")
+# What each rung is judged on comes from `ladder.METRICS` rather than a second list here: a
+# metric added to the surface and forgotten in the builder would silently ship without a band.
 
 
 @dataclass
@@ -88,71 +83,44 @@ class VoiceScalars:
     paragraph: dict[str, float] = field(default_factory=dict)
 
 
-def _track_within(
-    track: Sequence[tuple[float, float]], span: ladder.Span
-) -> list[tuple[float, float]]:
-    """The pitch points inside one span. Unpadded — a band is measured on the unit itself."""
-    return [(time_s, hz) for time_s, hz in track if span.start_s <= time_s <= span.end_s]
-
-
-def _pitch_scalars(track: Sequence[tuple[float, float]]) -> dict[str, float]:
-    """Range and terminal slope, if the track is long enough to carry them.
-
-    The same two functions `app._pitch_findings` already compares the user against, so the
-    band and the comparison cannot end up measuring different quantities.
-    """
-    found: dict[str, float] = {}
-    span = accent_charts.pitch_range_semitones(track)
-    if span is not None:
-        found["pitch_range_st"] = float(span)
-    slope = accent_charts.terminal_slope_semitones(track)
-    if slope is not None:
-        found["terminal_slope_st"] = float(slope)
-    return found
-
-
 def measure(rendering: native_model.Rendering, text: str) -> VoiceScalars | None:
-    """Reduce one rendering to per-rung scalars. None when it cannot be measured at all."""
+    """Reduce one rendering to per-rung scalars. None when it cannot be measured at all.
+
+    Every number comes out of `ladder.scalars`, the same function the practice surface uses on
+    the speaker. That is deliberate: a band and the comparison against it must not be able to
+    drift into measuring different quantities.
+    """
     audio = rendering.audio()
     if audio is None:
         return None
     words = rendering.words()
     track = accent_resynth.pitch_track(audio)
+    divisor = ladder.mean_word_seconds(words)
     found = VoiceScalars(rendering.voice)
 
-    # --- Word rung: duration relative to THIS voice's own mean word. See decision 3.
-    word_spans = ladder.word_spans(words)
-    durations = [span.seconds for span in word_spans if span.seconds > 0]
-    if durations:
-        mean_word = statistics.fmean(durations)
-        for span in word_spans:
-            if span.seconds <= 0 or mean_word <= 0:
-                continue
-            found.words[span.word_indices[0]] = {"relative_duration": span.seconds / mean_word}
+    for span in ladder.word_spans(words):
+        measured = ladder.scalars(span, words, track, divisor=divisor)
+        if measured:
+            found.words[span.word_indices[0]] = measured
 
-    # --- Sentence rung.
     for index, span in enumerate(ladder.sentence_spans(words, text)):
-        scalars = _pitch_scalars(_track_within(track, span))
-        measured = rhythm.npvi([words[i] for i in span.word_indices])
-        if measured.npvi is not None:
-            scalars["npvi"] = float(measured.npvi)
-        if scalars:
-            found.sentences[index] = scalars
+        measured = ladder.scalars(span, words, track, divisor=divisor)
+        if measured:
+            found.sentences[index] = measured
 
-    # --- Paragraph rung, including Azure's own prosody score for the whole reading.
     whole = ladder.paragraph_span(words, text)
     if whole is not None:
-        scalars = _pitch_scalars(_track_within(track, whole))
-        measured = rhythm.npvi(words)
-        if measured.npvi is not None:
-            scalars["npvi"] = float(measured.npvi)
         overall, _, _ = speech_analyzer.normalise(
             rendering.payloads, rendering.reference_text, native_model.CAPTURE_MODE
         )
         prosody = overall.get("prosody")
-        if isinstance(prosody, int | float):
-            scalars["prosody"] = float(prosody)
-        found.paragraph = scalars
+        found.paragraph = ladder.scalars(
+            whole,
+            words,
+            track,
+            divisor=divisor,
+            prosody=float(prosody) if isinstance(prosody, int | float) else None,
+        )
 
     return found
 
@@ -315,10 +283,10 @@ def main() -> int:
         )
         return 1
 
-    words = collect([v.words for v in measured], WORD_METRICS)
-    sentences = collect([v.sentences for v in measured], SENTENCE_METRICS)
+    words = collect([v.words for v in measured], ladder.METRICS[ladder.Rung.WORD])
+    sentences = collect([v.sentences for v in measured], ladder.METRICS[ladder.Rung.SENTENCE])
     paragraph: dict[str, ladder.Band] = {}
-    for metric in PARAGRAPH_METRICS:
+    for metric in ladder.METRICS[ladder.Rung.PARAGRAPH]:
         values = [v.paragraph[metric] for v in measured if metric in v.paragraph]
         made = band(metric, values)
         if made is not None:

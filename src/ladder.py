@@ -28,7 +28,9 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 
+import accent_charts
 import phoneme_reference
+import rhythm
 import shadowing
 import utils
 
@@ -396,3 +398,88 @@ class Band:
         if value is None or self.sd <= 0.0:
             return None
         return max(0.0, (abs(value - self.mean) - self.sd) / self.sd)
+
+
+# --- Measuring a span ----------------------------------------------------------------------------
+# The user's re-attempt and the reference renderings go through THESE functions, both of them.
+# `scripts/build_ladder_reference.py` builds the bands by calling them over the model voices,
+# and the practice surface judges an attempt by calling them over the speaker. One definition,
+# so a band and the comparison against it cannot end up measuring different quantities.
+
+
+# The metrics each rung is judged on. The sound rung is absent on purpose: `model_reference`
+# already carries a between-voice formant spread per vowel, and publishing a second one would
+# be two sources of truth for one claim.
+METRICS: Mapping[Rung, tuple[str, ...]] = {
+    Rung.WORD: ("relative_duration",),
+    Rung.SENTENCE: ("pitch_range_st", "terminal_slope_st", "npvi"),
+    Rung.PARAGRAPH: ("pitch_range_st", "terminal_slope_st", "npvi", "prosody"),
+}
+
+METRIC_LABELS: Mapping[str, str] = {
+    "relative_duration": "length relative to your own average word",
+    "pitch_range_st": "pitch range",
+    "terminal_slope_st": "terminal fall",
+    "npvi": "rhythm (nPVI)",
+    "prosody": "prosody score",
+}
+
+
+def track_within(track: Sequence[tuple[float, float]], span: Span) -> list[tuple[float, float]]:
+    """The pitch points inside one span. Unpadded — a unit is measured on itself.
+
+    The playback cut carries `PAD_S` either side so a word does not begin mid-burst; a
+    measurement must not, or every span would be judged partly on its neighbours.
+    """
+    return [(time_s, hz) for time_s, hz in track if span.start_s <= time_s <= span.end_s]
+
+
+def mean_word_seconds(words: Sequence[Mapping[str, object]]) -> float | None:
+    """The reading's own average spoken word length. The divisor for `relative_duration`."""
+    lengths = [span.seconds for span in word_spans(words) if span.seconds > 0]
+    if not lengths:
+        return None
+    return sum(lengths) / len(lengths)
+
+
+def scalars(
+    span: Span,
+    words: Sequence[Mapping[str, object]],
+    track: Sequence[tuple[float, float]],
+    *,
+    divisor: float | None = None,
+    prosody: float | None = None,
+) -> dict[str, float]:
+    """Every metric measurable for `span`, keyed as `METRICS` names them.
+
+    `divisor` is the reading's mean word length, passed in rather than recomputed per span —
+    it is a property of the whole reading, and at word rung this would otherwise be computed
+    once per word. `prosody` is Azure's own score for the reading and only reaches the
+    paragraph rung, because it does not decompose below the utterance it was computed on.
+    """
+    found: dict[str, float] = {}
+
+    if span.rung is Rung.WORD:
+        if divisor and span.seconds > 0:
+            found["relative_duration"] = span.seconds / divisor
+        return found
+
+    if span.rung is Rung.SOUND:
+        # Judged on vowel position against `model_reference.sd50`, not here.
+        return found
+
+    inside = track_within(track, span)
+    spread = accent_charts.pitch_range_semitones(inside)
+    if spread is not None:
+        found["pitch_range_st"] = float(spread)
+    slope = accent_charts.terminal_slope_semitones(inside)
+    if slope is not None:
+        found["terminal_slope_st"] = float(slope)
+
+    measured = rhythm.npvi([words[index] for index in span.word_indices])
+    if measured.npvi is not None:
+        found["npvi"] = float(measured.npvi)
+
+    if span.rung is Rung.PARAGRAPH and prosody is not None:
+        found["prosody"] = float(prosody)
+    return found
