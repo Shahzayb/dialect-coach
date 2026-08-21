@@ -44,6 +44,8 @@ import budget
 import content_score
 import db
 import fallback_coach
+import ladder
+import ladder_practice
 import native_model
 import perception_trainer
 import phoneme_reference
@@ -3553,6 +3555,10 @@ def render_today(
         render_shadow(conn, job, running)
         return
 
+    if st.session_state.get(LADDER_KEY):
+        render_ladder_practice(conn)
+        return
+
     targets = sync_queue(conn)
     with _DB_LOCK:
         fingerprint = db.attempt_fingerprint(conn)
@@ -3587,6 +3593,8 @@ def render_today(
         # Shadowing is offered even here. It is the one practice on this page that needs no
         # history at all: it trains rhythm and intonation against a model rather than a sound
         # your own recordings flagged, so there is nothing for it to wait for.
+        st.divider()
+        render_ladder_offer(conn)
         st.divider()
         render_shadow_offer(conn, targets, now=now)
         return
@@ -3634,6 +3642,9 @@ def render_today(
         )
 
     st.divider()
+    render_ladder_offer(conn)
+
+    st.divider()
     render_shadow_offer(conn, targets, now=now)
 
     st.divider()
@@ -3663,6 +3674,63 @@ def render_today(
         )
         for target in graduated:
             render_target_card(conn, target, still_flagged)
+
+
+def render_ladder_offer(conn: sqlite3.Connection) -> None:
+    """The way into the practice ladder: pick a reading, pick a level, start.
+
+    Offered from Today rather than given its own tab. These are queue targets and Today is
+    where "what am I doing today?" is answered — the same reason a perception block opens in
+    place here instead of somewhere else.
+    """
+    st.markdown("#### Practise one unit against your own corrected voice")
+    readings = [
+        row
+        for row in _measurable_attempts(conn)
+        if ladder_practice.covers(str(row["reference_text"] or ""))
+    ]
+    if not readings:
+        st.caption(
+            f"Nothing to practise yet. The arrival bands were measured on one passage — "
+            f"**{progress_view.BENCHMARK_TITLE}** — so a reading of that passage is what "
+            f"this can judge. Read it on the Practice tab and it appears here."
+        )
+        return
+
+    st.caption(
+        "You hear what you said, a native saying it, and your own voice with one thing "
+        "changed. Then you say it again, as many times as you like — every repetition is "
+        "measured here, with no network and no allowance spent."
+    )
+    # Ids, never the rows themselves: Streamlit deep-copies a widget's options into session
+    # state, and a `sqlite3.Row` cannot be pickled — which takes down the whole script, not
+    # just this widget.
+    labels = {
+        int(row["id"]): f"#{row['id']} · {str(row['created_at'])[:16].replace('T', ' ')}"
+        for row in readings
+    }
+    reading, level, go = st.columns([3, 2, 1])
+    chosen = reading.selectbox(
+        "From which reading",
+        list(labels),
+        format_func=lambda attempt_id: labels[attempt_id],
+        key="ladder_reading",
+    )
+    rung = level.selectbox(
+        "At what level",
+        [ladder.Rung.WORD, ladder.Rung.SENTENCE, ladder.Rung.PARAGRAPH],
+        index=1,
+        format_func=lambda r: ladder.RUNG_LABELS[r].title(),
+        key="ladder_rung",
+        help=(
+            "A sound is measured but never played on its own — you hear it inside its word. "
+            "The sentence is where the difficulty actually is."
+        ),
+    )
+    go.markdown("&nbsp;")
+    if go.button("▶ Start", type="primary", key="ladder_start"):
+        open_ladder(int(chosen), rung)
+        st.rerun()
 
 
 def render_shadow_offer(
@@ -4543,6 +4611,303 @@ def render_history(conn: sqlite3.Connection) -> None:
                 hide_index=True,
                 width="stretch",
             )
+
+
+# --- The practice ladder ---------------------------------------------------------------------
+# The three-way listen, as the practice surface rather than a demo inside a chart. Opens in
+# place on Today, the way a perception block does, because these are queue targets and Today is
+# where "what am I doing today?" is answered.
+
+LADDER_KEY = "ladder_practice"
+LADDER_TAKE = "ladder_take"
+
+
+@dataclass(frozen=True)
+class LadderContext:
+    """Everything one practice session needs, loaded once per rerun."""
+
+    attempt_id: int
+    reference_text: str
+    words: list[dict[str, Any]]
+    audio: bytes
+    alignment: Any
+    voice: str | None
+    native_words: list[dict[str, Any]]
+    native_audio: bytes | None
+    native_alignment: Any
+
+
+def open_ladder(attempt_id: int, rung: ladder.Rung, unit: int = 0) -> None:
+    st.session_state[LADDER_KEY] = {"attempt": attempt_id, "rung": rung.value, "unit": unit}
+    st.session_state.pop(LADDER_TAKE, None)
+
+
+def close_ladder() -> None:
+    """Bailing. A first-class outcome, not a failure — and it must not stall the queue."""
+    st.session_state.pop(LADDER_KEY, None)
+    st.session_state.pop(LADDER_TAKE, None)
+
+
+def ladder_context(conn: sqlite3.Connection, attempt_id: int) -> LadderContext | None:
+    """Load the speaker's reading and the nearest reference voice's reading of the same text."""
+    attempt = db.get_attempt(conn, attempt_id)
+    if attempt is None:
+        return None
+    reference_text = str(attempt["reference_text"] or "")
+    audio = stored_audio_bytes(conn, attempt_id)
+    words = _words_for(conn, attempt_id, reference_text)
+    if audio is None or not words:
+        return None
+
+    track = accent_resynth.pitch_track(audio)
+    tracked = [hz for _, hz in track if hz > 0]
+    voice = ladder_practice.nearest_voice(statistics.median(tracked) if tracked else None)
+    rendering = (
+        native_model.rendering_for(conn, reference_text, voice) if voice is not None else None
+    )
+    native_words = list(rendering.words()) if rendering is not None else []
+    native_audio = rendering.audio() if rendering is not None else None
+
+    return LadderContext(
+        attempt_id=attempt_id,
+        reference_text=reference_text,
+        words=words,
+        audio=audio,
+        alignment=ladder.align(words, reference_text),
+        voice=voice if native_audio is not None else None,
+        native_words=native_words,
+        native_audio=native_audio,
+        native_alignment=ladder.align(native_words, reference_text),
+    )
+
+
+def ladder_floor(conn: sqlite3.Connection, reference_text: str) -> ladder.MetricFloor | None:
+    """The speaker's own noise floor for these metrics, from two reads of the same passage.
+
+    The same construction the vowel noise floor uses, over the same two recordings: how far
+    these numbers wander between two reads with no learning in between. Without it nothing can
+    be called movement, so nothing can resolve — which is the honest state, not a bug.
+    """
+    rows = [
+        row
+        for row in db.attempt_series(conn)
+        if str(row["reference_text"] or "") == reference_text and not row["rep"]
+    ]
+    if len(rows) < 2:
+        return None
+    readings: list[dict[int, dict[str, float]]] = []
+    for row in rows[:2]:
+        audio = stored_audio_bytes(conn, int(row["id"]))
+        words = _words_for(conn, int(row["id"]), reference_text)
+        if audio is None or not words:
+            continue
+        track = accent_resynth.pitch_track(audio)
+        divisor = ladder.mean_word_seconds(words)
+        found: dict[int, dict[str, float]] = {}
+        for unit in ladder_practice.units(words, reference_text, ladder.Rung.SENTENCE):
+            if unit.script_index is not None:
+                found[unit.script_index] = ladder.scalars(unit.span, words, track, divisor=divisor)
+        readings.append(found)
+    if len(readings) < 2:
+        return None
+    return ladder.metric_noise_floor(readings[0], readings[1])
+
+
+def _metric_line(judged: Any) -> str:
+    """One metric, in words, saying which bar it cleared and which it did not."""
+    label = ladder.METRIC_LABELS.get(judged.metric, judged.metric)
+    if judged.value is None:
+        return f"**{label}** — not measurable on this take."
+    if judged.band is None:
+        return f"**{label}** — {judged.value:.2f}, with no native band for this unit to judge it."
+    where = (
+        "inside the native range"
+        if judged.arrived
+        else f"{judged.distance_sd:.1f} SD outside the native range"
+    )
+    moved = {
+        None: "first take, so there is nothing to have moved from",
+        True: "and the change clears your own variation",
+        False: "but the change is smaller than your own session-to-session variation",
+    }[judged.moved]
+    return (
+        f"**{label}** — you {judged.value:.2f}, native "
+        f"{judged.band.mean:.2f} ± {judged.band.sd:.2f} · {where}, {moved}."
+    )
+
+
+def render_ladder_practice(conn: sqlite3.Connection) -> None:
+    """Mine, native, mine-with-one-thing-changed — then say it again and see where it lands."""
+    state = st.session_state.get(LADDER_KEY) or {}
+    rung = ladder.Rung(str(state.get("rung") or ladder.Rung.SENTENCE.value))
+    context = ladder_context(conn, int(state.get("attempt") or 0))
+
+    header, bail = st.columns([5, 1])
+    header.markdown(f"### Practising one {ladder.RUNG_LABELS[rung]}")
+    if bail.button("Drop this", key="ladder_drop"):
+        # First-class outcome. Nothing is written, nothing is marked failed.
+        close_ladder()
+        st.rerun()
+
+    if context is None:
+        st.warning(
+            "That attempt's recording or its word timings are no longer readable, so there is "
+            "nothing to practise against. Recordings live under a gitignored directory.",
+            icon="🎙️",
+        )
+        return
+
+    units = ladder_practice.units(context.words, context.reference_text, rung)
+    if not units:
+        st.info(
+            "This recording has no practisable unit at this level. A sentence needs the "
+            "reading to line up with its script, which free speech has none of.",
+            icon="🪜",
+        )
+        return
+
+    index = min(int(state.get("unit") or 0), len(units) - 1)
+    unit = units[index]
+    span = unit.span
+
+    if len(units) > 1:
+        chosen = st.selectbox(
+            "Which one",
+            range(len(units)),
+            index=index,
+            format_func=lambda i: f"{i + 1}. {units[i].span.label[:70]}",
+            key="ladder_unit",
+        )
+        if chosen != index:
+            st.session_state[LADDER_KEY] = {**state, "unit": int(chosen)}
+            st.session_state.pop(LADDER_TAKE, None)
+            st.rerun()
+
+    st.markdown(f"> {span.label}")
+
+    # --- The three-way listen. Original first, always, and labelled.
+    st.markdown("#### Hear it — your voice, one thing changed")
+    st.caption(accent_resynth.OWN_VOICE_NOTICE)
+
+    try:
+        mine = ladder.cut(context.audio, span)
+    except ladder.LadderError as exc:
+        st.warning(str(exc), icon="✂️")
+        return
+
+    st.caption("**1. Mine** — what you actually said")
+    st.audio(mine, format="audio/wav")
+
+    leg = None
+    if context.native_audio is not None and context.voice is not None:
+        leg = ladder_practice.native_leg(
+            span,
+            context.alignment,
+            context.native_alignment,
+            context.native_words,
+            context.native_audio,
+            context.voice,
+        )
+    if leg is not None:
+        st.caption(f"**2. Native** — {leg.voice.replace('en-US-', '').replace('Neural', '')}")
+        st.audio(leg.audio, format="audio/wav")
+    else:
+        st.caption(
+            "**2. Native** — no stored voice has read this unit, so there is nothing to play. "
+            "A word you said that is not in the script has no native version by definition."
+        )
+
+    render_ladder_corrections(context, span)
+
+    st.divider()
+    render_ladder_repeat(conn, context, unit)
+
+
+def render_ladder_corrections(context: LadderContext, span: ladder.Span) -> None:
+    """The third leg. Three separate corrections, each changing exactly one thing."""
+    key = f"ladder_fix_{span.rung.value}_{span.start_s:.2f}"
+    pitch, timing = st.columns(2)
+
+    def run(build: Any) -> None:
+        try:
+            st.session_state[key] = build()
+        except accent_resynth.ResynthesisError as exc:
+            st.session_state.pop(key, None)
+            st.warning(str(exc), icon="🎚️")
+
+    model_tracks = (
+        [accent_resynth.pitch_track(context.native_audio)]
+        if context.native_audio is not None
+        else []
+    )
+    anchors = accent_charts.word_anchors(context.words, context.native_words)
+
+    if pitch.button("Native intonation", key=f"{key}_pitch", disabled=not model_tracks):
+        run(
+            lambda: ladder_practice.corrected_pitch_in(
+                context.audio, span, _target_contour(model_tracks, anchors)
+            )
+        )
+    if timing.button("Native vowel lengths", key=f"{key}_timing"):
+        st.session_state.pop(key, None)
+        st.caption("Vowel lengths need the measurement from a banked take.")
+
+    result = st.session_state.get(key)
+    if result is None:
+        return
+    st.caption(f"**3. {result.label}**")
+    st.audio(result.audio, format="audio/wav")
+    if result.note:
+        st.info(result.note, icon="🎚️")
+
+
+def render_ladder_repeat(
+    conn: sqlite3.Connection, context: LadderContext, unit: ladder_practice.Unit
+) -> None:
+    """Say it again, as many times as you like, and see where each one lands."""
+    st.markdown("#### Say it again")
+    st.caption(
+        "Every repetition is measured here on this machine — no network, no waiting, no "
+        "allowance spent, however many times you go round. Rhythm and word length need "
+        "Azure's phoneme boundaries, so they stay dark until you bank a take."
+    )
+
+    take = st.audio_input("Your attempt", key=LADDER_TAKE)
+    if take is None:
+        return
+
+    try:
+        wav_bytes, _ = audio_utils.prepare(take.getvalue(), Mode.DRILL)
+    except audio_utils.AudioError as exc:
+        st.warning(str(exc), icon="🎙️")
+        return
+
+    values = ladder.local_scalars(wav_bytes, unit.span.rung)
+    floor = ladder_floor(conn, context.reference_text)
+    previous = ladder.local_scalars(ladder.cut(context.audio, unit.span), unit.span.rung)
+    judged = ladder.verdict(unit.span, values, unit.bands, previous=previous, floor=floor)
+
+    st.audio(wav_bytes, format="audio/wav")
+    if not unit.judgeable:
+        st.info(
+            "Nothing here can be judged: this passage has no measured native band, so there "
+            "is no range to be inside. Practising still works; resolving does not.",
+            icon="📏",
+        )
+        return
+
+    for metric in judged.metrics:
+        if metric.metric in ladder.LOCAL_METRICS:
+            st.markdown(f"- {_metric_line(metric)}")
+    dark = [m for m in judged.metrics if m.metric not in ladder.LOCAL_METRICS]
+    if dark:
+        names = ", ".join(ladder.METRIC_LABELS.get(m.metric, m.metric) for m in dark)
+        st.caption(f"Dark until you bank a take: {names}.")
+    if floor is None:
+        st.caption(
+            "No movement can be called progress yet — that needs two reads of this passage "
+            "to know how much these numbers wander on their own."
+        )
 
 
 def render() -> None:
