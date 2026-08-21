@@ -339,6 +339,74 @@ def test_a_target_with_no_due_date_counts_as_due() -> None:
     assert pq.due([target("x", next_due=None)], now=NOW)
 
 
+# --- Rotation ----------------------------------------------------------------------------------
+# Found by hand on 2026-08-20, after the user said they were tired of being given `/w/ → /v/`.
+# `next_due` is written back only on a state change, so a completed block that leaves the target
+# active writes `last_seen` and nothing else — and every active target carries the same
+# `next_due` ("due now") by design. A stable sort then pins whichever row was added first at
+# index 0, and `render_today` takes `trainable[0]` forever. `last_seen` was written in two places
+# and read in none; it is the field this wants.
+
+
+def test_the_least_recently_practised_target_comes_first() -> None:
+    rows = [
+        target("worked yesterday", last_seen="2026-08-10T00:00:00Z", id=1),
+        target("worked last week", last_seen="2026-08-03T00:00:00Z", id=2),
+    ]
+    assert [r["item"] for r in pq.due(rows, now=NOW)] == ["worked last week", "worked yesterday"]
+
+
+def test_a_target_never_practised_comes_before_any_that_has_been() -> None:
+    """Never-seen beats least-recently-seen: a target nobody has touched has the weakest claim
+    to still being a problem and the strongest claim on the one block slot."""
+    rows = [
+        target("worked last week", last_seen="2026-08-03T00:00:00Z", id=1),
+        target("never touched", last_seen=None, id=2),
+    ]
+    assert [r["item"] for r in pq.due(rows, now=NOW)] == ["never touched", "worked last week"]
+
+
+def test_practising_the_head_moves_it_to_the_back() -> None:
+    """The whole point: three active targets sharing one `next_due` must take turns.
+
+    This is the live sequence. `/w/ → /v/` held the only block slot across two completed blocks
+    at 75% and 80% — both under the 90% graduation bar, so it stayed active and its `next_due`
+    was never rewritten — while two targets carrying more evidence could never be offered.
+    """
+    rows = [
+        target("/w/ → /v/", id=1),
+        target("/ɑ/ → /ɔ/", id=2),
+        target("/i/ → /ɪ/", id=3),
+    ]
+    offered: list[str] = []
+    for _block in range(3):
+        item = str(pq.due(rows, now=NOW)[0]["item"])
+        offered.append(item)
+        # A block that scores under the graduation bar leaves the target active and writes
+        # `last_seen` alone — the exact write the old ordering ignored.
+        row = next(r for r in rows if r["item"] == item)
+        row["last_seen"] = pq._iso(NOW + timedelta(minutes=len(offered)))
+
+    assert sorted(offered) == sorted(r["item"] for r in rows), (
+        f"three blocks offered {offered} — the queue is not taking turns"
+    )
+
+
+def test_a_graduated_review_still_sorts_behind_every_active_target() -> None:
+    """Rotation is a tiebreak inside each group, never a way past the active/review split."""
+    rows = [
+        target("review", state=pq.GRADUATED, last_seen=None, next_due="2026-08-01T00:00:00Z"),
+        target("active", last_seen="2026-08-10T00:00:00Z"),
+    ]
+    assert [r["item"] for r in pq.due(rows, now=NOW)] == ["active", "review"]
+
+
+def test_the_order_is_total_so_two_runs_never_disagree() -> None:
+    rows = [target("beta", id=1), target("alpha", id=2)]
+    assert [r["item"] for r in pq.due(rows, now=NOW)] == ["alpha", "beta"]
+    assert [r["item"] for r in pq.due(list(reversed(rows)), now=NOW)] == ["alpha", "beta"]
+
+
 # --- Evidence ----------------------------------------------------------------------------------
 
 

@@ -510,7 +510,23 @@ def review_horizon(reviews_passed: int) -> str:
 
 
 def due(targets: Iterable[Mapping[str, Any]], *, now: datetime) -> list[Mapping[str, Any]]:
-    """What is due, soonest first. Active items sort ahead of graduated reviews."""
+    """What is due, least recently practised first. Active items sort ahead of reviews.
+
+    **`next_due` is the gate, `last_seen` is the rotation.** An item is only in this list at all
+    once `next_due` has come round — but ordering the list by it does not work, because
+    `next_due` reads "now" for every active target by design (see `next_due` above), and a
+    completed block that leaves the target active never rewrites it. That made the sort key a
+    constant, a stable sort pinned whichever row was added first at index 0, and `render_today`
+    takes `trainable[0]`: one target held the only block slot across every session while the
+    others could not be reached until it graduated. Found by hand on 2026-08-20 with `/w/ → /v/`
+    on its third block, carrying the least evidence of the three active targets.
+
+    So the rotation runs on `last_seen`, which was already being written on every finished block
+    and read by nothing. Never practised sorts first — it has the strongest claim on the slot and
+    the least evidence that it is no longer a problem — then oldest. `next_due` stays as a
+    tiebreak, which is what still orders graduated reviews sensibly against each other, and the
+    item name makes the order total so two runs on the same rows can never disagree.
+    """
     ready = []
     for row in targets:
         moment = _parse(row.get("next_due"))
@@ -519,7 +535,10 @@ def due(targets: Iterable[Mapping[str, Any]], *, now: datetime) -> list[Mapping[
     ready.sort(
         key=lambda row: (
             0 if str(row.get("state")) == ACTIVE else 1,
+            # "" for a target nobody has practised yet, which sorts ahead of every timestamp.
+            str(row.get("last_seen") or ""),
             str(row.get("next_due") or ""),
+            str(row.get("item") or ""),
         )
     )
     return ready
