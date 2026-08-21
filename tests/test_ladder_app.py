@@ -12,6 +12,7 @@ import io
 import json
 import os
 import wave
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,7 @@ import ladder
 import practice_queue
 import progress_view
 import shadowing
+import utils
 from utils import Mode
 
 APP = str(Path(__file__).resolve().parent.parent / "src" / "app.py")
@@ -306,3 +308,65 @@ def test_a_ladder_target_does_not_consume_one_of_the_three_perception_slots() ->
     """MAX_ACTIVE_TARGETS is about what you can hold in your head while speaking."""
     _seed_target()
     assert not practice_queue.promotable("sentence")
+
+
+# --- The fixes from review ------------------------------------------------------------------------
+
+
+def test_the_block_grader_never_touches_a_ladder_target() -> None:
+    """It has no blocks by design, so grading one there answers a question it cannot answer."""
+    _seed_target()
+    conn = db.connect(os.environ["DB_PATH"])
+    before = [dict(r) for r in db.targets(conn) if str(r["kind"]) == "sentence"]
+    conn.close()
+    app = _app()
+    assert not app.exception
+    conn = db.connect(os.environ["DB_PATH"])
+    after = [dict(r) for r in db.targets(conn) if str(r["kind"]) == "sentence"]
+    conn.close()
+    assert [t["state"] for t in after] == [t["state"] for t in before]
+    assert [t["next_due"] for t in after] == [t["next_due"] for t in before]
+
+
+def test_two_units_sharing_a_long_prefix_are_two_targets() -> None:
+    """`(item, kind)` is unique, so a truncated label would silently merge them."""
+    conn = db.connect(os.environ["DB_PATH"])
+    long_prefix = "The whole value is that the passage never changes, so whatever"
+    first = db.upsert_target(
+        conn, item=f"2: {long_prefix} moves", kind="sentence", evidence={"script_index": 2}
+    )
+    second = db.upsert_target(
+        conn, item=f"9: {long_prefix} shifts", kind="sentence", evidence={"script_index": 9}
+    )
+    kept = [r for r in db.targets(conn) if str(r["kind"]) == "sentence"]
+    conn.close()
+    assert first != second
+    assert len(kept) == 2
+
+
+def test_two_reads_taken_back_to_back_do_not_make_a_noise_floor(tmp_path: Path) -> None:
+    """An under-estimated floor calls noise movement, which is the flattering direction.
+
+    Asserted through `ladder.metric_noise_floor`'s inputs rather than the surface, because the
+    surface only reaches the floor once there is a recorded take to judge against it.
+    """
+    first = _seed_reading("2026-07-01T08:00:00Z")
+    second = _seed_reading("2026-07-01T08:02:00Z")  # two minutes apart
+    _seed_audio(first, _benchmark_words(), tmp_path)
+    _seed_audio(second, _benchmark_words(), tmp_path)
+
+    conn = db.connect(os.environ["DB_PATH"])
+    rows = [
+        r
+        for r in db.attempt_series(conn)
+        if str(r["reference_text"] or "") == progress_view.BENCHMARK_PASSAGE
+    ]
+    conn.close()
+    assert len(rows) == 2, "the two reads have to be there for the gap check to reject them"
+    gap = (
+        datetime.strptime(str(rows[1]["created_at"]), "%Y-%m-%dT%H:%M:%SZ")
+        - datetime.strptime(str(rows[0]["created_at"]), "%Y-%m-%dT%H:%M:%SZ")
+    ).total_seconds() / 60.0
+    assert gap < utils.get_float("CALIBRATION_GAP_MINUTES"), (
+        "this pair must sit under the bar, or the test proves nothing"
+    )

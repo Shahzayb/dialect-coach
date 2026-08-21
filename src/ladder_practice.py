@@ -159,7 +159,10 @@ def native_leg(
     """
     playable = span if span.rung in ladder.AUDIBLE else None
     if playable is None:
-        # A sound is heard inside its word, so walk up one rung before matching.
+        # A sound has no audio worth playing on its own — it is heard inside its word. Walking
+        # it up needs the speaker's own word list, which this function is not given, so the
+        # caller does it with `ladder.audible_span_for` and passes the word span in. Returning
+        # None here rather than guessing is the honest half of that split.
         return None
     their_spans = (
         ladder.spans(their_words, span.rung, None)
