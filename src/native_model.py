@@ -339,7 +339,8 @@ def capture(conn: sqlite3.Connection, text: str, voice: str) -> Rendering:
     budget.preflight_stt(conn, seconds, CAPTURE_MODE)
 
     with audio_utils.temp_wav(wav_bytes) as temp_path:
-        payloads, _, attempts = speech_analyzer.recognise(temp_path, text, CAPTURE_MODE)
+        recognition = speech_analyzer.recognise(temp_path, text, CAPTURE_MODE)
+        payloads, attempts = recognition.payloads, recognition.attempts
 
     key = text_key(text)
     path = wav_path_for(voice, key)
