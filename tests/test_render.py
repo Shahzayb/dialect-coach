@@ -282,7 +282,7 @@ def test_one_flat_passage_is_one_stretch_not_twenty_eight_words() -> None:
 
 def test_two_flat_passages_are_two_stretches_and_the_noun_agrees() -> None:
     """A gap means the fault stopped and started again — `delivery_faults` already cuts there."""
-    words = flat("one", "two") + [word("clear", 99.0)] + flat("three", "four", "five")
+    words = [*flat("one", "two"), word("clear", 99.0), *flat("three", "four", "five")]
     counted = badges(words)
     assert counted["Monotone stretches (5 words)"] == 2
 

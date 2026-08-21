@@ -195,6 +195,68 @@ phoneme payload, both coaches answer with a bridging phrase (a sentence forcing 
 varied consonant contexts, never a word list), and one click fills the practice textarea while a
 second promotes it to the queue as a `vowel` target with its evidence.
 
+**The four defects the 2026-08-20 manual session found are fixed, and one of them was
+diagnosed wrong when it was filed.** Each carries a test that fails against the bug it covers.
+Shadowing (the fifth) is untouched and still open.
+
+- **The Accent tab's reading/label mismatch was never about "the render where `options`
+  grows".** Verified against the installed streamlit 1.61.1 rather than recalled: `st.rerun()`
+  builds `RerunData(...)` with **no `widget_states`**, and the runner only restores the
+  browser's values `if rerun_data.widget_states is not None`; a `RerunException` is **not** a
+  premature stop (`exec_code.py` documents `premature_stop` as "False for RerunExceptions"), so
+  `_remove_stale_widgets` still runs after one. Any `st.rerun()` in Today or Practice ends the
+  script before the Accent tab is reached — tabs render in order — so its selector is stale on
+  that pass and its value is deleted from `_new_widget_state` and `_old_state` alike. The next
+  full run re-registers the widget from scratch, and with no `index=` the positional default is
+  `options[0]`, whichever reading is newest. Being a first registration it sets neither
+  `value_changed` nor `value_needs_reset`, so `set_value` never reaches the browser and it goes
+  on painting the label it already had. **It had been firing on every early-terminated rerun
+  all along** — no new attempt is needed, which the reproduction shows (`assert 2 == 1` on a
+  bare truncating rerun). It only became visible when the newest attempt stopped being the one
+  already selected. The default is now resolved by identity from a plain session key that
+  stale-widget cleanup does not touch, the same shape `render_shadow_offer`'s passage picker
+  already used; the chosen reading sticks, and a new reading arrives at the top of the list
+  without taking the selection.
+- **`vowel_measure.label_matches_measurement` is the invariant as a refusal.** A label claiming
+  138 tokens above a table reporting n=2 is arithmetically impossible, and the panel now
+  refuses to draw rather than leaving it to be noticed. It is a **tripwire, not the detector**:
+  for one attempt id the two counts agree by construction, since `measured_attempts`' SQL
+  filters the same `accepted = 1` flag `Measurement.accepted` reads back. It fires if the label
+  and the measurement are ever resolved from different ids or different snapshots again.
+  Beside it, a caption built from the loaded measurement — `Plotting #1 · 36 accepted tokens ·
+  2026-08-20 11:58` — states what was drawn independently of the widget.
+- **The practice queue rotates on `last_seen`.** It was written on every finished block and
+  read by nothing; `due()` sorted on `next_due`, which reads "now" for every active target by
+  design and is never rewritten by a block that leaves the target active, so the sort key was a
+  constant and a stable sort pinned index 0 forever. Never practised now sorts first, then
+  oldest; `next_due` stays the gate on what is due at all and drops to a tiebreak, which is
+  what still orders graduated reviews against each other. The preferred fix of the two
+  recorded, for the stated reason: dropping the write-back condition would have left ordering
+  on a timestamp meaning two things at once.
+- **A repeated word is a stumble, not a substitution.** This was wiring, not detection — one of
+  the pair is already an Insertion, labelled by `enableMiscue` on the drill path and derived by
+  `_diff_miscue` on the paragraph path. `_mark_repetitions` marks **both** occurrences, because
+  which one difflib calls the insertion is arbitrary (it tags the first) while the phonemes that
+  get misread belong to whichever one Azure scored badly. Suppressed on both surfaces:
+  `weakest_phoneme` makes no substitution claim and the card says the word was said twice
+  instead, and `fallback_coach._substitutions` returns nothing so the pair never enters
+  `observed_pairs` — the only list a report may discuss. The word still reaches the coach as a
+  flagged word with its score: the stumble is worth reporting, the invented substitution is not.
+- **The headline row counts monotone stretches, not the words inside them.** `1 · Monotone
+  stretch (28 words)`, from `delivery_faults`' own `runs`, so the row and the Delivery panel
+  below it cannot disagree about how many stretches there were. A break stays a word count on
+  purpose — it is a point event at a word, not a span. The badge row moved into a
+  Streamlit-free `error_count_badges` so the units are assertable directly.
+- Also: the intonation overlay's `1 model voice(s)` hedge is pluralised properly.
+
+**Verified live in a browser on 2026-08-21**, against two seeded readings in an otherwise
+empty database: an explicitly chosen reading (#1) survived an `st.rerun()` raised from the
+Today tab, with the selector label, the `Plotting #1` caption and the rhoticity table all
+naming the same reading, and no console or server errors. The two defects that need a real
+voice — the mismatch fired by a live assessment, and a real stumbled word — are covered by
+`AppTest` and by hand-built payloads rather than by a recording, since neither can be produced
+from this side of the microphone.
+
 ## Not yet proven live
 
 - **The benchmark's 30-day trajectory has one real point, not several** — the first live
@@ -227,72 +289,6 @@ second promotes it to the queue as a `vowel` target with its evidence.
   where boundary contamination is large, is **not** established — see the dead end below.
 
 ## Known issues
-
-**The Accent tab can render one reading's acoustics under another reading's label.** Caught
-live on 2026-08-20, minutes after attempt 12 was stored. The "Which reading?" selector showed
-`#10 · 138 tokens · Each morning I read these same words out` while the rhoticity table below
-it showed `/ɑɹ/ START 805 Hz (n=2)` and `/ɝ/ NURSE 866 Hz (n=1)` — **attempt 12's** figures,
-identical to the ones its own bridging phrases quoted. Selecting each attempt explicitly
-proves the pairing: #10 is 917 Hz (n=3) / 772 Hz (n=5), #12 is 805 Hz (n=2) / 866 Hz (n=1).
-The mismatch **survived switching tabs away and back**; it corrected only once the selector
-was actually operated, so this is not a one-frame paint glitch but a state that persists
-silently for as long as the widget is left alone.
-
-`measurement_for` is a clean query on `attempt_id` and is not at fault — whatever id the
-backend resolved, it fetched correctly. The disagreement is between what
-`st.selectbox("Which reading?", options=list(labels), key="accent_chart_attempt")`
-(`app.py:2043`) displays and what it returns on the render where `options` has just grown.
-There is no `index=`, so the default is positional, and a new attempt is prepended: the
-newest reading takes position 0, which the previous render's position 0 held. Do not fix this
-by reasoning about Streamlit's widget internals from memory — reproduce it first by storing a
-new attempt with the Accent tab already rendered.
-
-**Severity is high and the failure is silent.** This is the one surface whose entire purpose
-is comparing readings over time, it misattributes acoustics between them, and it fires exactly
-when a new attempt lands — the moment the user goes to look. Both halves of the screen look
-plausible on their own. The one visible tell is arithmetic: the label carries the attempt's
-`accepted` token count (138) while the table reported n=2 and n=1 per category, which a
-138-token read cannot produce. That invariant is checkable — the panel could refuse to draw
-when the selected label's token count and the loaded measurement's disagree, in the same
-spirit as every other refusal in `vowel_measure`.
-
-**A repeated word is reported as a phoneme substitution, and the advice is wrong.** Attempt
-12 (2026-08-20): the speaker stumbled and said "Wednesday" twice. The script-versus-heard
-diff handles it correctly, showing the second one italicised as heard-but-not-in-script. The
-flagged-word card for the same word does not — it renders **`wednesday — 6`** with
-**`/eɪ/ → sounded like /w/`**, because the `/eɪ/` ending the first "Wednes-day" aligned
-against the `/w/` onset of the second. Azure's payload is being read faithfully; the card
-turns it into "your /eɪ/ came out as /w/", which is a substitution that never happened, on
-the lowest-scoring word of the attempt (6/100). Two surfaces then tell contradictory stories
-about one word, and the card is the wrong one — against this project's own rule that a word
-Azure heard *differently* matters more than a low phoneme score. A disfluency needs to be
-recognised as a disfluency before `weakest_phoneme` is allowed to describe it; the diff
-already knows, so the signal exists.
-
-**The error-count badges put two different units side by side.** `render_error_counts`
-(`app.py:1067`) counts words for every badge, but "2 Mispronunciations" means two
-independently wrong words while "28 Monotone" means **one** flat stretch that spans 28 words
-— which is exactly how the Delivery panel below it words the same fault ("across the span",
-one confidence figure). Read together, the row implies the monotone problem is fourteen times
-the size of the articulation problem. Because prose comes in spans, the monotone badge will
-always be the largest number on the row and is structurally the least informative one.
-`1 monotone stretch (28 words)` would say the true thing.
-
-**The practice queue never rotates — one target monopolises the block slot forever.** Found
-by hand on 2026-08-20, after the user said they were tired of being given `/w/ → /v/`. Today
-renders a single block from `trainable[0]` (`app.py:3018`), `due()` sorts on
-`(active?, next_due)` and never on `last_seen` (`practice_queue.py:519`), and `next_due` is
-written back **only when the state changes or the item regressed** (`app.py:3458`). A block
-that leaves the target active — anything under the 90% graduation bar — writes `last_seen`
-alone. So `/w/ → /v/` still carries the `next_due` it was *added* with
-(2026-08-19T18:05:45Z) after two completed blocks at 75% and 80%, and a stable sort pins it
-at index 0 permanently. `/ɑ/ → /ɔ/` and `/i/ → /ɪ/` cannot be reached until it graduates,
-even though both carry more evidence than it does (4 tokens each against 2).
-**`last_seen` is written in two places and read in none** — it is the field this wants.
-Two candidate fixes: drop the condition at `app.py:3458` so an active item's `next_due`
-advances to now and it falls to the back; or order `due()` by `last_seen`, never-seen first.
-The second is preferable — under the first, ordering still rests on a timestamp whose meaning
-is "due now" for every active target. Left unfixed deliberately on 2026-08-20.
 
 **A real `.env` can silently undo the 180-second paragraph ceiling.** The default moved from
 120 to 180 for shadowing, but a `.env` written before that change still says 120 and wins —
