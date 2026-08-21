@@ -77,6 +77,7 @@ class VoiceScalars:
     """One voice's reading, reduced to the scalars each rung is judged on."""
 
     voice: str
+    median_f0: float | None = None
     words: dict[int, dict[str, float]] = field(default_factory=dict)
     sentences: dict[int, dict[str, float]] = field(default_factory=dict)
     paragraph: dict[str, float] = field(default_factory=dict)
@@ -95,7 +96,8 @@ def measure(rendering: native_model.Rendering, text: str) -> VoiceScalars | None
     words = rendering.words()
     track = accent_resynth.pitch_track(audio)
     divisor = ladder.mean_word_seconds(words)
-    found = VoiceScalars(rendering.voice)
+    tracked = [hz for _, hz in track if hz > 0]
+    found = VoiceScalars(rendering.voice, statistics.median(tracked) if tracked else None)
 
     for span in ladder.word_spans(words):
         measured = ladder.scalars(span, words, track, divisor=divisor)
@@ -190,10 +192,12 @@ def render_module(
     paragraph: Mapping[str, ladder.Band],
     voices: Sequence[str],
     sentence_labels: Sequence[str],
+    median_f0: Mapping[str, float],
 ) -> str:
     """The generated module's source. Every number in it came from a measurement above."""
     listed = "\n".join(textwrap.wrap(", ".join(sorted(voices)), width=94))
     labels = "\n".join(_label_src(index, label) for index, label in enumerate(sentence_labels))
+    f0_src = "\n".join(f"    {voice!r}: {median_f0[voice]:.1f}," for voice in sorted(median_f0))
     paragraph_src = "\n".join(
         f"    {metric!r}: {_band_src(paragraph[metric])}," for metric in sorted(paragraph)
     )
@@ -250,6 +254,13 @@ SENTENCE_TEXT: Mapping[int, str] = {{
 
 PARAGRAPH: Mapping[str, Band] = {{
 {paragraph_src}
+}}
+
+# Each reference voice's own median pitch. The practice surface picks the voice nearest the
+# speaker's own to play as the native leg — matching on what actually makes two voices
+# comparable, and needing no live voice roster to do it.
+MEDIAN_F0_HZ: Mapping[str, float] = {{
+{f0_src}
 }}
 '''
 
@@ -311,6 +322,7 @@ def main() -> int:
         paragraph,
         [v.voice for v in measured],
         shadowing.phrases(text),
+        {v.voice: v.median_f0 for v in measured if v.median_f0 is not None},
     )
     if args.print:
         print(source)

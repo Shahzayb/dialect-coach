@@ -738,3 +738,25 @@ PARAGRAPH: Mapping[str, Band] = {
     "pitch_range_st": Band(metric="pitch_range_st", mean=8.6184, sd=1.7160, voices=16),
     "terminal_slope_st": Band(metric="terminal_slope_st", mean=-9.7099, sd=5.2401, voices=16),
 }
+
+# Each reference voice's own median pitch. The practice surface picks the voice nearest the
+# speaker's own to play as the native leg — matching on what actually makes two voices
+# comparable, and needing no live voice roster to do it.
+MEDIAN_F0_HZ: Mapping[str, float] = {
+    "en-US-AmberNeural": 223.9,
+    "en-US-AndrewNeural": 105.5,
+    "en-US-AriaNeural": 200.9,
+    "en-US-AshleyNeural": 213.5,
+    "en-US-AvaNeural": 196.8,
+    "en-US-BrandonNeural": 145.3,
+    "en-US-BrianNeural": 122.7,
+    "en-US-ChristopherNeural": 108.6,
+    "en-US-CoraNeural": 206.8,
+    "en-US-DavisNeural": 122.1,
+    "en-US-ElizabethNeural": 180.9,
+    "en-US-EmmaNeural": 178.8,
+    "en-US-EricNeural": 104.4,
+    "en-US-GuyNeural": 149.6,
+    "en-US-JennyNeural": 179.2,
+    "en-US-TonyNeural": 115.5,
+}
