@@ -64,13 +64,12 @@ FIXTURE_DIR = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
 FIXTURES: dict[Mode, str] = {
     Mode.DRILL: "sample_azure_response.json",
     Mode.PARAGRAPH: "sample_azure_continuous.json",
-    # SYNTHETIC, and it says so in its name for the same reason `synthetic_delivery_faults.json`
-    # does. Derived from the real continuous capture: the per-word, per-phoneme measurements are
-    # genuine Azure output, restructured into the unscripted response shape — no
-    # `CompletenessScore`, and one word duplicated in place so the adjacency repetition path has
-    # something to find offline. It exercises the PARSER, not the register: the words in it were
-    # read aloud, not generated. Replace it with a real Mode C capture once one exists.
-    Mode.UNSCRIPTED: "synthetic_unscripted.json",
+    # A real two-pass Mode C capture, taken 2026-08-21: standard STT for the transcript, then a
+    # scripted assessment against it. Two utterances, 117 words. NOTE that it DOES carry a
+    # `CompletenessScore` — the second pass is a scripted assessment, so Azure computes one
+    # against the machine's own transcript — which is exactly why `normalise` discards it for
+    # this mode rather than passing it through.
+    Mode.UNSCRIPTED: "sample_azure_unscripted.json",
 }
 
 # How long to wait for continuous recognition to report session_stopped. Generous: it is a
