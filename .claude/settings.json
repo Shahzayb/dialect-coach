@@ -15,5 +15,10 @@
       "Bash(nano .env)",
       "Bash(open .env)"
     ]
+  },
+  "attribution": {
+    "commit": "",
+    "pr": "",
+    "sessionUrl": false
   }
 }

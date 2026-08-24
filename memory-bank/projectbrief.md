@@ -10,17 +10,6 @@ A coach listens, catches the mistakes, hands back an exercise, listens again whi
 tells me whether I got closer, and keeps going until it's fixed or we move on to something else.
 Everything this project builds is either part of that cycle or it is in the way of it.
 
-## And it should be far more than a human coach
-
-A coach can't mimic my voice. This can. A coach can't hand my own recording back with the accent
-corrected. This can. A coach can't put a number on where my vowel sits, remember every attempt
-for months, or tell me whether today's change is real or just how much I vary day to day.
-
-So the bar is not "as good as a coach." The bar is everything a coach can't do, done routinely —
-and the single most valuable thing here is **hearing my own voice adjusted toward native**, set
-beside what I actually said and beside a native speaker. That is the reference I can aim at,
-because it removes everything about a native speaker that isn't accent.
-
 ## Why this project exists
 
 I want to sound like a native American English speaker, and nothing is coaching me toward it.
@@ -43,15 +32,13 @@ hint; it never overrides the recordings.
 ## The loop, which is the product
 
     speak → analyse at every angle → a short set of problems
-      → practise one against my own adjusted voice → measure whether I moved
+      → practise one against native → measure whether I moved
       → resolved, or I move on → repeat
 
 Every feature is judged by where it sits on that loop. A feature that produces something the loop
 doesn't consume is not finished, however well it works.
 
-Speaking means all three registers — short drills, longer passages, and unscripted speech — and
-unscripted is the one that matters most, because generating language and controlling pronunciation
-at the same time is the thing I actually need to do.
+Speaking means all three registers — short drills, longer passages, and unscripted speech.
 
 **The unit of practice is the sentence. The word is the way in, not the destination.** Fixing a
 single sound in a single word is the easy half; saying the whole sentence — its rhythm, its
