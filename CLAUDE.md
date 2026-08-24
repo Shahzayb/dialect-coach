@@ -47,3 +47,6 @@ Work finishing or a decision being made means `memory-bank/` is out of date:
   Then link resolved issues, create a GitHub Milestone (if needed), close it, and record the
   milestone in the Memory Bank.
 - Follow professional project standards: use conventional commit messages, enforce type hints, and ensure credentials remain strictly in `.env`.
+- Never create a new helper, utility, service layer, or component if an existing one can absorb the logic.
+- Prefer adding clean conditional paths or extending existing parameters inside established files rather than creating new wrapper classes.
+- Do not install new packages or write custom wrappers without searching the project tree for pre-existing internal solutions.
