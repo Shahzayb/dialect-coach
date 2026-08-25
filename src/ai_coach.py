@@ -389,6 +389,10 @@ def annotation_from_raw(raw: Any) -> ProsodyAnnotation | None:
     have no `words` list and fail validation here, which is correct: History renders such a
     row with its stored coaching and no annotation, rather than inventing one.
     """
+    if not raw:
+        # The ordinary case — most attempts were never annotated — and not worth a log line,
+        # let alone the pydantic traceback that validating None produces.
+        return None
     try:
         try:
             parts = (raw or {}).get("candidates", [{}])[0].get("content", {}).get("parts", [])
