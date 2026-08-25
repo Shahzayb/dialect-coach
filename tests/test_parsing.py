@@ -21,7 +21,7 @@ from utils import Mode
 
 
 @pytest.fixture
-def drill_payload(fixtures_dir: Path) -> dict[str, Any]:
+def single_payload(fixtures_dir: Path) -> dict[str, Any]:
     payload: dict[str, Any] = json.loads((fixtures_dir / "sample_azure_response.json").read_text())
     return payload
 
@@ -45,24 +45,24 @@ def reference() -> str:
 # --- Acceptance criterion 3: apply_to was verifiably called -------------------------------
 
 
-def test_the_payload_contains_a_pronunciation_assessment_block(drill_payload: dict) -> None:
+def test_the_payload_contains_a_pronunciation_assessment_block(single_payload: dict) -> None:
     """Proof that pron_config.apply_to(recognizer) ran.
 
     Without it recognition still succeeds and still returns a transcript — this block is
     simply absent. Its presence in a captured response is the only real evidence.
     """
-    assert "PronunciationAssessment" in drill_payload["NBest"][0]
+    assert "PronunciationAssessment" in single_payload["NBest"][0]
 
 
-def test_prosody_is_actually_populated(drill_payload: dict, reference: str) -> None:
+def test_prosody_is_actually_populated(single_payload: dict, reference: str) -> None:
     """Criterion 3: prosody must be enabled explicitly or ProsodyScore never appears."""
-    overall, _, _ = sa.normalise([drill_payload], reference, Mode.DRILL)
+    overall, _, _ = sa.normalise([single_payload], reference, Mode.PARAGRAPH)
     assert overall["prosody"] is not None
     assert 0 < overall["prosody"] <= 100
 
 
-def test_every_overall_score_is_present(drill_payload: dict, reference: str) -> None:
-    overall, _, _ = sa.normalise([drill_payload], reference, Mode.DRILL)
+def test_every_overall_score_is_present(single_payload: dict, reference: str) -> None:
+    overall, _, _ = sa.normalise([single_payload], reference, Mode.PARAGRAPH)
     for key in ("pron_score", "accuracy", "fluency", "completeness", "prosody"):
         assert isinstance(overall[key], float), f"{key} missing from the normalised result"
 
@@ -71,11 +71,11 @@ def test_every_overall_score_is_present(drill_payload: dict, reference: str) -> 
 
 
 def test_flagged_phonemes_report_what_was_actually_produced(
-    drill_payload: dict, reference: str
+    single_payload: dict, reference: str
 ) -> None:
     """The difference between 'your /θ/ scored 41' and 'you produced /t/ where /θ/ was
     expected'. Only the second is actionable, and it needs NBestPhonemes."""
-    _, _, words = sa.normalise([drill_payload], reference, Mode.DRILL)
+    _, _, words = sa.normalise([single_payload], reference, Mode.PARAGRAPH)
     scored_phonemes = [p for w in words for p in w["phonemes"] if p["score"] is not None]
     assert scored_phonemes, "no phoneme-level scores parsed at all"
     assert all(p["nbest"] for p in scored_phonemes), (
@@ -88,15 +88,15 @@ def test_flagged_phonemes_report_what_was_actually_produced(
     )
 
 
-def test_nbest_gives_five_alternates(drill_payload: dict, reference: str) -> None:
-    _, _, words = sa.normalise([drill_payload], reference, Mode.DRILL)
+def test_nbest_gives_five_alternates(single_payload: dict, reference: str) -> None:
+    _, _, words = sa.normalise([single_payload], reference, Mode.PARAGRAPH)
     counts = {len(p["nbest"]) for w in words for p in w["phonemes"] if p["nbest"]}
     assert max(counts) == sa.NBEST_PHONEME_COUNT
 
 
-def test_syllables_are_parsed(drill_payload: dict, reference: str) -> None:
+def test_syllables_are_parsed(single_payload: dict, reference: str) -> None:
     """Misplaced lexical stress is invisible at the phoneme level and is a common failure."""
-    _, _, words = sa.normalise([drill_payload], reference, Mode.DRILL)
+    _, _, words = sa.normalise([single_payload], reference, Mode.PARAGRAPH)
     syllables = [s for w in words for s in w["syllables"]]
     assert syllables
     assert all(s["syllable"] and s["score"] is not None for s in syllables)
@@ -106,37 +106,37 @@ def test_syllables_are_parsed(drill_payload: dict, reference: str) -> None:
 
 
 def test_error_type_is_read_from_inside_the_assessment_block(
-    drill_payload: dict, reference: str
+    single_payload: dict, reference: str
 ) -> None:
     """In the SDK's JSON, ErrorType is nested under the word's PronunciationAssessment.
 
     Reading word["ErrorType"] returns nothing and every word looks clean — which is how
     this got caught in the first place.
     """
-    word = drill_payload["NBest"][0]["Words"][0]
+    word = single_payload["NBest"][0]["Words"][0]
     assert "ErrorType" not in word, "fixture shape changed; re-check the parser"
     assert "ErrorType" in word["PronunciationAssessment"]
 
-    _, _, words = sa.normalise([drill_payload], reference, Mode.DRILL)
+    _, _, words = sa.normalise([single_payload], reference, Mode.PARAGRAPH)
     assert {w["error_type"] for w in words} != {"None"}, (
         "a real attempt with mispronunciations must not parse as entirely clean"
     )
 
 
-def test_mispronunciations_are_surfaced(drill_payload: dict, reference: str) -> None:
-    _, _, words = sa.normalise([drill_payload], reference, Mode.DRILL)
+def test_mispronunciations_are_surfaced(single_payload: dict, reference: str) -> None:
+    _, _, words = sa.normalise([single_payload], reference, Mode.PARAGRAPH)
     assert [w for w in words if w["error_type"] == "Mispronunciation"]
 
 
-def test_recognised_text_is_captured(drill_payload: dict, reference: str) -> None:
+def test_recognised_text_is_captured(single_payload: dict, reference: str) -> None:
     """What Azure heard is itself the most useful signal when it differs from the script."""
-    _, recognised, _ = sa.normalise([drill_payload], reference, Mode.DRILL)
+    _, recognised, _ = sa.normalise([single_payload], reference, Mode.PARAGRAPH)
     assert "weather" in recognised.lower()
 
 
-def test_delivery_error_types_ignore_the_none_marker(drill_payload: dict, reference: str) -> None:
+def test_delivery_error_types_ignore_the_none_marker(single_payload: dict, reference: str) -> None:
     """Azure reports Break.ErrorTypes: ["None"] for clean words — not a delivery problem."""
-    _, _, words = sa.normalise([drill_payload], reference, Mode.DRILL)
+    _, _, words = sa.normalise([single_payload], reference, Mode.PARAGRAPH)
     assert all("None" not in w["delivery_error_types"] for w in words)
 
 
@@ -171,7 +171,10 @@ def test_delivery_error_types_are_extracted_when_present(reference: str) -> None
             }
         ],
     }
-    _, _, words = sa.normalise([payload], reference, Mode.DRILL)
+    # "weather" rather than the long fixture reference: continuous mode always runs the local
+    # miscue diff, so an unrelated reference splices Omission entries in ahead of the one word
+    # this test is about, and `words[0]` stops being it.
+    _, _, words = sa.normalise([payload], "weather", Mode.PARAGRAPH)
     assert words[0]["delivery_error_types"] == ["UnexpectedBreak", "Monotone"]
 
 
@@ -184,21 +187,21 @@ def test_delivery_error_types_are_extracted_when_present(reference: str) -> None
 
 
 def test_the_payload_carries_the_offsets_and_snr_the_parser_used_to_drop(
-    drill_payload: dict,
+    single_payload: dict,
 ) -> None:
     """The raw values, before any parsing. The rest of this section builds on them."""
-    assert drill_payload["Offset"] == 16_900_000
-    assert drill_payload["SNR"] == 25.035732
+    assert single_payload["Offset"] == 16_900_000
+    assert single_payload["SNR"] == 25.035732
 
 
-def test_phoneme_timing_survives_normalisation(drill_payload: dict, reference: str) -> None:
+def test_phoneme_timing_survives_normalisation(single_payload: dict, reference: str) -> None:
     """The /ð/ of "the": 1.69 s into the stream, 190 ms long.
 
     Ticks are carried through unconverted because they are exact integers; the seconds are
     derived. Both are asserted, so a change to the divisor cannot pass by leaving the ticks
     right.
     """
-    _, _, words = sa.normalise([drill_payload], reference, Mode.DRILL)
+    _, _, words = sa.normalise([single_payload], reference, Mode.PARAGRAPH)
     first = words[0]["phonemes"][0]
     assert first["phoneme"] == "ð"
     assert first["offset_ticks"] == 16_900_000
@@ -207,8 +210,8 @@ def test_phoneme_timing_survives_normalisation(drill_payload: dict, reference: s
     assert first["end_s"] == 1.88
 
 
-def test_timing_is_present_at_all_three_levels(drill_payload: dict, reference: str) -> None:
-    _, _, words = sa.normalise([drill_payload], reference, Mode.DRILL)
+def test_timing_is_present_at_all_three_levels(single_payload: dict, reference: str) -> None:
+    _, _, words = sa.normalise([single_payload], reference, Mode.PARAGRAPH)
     keys = {"offset_ticks", "duration_ticks", "start_s", "end_s"}
     for word in words:
         assert keys <= set(word)
@@ -292,14 +295,14 @@ def test_segments_tile_their_parent_with_a_one_frame_seam(fixtures_dir, name: st
     assert seams, "fixture carried no multi-segment word, so the seam went untested"
 
 
-def test_snr_reaches_the_overall_scores(drill_payload: dict, reference: str) -> None:
+def test_snr_reaches_the_overall_scores(single_payload: dict, reference: str) -> None:
     """Exactly, not approximately.
 
     Single-shot short-circuits the duration weighting for this reason: `v * w / w` returns
     25.035731999999996 for this input, and that artefact would be stored and charted as
     though it were a measurement.
     """
-    overall, _, _ = sa.normalise([drill_payload], reference, Mode.DRILL)
+    overall, _, _ = sa.normalise([single_payload], reference, Mode.PARAGRAPH)
     assert overall["snr_db"] == 25.035732
     assert overall["snr_db_min"] == 25.035732
 
@@ -354,7 +357,7 @@ def test_continuous_completeness_is_locally_recomputed(
 
 def test_offline_mode_replays_the_fixture_without_a_network_call(reference: str) -> None:
     """conftest forces OFFLINE_MODE, and no credentials are set — this must still work."""
-    result = sa.recognise("/nonexistent.wav", reference, Mode.DRILL)
+    result = sa.recognise("/nonexistent.wav", reference, Mode.PARAGRAPH)
     assert result.offline is True
     assert result.attempts == 0, "a fixture replay never reaches Azure, so it charges nothing"
     assert result.payloads and "NBest" in result.payloads[0]
@@ -362,7 +365,7 @@ def test_offline_mode_replays_the_fixture_without_a_network_call(reference: str)
 
 
 def test_offline_analyse_produces_a_complete_result(reference: str) -> None:
-    assessment = sa.analyse("/nonexistent.wav", reference, Mode.DRILL)
+    assessment = sa.analyse("/nonexistent.wav", reference, Mode.PARAGRAPH)
     assert assessment.offline is True
     assert assessment.overall_scores["pron_score"] is not None
     assert assessment.words
@@ -513,7 +516,7 @@ def test_a_clean_attempt_has_no_delivery_entries() -> None:
 
 
 def test_the_prosody_measurements_are_read_off_the_captured_payload(
-    drill_payload: dict, reference: str
+    single_payload: dict, reference: str
 ) -> None:
     """Proven, not constructed: every number here is in the committed capture.
 
@@ -525,7 +528,7 @@ def test_the_prosody_measurements_are_read_off_the_captured_payload(
     The 200 ms also pins the unit: the raw value is 2000000 in a 9.79-second utterance, so
     milliseconds would make it a 2000-second pause. See `_prosody_detail`.
     """
-    _, _, words = sa.normalise([drill_payload], reference, Mode.DRILL)
+    _, _, words = sa.normalise([single_payload], reference, Mode.PARAGRAPH)
 
     clean = words[1]  # "weather"
     assert clean["prosody_detail"]["break_length_ms"] == 0.0
@@ -559,7 +562,7 @@ def test_a_word_with_no_feedback_block_measures_nothing(reference: str) -> None:
             }
         ],
     }
-    _, _, words = sa.normalise([payload], reference, Mode.DRILL)
+    _, _, words = sa.normalise([payload], reference, Mode.PARAGRAPH)
     assert words[0]["prosody_detail"] == {"break_length_ms": None, "monotone_confidence": None}
 
 
@@ -704,9 +707,9 @@ def test_offline_fixture_selects_the_named_payload(monkeypatch, reference: str) 
     """The committed captures carry no delivery fault, so without this the running app
     has no way to show the delivery coaching at all — only the test suite does."""
     monkeypatch.setenv("OFFLINE_FIXTURE", "synthetic_delivery_faults.json")
-    payloads = sa._load_fixture(Mode.DRILL)
+    payloads = sa._load_fixture(Mode.PARAGRAPH)
 
-    _, _, words = sa.normalise(payloads, reference, Mode.DRILL)
+    _, _, words = sa.normalise(payloads, reference, Mode.PARAGRAPH)
     faults = {f["fault"] for f in sa.delivery_faults(words)}
     assert faults == {"UnexpectedBreak", "MissingBreak", "Monotone"}
 
@@ -720,7 +723,7 @@ def test_the_synthetic_payload_says_in_itself_that_it_is_not_a_capture(fixtures_
 
 def test_an_empty_offline_fixture_falls_back_to_the_default(monkeypatch) -> None:
     monkeypatch.setenv("OFFLINE_FIXTURE", "   ")
-    assert sa._load_fixture(Mode.DRILL) == sa._load_fixture(Mode.DRILL)
+    assert sa._load_fixture(Mode.PARAGRAPH) == sa._load_fixture(Mode.PARAGRAPH)
 
 
 @pytest.mark.parametrize("name", ["../../app.py", "/etc/passwd", "nested/../../secrets.json"])
@@ -728,13 +731,13 @@ def test_a_fixture_name_pointing_outside_the_directory_is_refused(monkeypatch, n
     """This setting picks one of the committed payloads. It is not a file-read primitive."""
     monkeypatch.setenv("OFFLINE_FIXTURE", name)
     with pytest.raises(sa.AssessmentError, match="outside"):
-        sa._load_fixture(Mode.DRILL)
+        sa._load_fixture(Mode.PARAGRAPH)
 
 
 def test_a_named_fixture_that_is_not_there_says_so(monkeypatch) -> None:
     monkeypatch.setenv("OFFLINE_FIXTURE", "no_such_capture.json")
     with pytest.raises(sa.AssessmentError, match="missing"):
-        sa._load_fixture(Mode.DRILL)
+        sa._load_fixture(Mode.PARAGRAPH)
 
 
 def test_mispronounced_words_reads_the_errortype_not_the_accuracy() -> None:

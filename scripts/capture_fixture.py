@@ -31,8 +31,11 @@ import speech_analyzer  # noqa: E402
 import utils  # noqa: E402
 from utils import Mode  # noqa: E402
 
+# Only the continuous fixture is capturable now: single-shot recognition was removed on
+# 2026-08-25 with the `drill` mode. `sample_azure_response.json` is still committed and still
+# read by the parsing tests — it is a real single-utterance capture and the base
+# `synthetic_delivery_faults.json` was hand-edited from — but nothing can produce another one.
 DEFAULT_OUT = {
-    Mode.DRILL: ROOT / "tests" / "fixtures" / "sample_azure_response.json",
     Mode.PARAGRAPH: ROOT / "tests" / "fixtures" / "sample_azure_continuous.json",
 }
 
@@ -41,7 +44,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("audio", help="Recording in any ffmpeg-readable format")
     parser.add_argument("reference", help="Text file holding what was meant to be said")
-    parser.add_argument("--mode", choices=["drill", "paragraph"], default="drill")
+    parser.add_argument("--mode", choices=["paragraph"], default="paragraph")
     parser.add_argument("--out", default=None, help="Defaults to the fixture path for the mode")
     args = parser.parse_args()
 
@@ -68,7 +71,7 @@ def main() -> int:
         print("[capture] the reference text file is empty")
         return 1
 
-    wav_bytes, seconds = audio_utils.prepare(audio_path.read_bytes(), mode)
+    wav_bytes, seconds = audio_utils.prepare(audio_path.read_bytes())
     print(f"[capture] {seconds:.1f}s of audio, mode={mode.value}")
     print(f"[capture] reference: {reference_text[:120]}{'…' if len(reference_text) > 120 else ''}")
 
@@ -100,9 +103,7 @@ def main() -> int:
         offline=False,
     )
 
-    # Drill is a single utterance; keeping it an object rather than a one-element array
-    # matches what a single-shot call actually returns.
-    document = payloads[0] if mode is Mode.DRILL and len(payloads) == 1 else payloads
+    document = payloads
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(document, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

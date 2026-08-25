@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""One-off diagnostic: exercise the live Gemini coaching path for the price of one call.
+"""One-off diagnostic: exercise the live Gemini annotation path for the price of one call.
+
+Since 2026-08-25 Gemini's only job is the prosody annotation — the same words marked up with
+stress, pauses and linking. The coaching is `fallback_coach`'s and needs no network, so this
+script prints it for comparison but does not test a model path for it.
 
 Deliberately **spends no Azure quota**. The assessment is replayed from the committed
-fixture — the same zero-cost path the app uses under OFFLINE_MODE — and only the coaching
+fixture — the same zero-cost path the app uses under OFFLINE_MODE — and only the annotation
 call is real. That makes this cheap enough to re-run whenever the model ID, the SDK or the
 schema changes, which is exactly when the model path breaks.
 
@@ -48,8 +52,8 @@ def main() -> int:
     import speech_analyzer
     from utils import Mode
 
-    assessment = speech_analyzer.analyse("", REFERENCE, Mode.DRILL)
-    compacted = fallback_coach.compact(assessment, Mode.DRILL)
+    assessment = speech_analyzer.analyse("", REFERENCE, Mode.PARAGRAPH)
+    compacted = fallback_coach.compact(assessment, Mode.PARAGRAPH)
     print(
         f"fixture replayed: {len(assessment.words)} words, "
         f"{len(compacted['flagged_words'])} flagged, "
@@ -60,30 +64,10 @@ def main() -> int:
         f"(raw response is {len(json.dumps(assessment.raw))})"
     )
 
-    # Only now, and only for the coaching call.
-    os.environ["OFFLINE_MODE"] = "false"
-    usable, reason = ai_coach.available()
-    if not usable:
-        print(f"cannot reach the model: {reason}")
-        return 2
-
-    print(f"calling {ai_coach.model_name()} — one free-tier call")
-    result = ai_coach.coach(assessment, REFERENCE, Mode.DRILL)
-
-    print(f"\ncoach_source: {result.source}")
-    if result.source != fallback_coach.SOURCE_GEMINI:
-        print("the model path did not produce the report; see the log above")
-        return 1
-
-    usage = (result.raw or {}).get("usage_metadata") or {}
-    print(
-        f"tokens: {usage.get('prompt_token_count')} in, "
-        f"{usage.get('candidates_token_count')} out, "
-        f"{usage.get('total_token_count')} total"
-    )
-
-    report = result.report
-    print(f"\n{report.overall_comment}\n")
+    # The coach runs offline and always has an answer. Printed first, so a run that cannot
+    # reach Gemini still shows what the page would render without it.
+    report = fallback_coach.build(assessment, Mode.PARAGRAPH)
+    print(f"\ncoach (offline, always available)\n{report.overall_comment}\n")
     for rank, fix in enumerate(report.priority_fixes, start=1):
         pairs = ", ".join(f"{pair.a}/{pair.b}" for pair in fix.minimal_pairs)
         print(f"{rank}. /{fix.expected_phoneme}/ -> /{fix.produced_phoneme}/  {fix.affected_words}")
@@ -98,30 +82,48 @@ def main() -> int:
     print(f"drill: {report.stress_and_rhythm.drill}")
     print(f"\n{report.practice_plan}")
 
-    # The check that matters: nothing named that Azure did not report.
-    observed = {(e, p) for e, p in compacted["observed_pairs"]}
-    invented = [
-        (fix.expected_phoneme, fix.produced_phoneme)
-        for fix in report.priority_fixes
-        if (fix.expected_phoneme, fix.produced_phoneme) not in observed
-    ]
-    words = len(" ".join([report.overall_comment, report.practice_plan]).split())
-    reported = {fault["fault"] for fault in compacted["delivery_faults"]}
-    answered = {drill.fault for drill in report.delivery_drills}
-    print(f"\ninvented pairs surviving validation: {invented or 'none'}")
+    # Only now, and only for the annotation call.
+    os.environ["OFFLINE_MODE"] = "false"
+    usable, reason = ai_coach.available()
+    if not usable:
+        print(f"\ncannot reach the model: {reason}")
+        return 2
+
+    print(f"\ncalling {ai_coach.model_name()} — one free-tier call")
+    outcome = ai_coach.annotate(assessment, REFERENCE, Mode.PARAGRAPH)
+    if outcome.annotation is None:
+        print(f"no annotation: {outcome.reason}")
+        return 1
+
+    usage = (outcome.raw or {}).get("usage_metadata") or {}
     print(
-        f"delivery faults reported: {sorted(reported) or 'none'}; "
-        f"drilled: {sorted(answered) or 'none'}; "
-        f"unmatched: {sorted(answered ^ reported) or 'none'}"
+        f"tokens: {usage.get('prompt_token_count')} in, "
+        f"{usage.get('candidates_token_count')} out, "
+        f"{usage.get('total_token_count')} total"
     )
+
+    marks = {"none": "", "minor": " |", "major": " ‖"}
+    rendered = " ".join(
+        (word.word.upper() if word.stress else word.word)
+        + ("⁀" if word.linked else "")
+        + marks.get(word.break_after, "")
+        for word in outcome.annotation.words
+    )
+    print(f"\n{rendered}\n")
+    print(outcome.annotation.summary)
+
+    # The check that matters: the model returned the passage it was given, not a rewrite.
+    given = ai_coach.words_of(REFERENCE)
+    returned = [word.word for word in outcome.annotation.words]
+    print(f"\nwords given: {len(given)}; returned: {len(returned)}; identical: {given == returned}")
+    stressed = sum(1 for word in outcome.annotation.words if word.stress)
+    breaks = sum(1 for word in outcome.annotation.words if word.break_after != "none")
+    print(f"stressed: {stressed}; breaks marked: {breaks}")
     print(
         f"re-parsed from the stored payload: "
-        f"{ai_coach.report_from_raw(result.raw, result.source) is not None}"
+        f"{ai_coach.annotation_from_raw(outcome.raw) is not None}"
     )
-    print(f"prose length (comment + plan): {words} words")
-    # Every reported fault must come back with a drill — the model's, or a backfilled
-    # template — and no drill for a fault Azure never reported.
-    return 1 if invented or (answered ^ reported) else 0
+    return 0 if given == returned else 1
 
 
 if __name__ == "__main__":

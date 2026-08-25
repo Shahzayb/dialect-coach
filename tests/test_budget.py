@@ -47,7 +47,7 @@ def online(monkeypatch: pytest.MonkeyPatch) -> None:
 def fill_stt(conn: sqlite3.Connection, seconds: float) -> None:
     db.record_attempt(
         conn,
-        mode=Mode.DRILL,
+        mode=Mode.PARAGRAPH,
         reference_text="x",
         recognised_text="x",
         audio_seconds=seconds,
@@ -98,7 +98,7 @@ def test_tier_message_never_leaks_a_key(monkeypatch: pytest.MonkeyPatch, online:
 
 def test_within_the_free_allowance_costs_nothing(conn: sqlite3.Connection, online: None) -> None:
     fill_stt(conn, 100.0)
-    budget.preflight_stt(conn, 25.0, Mode.DRILL, WHEN)  # must not raise
+    budget.preflight_stt(conn, 25.0, Mode.PARAGRAPH, WHEN)  # must not raise
 
 
 def test_a_call_past_the_free_allowance_is_refused(
@@ -107,7 +107,7 @@ def test_a_call_past_the_free_allowance_is_refused(
     monkeypatch.setenv("AZURE_FREE_STT_SECONDS", "120")
     fill_stt(conn, 119.0)
     with pytest.raises(BudgetError, match="Refusing"):
-        budget.preflight_stt(conn, 30.0, Mode.DRILL, WHEN)
+        budget.preflight_stt(conn, 30.0, Mode.PARAGRAPH, WHEN)
 
 
 def test_the_guard_is_preflight_not_posthoc(
@@ -129,7 +129,7 @@ def test_offline_skips_the_guard_entirely(
 
 
 def test_two_pass_unscripted_charges_twice(online: None) -> None:
-    assert budget.passes_for(Mode.DRILL) == 1
+    assert budget.passes_for(Mode.PARAGRAPH) == 1
     assert budget.passes_for(Mode.PARAGRAPH) == 1
     assert budget.passes_for(Mode.UNSCRIPTED) == 2
 
@@ -164,10 +164,10 @@ def test_stt_cost_includes_the_pronunciation_addon(online: None) -> None:
 def test_a_403_blocks_further_calls_regardless_of_the_meter(
     conn: sqlite3.Connection, online: None
 ) -> None:
-    budget.preflight_stt(conn, 10.0, Mode.DRILL, WHEN)  # meter says there is plenty left
+    budget.preflight_stt(conn, 10.0, Mode.PARAGRAPH, WHEN)  # meter says there is plenty left
     budget.mark_quota_exhausted(WHEN)
     with pytest.raises(BudgetError, match="exhausted"):
-        budget.preflight_stt(conn, 10.0, Mode.DRILL, WHEN)
+        budget.preflight_stt(conn, 10.0, Mode.PARAGRAPH, WHEN)
 
 
 def test_the_exhausted_flag_does_not_carry_into_the_next_month(
@@ -175,7 +175,7 @@ def test_the_exhausted_flag_does_not_carry_into_the_next_month(
 ) -> None:
     budget.mark_quota_exhausted(WHEN)
     next_month = datetime(2026, 9, 1, tzinfo=UTC)
-    budget.preflight_stt(conn, 10.0, Mode.DRILL, next_month)  # must not raise
+    budget.preflight_stt(conn, 10.0, Mode.PARAGRAPH, next_month)  # must not raise
 
 
 # --- Meters -----------------------------------------------------------------------------

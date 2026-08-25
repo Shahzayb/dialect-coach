@@ -10,7 +10,6 @@ from __future__ import annotations
 import io
 import os
 import threading
-from datetime import UTC, datetime
 
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -48,7 +47,7 @@ def run_app(monkeypatch: pytest.MonkeyPatch):
 def test_the_page_renders_offline(run_app) -> None:
     app = run_app()
     assert not app.exception
-    assert "Pronunciation Coach" in app.title[0].value
+    assert "Dialect Coach" in app.title[0].value
     assert any("OFFLINE_MODE is on" in i.value for i in app.info)
 
 
@@ -87,9 +86,9 @@ def test_the_usage_line_is_always_shown(run_app) -> None:
 
 def test_presets_change_with_the_mode(run_app) -> None:
     app = run_app()
-    drill_options = list(app.selectbox(key="preset_choice").options)
-    app.radio[0].set_value("Paragraph — connected speech").run()
-    assert list(app.selectbox(key="preset_choice").options) != drill_options
+    scripted_options = list(app.selectbox(key="preset_choice").options)
+    app.radio[0].set_value("Unscripted — speak freely on a prompt").run()
+    assert list(app.selectbox(key="preset_choice").options) != scripted_options
 
 
 def test_choosing_a_preset_fills_the_reference_text(run_app) -> None:
@@ -112,7 +111,7 @@ def test_presets_contain_no_digits() -> None:
 
 
 def seed_result(
-    app: AppTest, assessment, *, attempt_id: int | None = None, mode: Mode = Mode.DRILL
+    app: AppTest, assessment, *, attempt_id: int | None = None, mode: Mode = Mode.PARAGRAPH
 ) -> AppTest:
     """Put an assessment in the session cache the way a successful run would.
 
@@ -138,7 +137,7 @@ def seed_result(
     return app.run()
 
 
-def offline_assessment(mode: Mode = Mode.DRILL):
+def offline_assessment(mode: Mode = Mode.PARAGRAPH):
     return sa.analyse("/nonexistent.wav", REFERENCE, mode)
 
 
@@ -149,11 +148,16 @@ def test_a_result_renders_the_score_breakdown(run_app) -> None:
 
     # Of the scores, only Completeness stays a plain st.metric — Pronunciation is now a
     # banded headline number and Accuracy/Fluency/Prosody are the "Score breakdown" bars,
-    # neither of which is an st.metric widget. nPVI joins it from the Rhythm section: the
-    # drill fixture is two full sentences, so it clears `rhythm.MIN_PAIRS`.
+    # neither of which is an st.metric widget. nPVI used to appear beside it and went with
+    # the rhythm section on 2026-08-25: it needed a native rendering of the same passage
+    # through the same pipeline to compare against, and that pipeline is gone.
     labels = [m.label for m in app.metric]
-    assert labels == ["Completeness", "nPVI"]
-    assert app.metric[0].value == "85", "the fixture has completeness populated"
+    assert labels == ["Completeness"]
+    # 100, not the 85 Azure sent. Completeness is RECOMPUTED from the local miscue diff
+    # since scripted assessment went continuous-only on 2026-08-25, and the fixture's
+    # recognised words cover its reference text. Azure's own figure is no longer taken as-is
+    # on any path — see `speech_analyzer.normalise`.
+    assert app.metric[0].value == "100", "recomputed from the diff, not Azure's own number"
 
     rendered = " ".join(m.value for m in app.markdown)
     assert "Score breakdown" in rendered
@@ -190,8 +194,8 @@ def test_a_missing_pronunciation_score_renders_as_a_dash(run_app) -> None:
 
 
 def test_the_error_counts_reflect_the_fixtures_real_mispronunciations(run_app) -> None:
-    """#10/#12: the committed drill fixture carries real Mispronunciation words — no
-    synthetic payload needed to prove the headline count is wired up."""
+    """#10/#12: the committed fixture carries real Mispronunciation words — no synthetic
+    payload needed to prove the headline count is wired up."""
     assessment = offline_assessment()
     expected = len(sa.mispronounced_words(assessment.words))
     assert expected > 0, "fixture is expected to carry real Mispronunciation words"
@@ -360,12 +364,12 @@ def test_a_retried_assessment_charges_the_meter_for_every_attempt(tmp_path) -> N
     from utils import Mode
 
     conn = db.connect(tmp_path / "meter.db")
-    assessment = sa.analyse("/nonexistent.wav", REFERENCE, Mode.DRILL)
+    assessment = sa.analyse("/nonexistent.wav", REFERENCE, Mode.PARAGRAPH)
     assessment.attempts = 3
 
     db.record_attempt(
         conn,
-        mode=Mode.DRILL,
+        mode=Mode.PARAGRAPH,
         reference_text=REFERENCE,
         recognised_text=assessment.recognised_text,
         audio_seconds=12.0 * max(assessment.attempts, 1),
@@ -564,11 +568,21 @@ def test_a_clean_attempt_renders_no_delivery_drills(run_app) -> None:
     assert any("No pausing or intonation problems" in s.value for s in app.success)
 
 
-def test_a_visible_note_says_which_coach_wrote_it(run_app) -> None:
+def test_a_visible_note_says_where_the_coaching_came_from(run_app) -> None:
     app = seed_result(run_app(), offline_assessment())
     captions = " ".join(c.value for c in app.caption)
-    assert "offline coach" in captions
+    assert "Azure data alone" in captions
     assert "nothing sent anywhere" in captions.lower()
+
+
+def test_the_coaching_has_no_button_and_costs_nothing(run_app) -> None:
+    """Gemini stopped writing coaching on 2026-08-25. Nothing on this panel is buyable."""
+    app = seed_result(run_app(), offline_assessment())
+    labels = [b.label for b in app.button]
+    assert not any("Improve this" in label for label in labels)
+    assert any("Mark up the passage" in label for label in labels), (
+        "the annotation is the one paid button left, and it is a separate panel"
+    )
 
 
 def test_the_gemini_button_is_disabled_offline_and_says_why(run_app) -> None:
@@ -599,7 +613,7 @@ def test_the_report_is_attached_to_the_attempt_row_it_describes(run_app, tmp_pat
     conn = db.connect(str(tmp_path / "coach.db"))
     attempt_id = db.record_attempt(
         conn,
-        mode=Mode.DRILL,
+        mode=Mode.PARAGRAPH,
         reference_text=REFERENCE,
         recognised_text="x",
         audio_seconds=1.0,
@@ -625,7 +639,30 @@ def test_the_report_is_not_rebuilt_on_every_rerun(run_app) -> None:
     assert app.session_state["coaching"] is cached
 
 
-def test_clicking_the_button_swaps_the_models_report_in(run_app, monkeypatch, tmp_path) -> None:
+def _online(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Everything `annotate` and `check_startup` need to consider the model path usable."""
+    monkeypatch.setenv("OFFLINE_MODE", "false")
+    monkeypatch.setenv("GEMINI_API_KEY", "placeholder-not-a-real-key")
+    monkeypatch.setenv("AZURE_SPEECH_KEY", "placeholder")
+    monkeypatch.setenv("AZURE_SPEECH_REGION", "eastus")
+    monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
+
+
+def _annotation(words: list[str]):
+    import ai_coach
+
+    return ai_coach.ProsodyAnnotation.model_validate(
+        {
+            "words": [
+                {"word": word, "stress": index == 0, "break_after": "none", "linked": False}
+                for index, word in enumerate(words)
+            ],
+            "summary": "Lift the pitch across the last phrase.",
+        }
+    )
+
+
+def test_clicking_the_button_renders_the_annotated_passage(run_app, monkeypatch, tmp_path) -> None:
     """The click path, without a live call: app.py and this test share one ai_coach module."""
     import ai_coach
 
@@ -633,7 +670,7 @@ def test_clicking_the_button_swaps_the_models_report_in(run_app, monkeypatch, tm
     conn = db.connect(str(tmp_path / "coach.db"))
     attempt_id = db.record_attempt(
         conn,
-        mode=Mode.DRILL,
+        mode=Mode.PARAGRAPH,
         reference_text=REFERENCE,
         recognised_text="x",
         audio_seconds=1.0,
@@ -643,35 +680,68 @@ def test_clicking_the_button_swaps_the_models_report_in(run_app, monkeypatch, tm
         offline=True,
     )
 
-    improved = fallback_coach.build(assessment, Mode.DRILL).model_copy(
-        update={"overall_comment": "A second opinion from the model."}
-    )
+    annotation = _annotation(REFERENCE.split())
     monkeypatch.setattr(
         ai_coach,
-        "coach",
-        lambda *a, **k: ai_coach.CoachingResult(
-            report=improved,
-            source=fallback_coach.SOURCE_GEMINI,
-            raw={"candidates": [{"content": {"parts": [{"text": improved.model_dump_json()}]}}]},
+        "annotate",
+        lambda *a, **k: ai_coach.AnnotationResult(
+            annotation=annotation, raw=annotation.model_dump()
         ),
     )
-    monkeypatch.setenv("OFFLINE_MODE", "false")
-    monkeypatch.setenv("GEMINI_API_KEY", "placeholder-not-a-real-key")
-    monkeypatch.setenv("AZURE_SPEECH_KEY", "placeholder")
-    monkeypatch.setenv("AZURE_SPEECH_REGION", "eastus")
-    monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
+    _online(monkeypatch)
 
-    app = seed_result(run_app(), assessment, attempt_id=attempt_id)
-    button = next(b for b in app.button if "Gemini" in b.label)
+    app = seed_result(
+        run_app(DB_PATH=str(tmp_path / "coach.db")), assessment, attempt_id=attempt_id
+    )
+    button = next(b for b in app.button if "Mark up the passage" in b.label)
     assert not button.disabled
     app = button.click().run()
 
     assert not app.exception
-    assert any("second opinion from the model" in m.value for m in app.markdown)
-    assert any(ai_coach.model_name() in c.value for c in app.caption)
-    row = db.get_attempt(conn, attempt_id)
-    assert row is not None
-    assert row["coach_source"] == fallback_coach.SOURCE_GEMINI
+    rendered = " ".join(m.value for m in app.markdown)
+    assert "Lift the pitch across the last phrase" in rendered
+    # The first word, marked as stressed, reaches the page inside the annotation block.
+    assert REFERENCE.split()[0] in rendered
+    assert db.annotation_for(conn, attempt_id) is not None
+
+
+def test_a_stored_annotation_is_re_rendered_rather_than_re_asked(
+    run_app, monkeypatch, tmp_path
+) -> None:
+    """Re-opening an attempt must not spend a call for something already bought."""
+    import ai_coach
+
+    assessment = offline_assessment()
+    conn = db.connect(str(tmp_path / "coach.db"))
+    attempt_id = db.record_attempt(
+        conn,
+        mode=Mode.PARAGRAPH,
+        reference_text=REFERENCE,
+        recognised_text="x",
+        audio_seconds=1.0,
+        audio_sha256="deadbeef",
+        overall_scores={},
+        azure_raw={},
+        offline=True,
+    )
+    db.attach_annotation(conn, attempt_id, raw=_annotation(REFERENCE.split()).model_dump())
+    conn.close()
+
+    calls: list[int] = []
+
+    def never_called(*args, **kwargs):
+        calls.append(1)
+        return ai_coach.AnnotationResult()
+
+    monkeypatch.setattr(ai_coach, "annotate", never_called)
+    _online(monkeypatch)
+
+    app = seed_result(
+        run_app(DB_PATH=str(tmp_path / "coach.db")), assessment, attempt_id=attempt_id
+    )
+    rendered = " ".join(m.value for m in app.markdown)
+    assert "Lift the pitch across the last phrase" in rendered
+    assert calls == [], "a stored annotation is a re-parse, never another call"
 
 
 def test_a_second_click_cannot_spend_another_call(run_app, monkeypatch, tmp_path) -> None:
@@ -679,73 +749,59 @@ def test_a_second_click_cannot_spend_another_call(run_app, monkeypatch, tmp_path
     import ai_coach
 
     assessment = offline_assessment()
-    report = fallback_coach.build(assessment, Mode.DRILL)
+    annotation = _annotation(REFERENCE.split())
     calls: list[int] = []
 
     def once(*args, **kwargs):
         calls.append(1)
-        return ai_coach.CoachingResult(
-            report=report, source=fallback_coach.SOURCE_GEMINI, raw=report.model_dump()
-        )
+        return ai_coach.AnnotationResult(annotation=annotation, raw=annotation.model_dump())
 
-    monkeypatch.setattr(ai_coach, "coach", once)
-    monkeypatch.setenv("OFFLINE_MODE", "false")
-    monkeypatch.setenv("GEMINI_API_KEY", "placeholder-not-a-real-key")
-    monkeypatch.setenv("AZURE_SPEECH_KEY", "placeholder")
-    monkeypatch.setenv("AZURE_SPEECH_REGION", "eastus")
-    monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
+    monkeypatch.setattr(ai_coach, "annotate", once)
+    _online(monkeypatch)
 
     app = seed_result(run_app(), assessment)
-    app = next(b for b in app.button if "Gemini" in b.label).click().run()
+    app = next(b for b in app.button if "Mark up the passage" in b.label).click().run()
     assert len(calls) == 1
 
     # The click is handled in the pass that rendered the button, so the button on screen is
     # still enabled: clicking it again must cost nothing rather than buying a second call.
-    app = next(b for b in app.button if "Gemini" in b.label).click().run()
+    app = next(b for b in app.button if "Mark up the passage" in b.label).click().run()
     assert len(calls) == 1, "a second click must not re-spend"
-    assert next(b for b in app.button if "Gemini" in b.label).disabled
+    assert next(b for b in app.button if "Mark up the passage" in b.label).disabled
     app.run()
     assert len(calls) == 1, "and neither must an unrelated rerun"
 
 
-def test_a_spent_call_that_fell_back_cannot_be_re_clicked(run_app, monkeypatch) -> None:
-    """The re-spend hole: a real call that fell back used to leave the button live.
+def test_a_spent_call_that_produced_nothing_cannot_be_re_clicked(run_app, monkeypatch) -> None:
+    """The re-spend hole: a real call that came back unusable used to leave the button live.
 
-    A malformed answer, or one whose every fix failed validation, still consumed the
-    free-tier call. Keying the guard off the returned source meant the outcome decided
-    whether it could be bought again — so exactly the failures worth not repeating were
-    the repeatable ones.
+    A malformed answer, or one whose word sequence failed validation, still consumed the
+    free-tier call. Keying the guard off the outcome would mean exactly the failures worth
+    not repeating are the repeatable ones.
     """
     import ai_coach
 
     assessment = offline_assessment()
-    report = fallback_coach.build(assessment, Mode.DRILL)
     calls: list[int] = []
 
-    def spent_but_fell_back(*args, **kwargs):
+    def spent_but_rejected(*args, **kwargs):
         calls.append(1)
-        return ai_coach.CoachingResult(
-            report=report, source=fallback_coach.SOURCE_FALLBACK, raw=report.model_dump()
-        )
+        return ai_coach.AnnotationResult(reason="The model changed the wording.")
 
-    monkeypatch.setattr(ai_coach, "coach", spent_but_fell_back)
-    monkeypatch.setenv("OFFLINE_MODE", "false")
-    monkeypatch.setenv("GEMINI_API_KEY", "placeholder-not-a-real-key")
-    monkeypatch.setenv("AZURE_SPEECH_KEY", "placeholder")
-    monkeypatch.setenv("AZURE_SPEECH_REGION", "eastus")
-    monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
+    monkeypatch.setattr(ai_coach, "annotate", spent_but_rejected)
+    _online(monkeypatch)
 
     app = seed_result(run_app(), assessment)
-    app = next(b for b in app.button if "Gemini" in b.label).click().run()
+    app = next(b for b in app.button if "Mark up the passage" in b.label).click().run()
     assert len(calls) == 1
-    assert any("could not be reached" in i.value for i in app.info)
+    assert any("changed the wording" in i.value for i in app.info)
 
     # The click is handled in the pass that drew the button, so the button on screen is
     # still enabled — which is exactly why the guard cannot live on the disabled flag.
-    app = next(b for b in app.button if "Gemini" in b.label).click().run()
-    assert len(calls) == 1, "a fallback outcome must not be re-buyable"
-    assert next(b for b in app.button if "Gemini" in b.label).disabled, (
-        "the call was spent even though it fell back"
+    app = next(b for b in app.button if "Mark up the passage" in b.label).click().run()
+    assert len(calls) == 1, "a rejected outcome must not be re-buyable"
+    assert next(b for b in app.button if "Mark up the passage" in b.label).disabled, (
+        "the call was spent even though nothing usable came back"
     )
 
 
@@ -821,7 +877,7 @@ def _hanging_job(app: AppTest, stop: threading.Event) -> app_module.AssessJob:
         cancel_event=threading.Event(),
         key="k",
         reference_text=REFERENCE,
-        mode=Mode.DRILL,
+        mode=Mode.PARAGRAPH,
     )
     job.thread = threading.Thread(target=stop.wait, daemon=True)
     job.thread.start()
@@ -839,7 +895,7 @@ def test_a_running_job_disables_assess_and_offers_stop(run_app, settled_poll) ->
         assert next(b for b in app.button if b.label == "Assess").disabled
         assert [b for b in app.button if "Stop" in b.label], "Stop must be offered"
         assert next(b for b in app.button if "Reset" in b.label).disabled
-        assert any("Assessing" in i.value for i in app.info)
+        assert any("Assessing" in s.label for s in app.status)
     finally:
         never_finishes.set()
 
@@ -879,7 +935,7 @@ def test_a_cancelled_job_is_reported_and_clears_itself(run_app) -> None:
         cancel_event=threading.Event(),
         key="k",
         reference_text=REFERENCE,
-        mode=Mode.DRILL,
+        mode=Mode.PARAGRAPH,
     )
     job.thread = threading.Thread(target=lambda: None)
     job.thread.start()
@@ -901,7 +957,7 @@ def test_a_job_that_died_without_an_outcome_does_not_crash_the_page(run_app) -> 
         cancel_event=threading.Event(),
         key="k",
         reference_text=REFERENCE,
-        mode=Mode.DRILL,
+        mode=Mode.PARAGRAPH,
     )
     job.thread = threading.Thread(target=lambda: None)
     job.thread.start()
@@ -958,958 +1014,401 @@ def test_a_collapsed_word_still_gets_a_unique_playback_key(run_app) -> None:
     assert not app.exception, "duplicate widget keys raise rather than render"
 
 
-# --- The Progress tab -----------------------------------------------------------------------
-# The frames, the rankings and the chart spec are covered in `test_progress_view.py` against
-# real payloads. What is checked here is only that the tab is wired in: that it renders, that
-# it says something useful when there is nothing to draw, and that giving Practice a tab of
-# its own did not break the page it used to be.
+# --- Everything Azure returned ------------------------------------------------------------
 
 
-def seed_attempts(app: AppTest, count: int = 3, *, benchmark: bool = False) -> None:
-    """Write attempts straight into the app's own database, the way a real session would."""
-    import json
-
-    import progress_view
-
-    payload = json.loads((ROOT / "tests" / "fixtures" / "sample_azure_response.json").read_text())
-    conn = db.connect(os.environ["DB_PATH"])
-    for index in range(count):
-        db.record_attempt(
-            conn,
-            mode=Mode.PARAGRAPH if benchmark else Mode.DRILL,
-            reference_text=progress_view.BENCHMARK_PASSAGE if benchmark else REFERENCE,
-            recognised_text=REFERENCE,
-            audio_seconds=12.0,
-            audio_sha256=f"seed-{index}",
-            overall_scores={
-                "pron_score": 80.0 + index,
-                "accuracy": 85.0,
-                "fluency": 78.0,
-                "completeness": 100.0,
-                "prosody": None if index else 70.0,
-            },
-            azure_raw=payload,
-            created_at=f"2026-07-0{index + 1}T08:00:00Z",
-        )
-    conn.close()
-
-
-def test_the_page_has_today_practice_progress_and_accent_tabs(run_app) -> None:
-    """Today is first: opening the app should answer "what am I doing today?" rather than
-    present a blank textarea. The textarea is one click away, which is where a thing you
-    reach for on purpose belongs.
-
-    Accent is last and separate rather than folded into Progress: it holds the calibration
-    flow and the room check, which are things you do once, and Progress is about scores over
-    time.
-    """
-    app = run_app()
-    assert not app.exception
-    assert len(app.tabs) == 4
-
-
-def test_the_progress_tab_says_so_when_there_is_no_history(run_app) -> None:
-    """An empty chart area explains nothing; the empty state has to be words."""
-    app = run_app()
-    assert not app.exception
-    assert any("Nothing recorded yet" in info.value for info in app.info)
-
-
-def test_the_progress_tab_renders_a_chart_once_there_is_history(run_app) -> None:
-    app = run_app()
-    seed_attempts(app)
-    app.run()
-    assert not app.exception
-    charts = [element for element in app.main if element.type == "vega_lite_chart"]
-    assert charts, "the trajectory should be drawn"
-
-
-def test_free_practice_alone_says_the_headline_series_is_still_empty(run_app) -> None:
-    """The whole point of the benchmark, said out loud while it has not been read."""
-    app = run_app()
-    seed_attempts(app)
-    app.run()
-    assert not app.exception
-    assert any("has not been read" in warning.value for warning in app.warning)
-
-
-def test_a_benchmark_read_replaces_that_warning_with_when_it_last_happened(run_app) -> None:
-    app = run_app()
-    seed_attempts(app, benchmark=True)
-    app.run()
-    assert not app.exception
-    assert not any("has not been read" in warning.value for warning in app.warning)
-    assert any("Benchmark passage last read" in caption.value for caption in app.caption)
-
-
-def test_the_benchmark_passage_is_the_first_paragraph_preset(run_app) -> None:
-    """It has to be selected, not retyped: the series is identified by matching the text."""
-    import progress_view
-
-    assert list(app_module.PRESETS[Mode.PARAGRAPH])[0] == progress_view.BENCHMARK_TITLE
-    assert progress_view.is_benchmark(
-        app_module.PRESETS[Mode.PARAGRAPH][progress_view.BENCHMARK_TITLE]
-    )
-
-
-def test_the_history_table_still_renders_under_the_charts(run_app) -> None:
-    app = run_app()
-    seed_attempts(app)
-    app.run()
-    assert not app.exception
-    assert any("History" in expander.label for expander in app.expander)
-
-
-# --- Rhythm ---------------------------------------------------------------------------------
-# The nPVI figure must never appear without saying what it can be compared to. These pin that,
-# because the number on its own invites exactly the comparison it cannot support.
-
-
-def test_the_rhythm_section_reports_the_fixtures_npvi(run_app) -> None:
+def test_the_per_word_azure_detail_is_rendered(run_app) -> None:
+    """ "Show me everything Azure said" has to be true of this page, not nearly true."""
     app = seed_result(run_app(), offline_assessment())
-    assert not app.exception
-    npvi = [m for m in app.metric if m.label == "nPVI"]
-    assert len(npvi) == 1
-    assert npvi[0].value == "55.9"
+    labels = [e.label for e in app.expander]
+    assert any("Everything Azure returned for this word" in label for label in labels)
+    assert any("Everything Azure returned for this attempt" in label for label in labels)
 
 
-def test_rhythm_without_a_baseline_says_the_number_has_no_comparison(
-    run_app,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The published-band trap, named out loud rather than left to be assumed."""
-    import rhythm
-
-    monkeypatch.setattr(rhythm, "baseline", lambda *a, **k: None)
-    app = seed_result(run_app(), offline_assessment())
-    said = " ".join(c.value for c in app.caption)
-    assert "nothing to compare against yet" in said
-    assert "Published General American" in said
-    assert "capture_baseline.py" in said
-
-
-def test_rhythm_against_a_baseline_names_the_voice_and_the_direction(
-    run_app,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A synthesiser, not a native speaker — and which way a lower score points."""
-    import rhythm
-
-    monkeypatch.setattr(
-        rhythm,
-        "baseline",
-        lambda *a, **k: rhythm.Baseline(
-            rhythm=rhythm.Rhythm(npvi=58.4, pairs=180, intervals=206, runs=26),
-            voice="en-US-BrianNeural",
-            captured_at="2026-08-19T00:00:00Z",
-        ),
-    )
-    app = seed_result(run_app(), offline_assessment())
-    said = " ".join(c.value for c in app.caption)
-    assert "en-US-BrianNeural" in said
-    assert "not a native speaker" in said
-    assert "syllable-timed" in said
-
-    npvi = [m for m in app.metric if m.label == "nPVI"][0]
-    assert npvi.delta is not None and "vs baseline" in npvi.delta
-
-
-def test_too_little_speech_shows_no_rhythm_number(run_app, monkeypatch) -> None:
-    """A handful of vowels must produce a sentence, not a figure."""
-    import rhythm
-
+def test_the_detail_names_a_score_azure_did_not_return(run_app) -> None:
+    """A silently absent row reads as a rendering bug, not as a fact about the attempt."""
     assessment = offline_assessment()
-    monkeypatch.setattr(
-        rhythm,
-        "npvi",
-        lambda *a, **k: rhythm.Rhythm(npvi=None, pairs=3, intervals=4, runs=1),
-    )
+    assessment.overall_scores["prosody"] = None
     app = seed_result(run_app(), assessment)
-    assert not [m for m in app.metric if m.label == "nPVI"]
-    assert any("Not enough connected speech" in c.value for c in app.caption)
+    rendered = " ".join(m.value for m in app.markdown)
+    assert "Not returned by Azure" in rendered
+    assert "prosody" in rendered
 
 
-# --- The Today tab ----------------------------------------------------------
-# The one thing a browser cannot easily prove and a test can: with nothing recorded, the queue
-# offers nothing rather than seeding a plausible-looking target from somewhere.
-#
-# Seeded through the REAL path — two attempts carrying the committed Azure capture — rather
-# than by stubbing the aggregate. AppTest executes app.py as its own module object, so a
-# monkeypatch on the imported `app` here would not reach the running script anyway, and the
-# real path is what needs proving: promotion has to come out of stored attempts.
+def test_a_word_clip_is_cut_at_azures_own_offsets() -> None:
+    """The "how I said it" half of a flagged word. One second of speech, one word's span."""
+    import audio_utils
 
+    recording, _ = audio_utils.prepare(_wav_bytes(2.0))
+    clip = app_module.word_clip(recording, {"start_s": 0.5, "end_s": 1.0})
+    assert clip is not None
+    assert audio_utils.duration_seconds(clip) == pytest.approx(0.54, abs=0.05)
 
-def seed_flagged_history(times: int = 2) -> None:
-    """Record `times` attempts of the captured drill, whose headline fault is /θ/ → /s/."""
-    import json
 
-    payload = json.loads((ROOT / "tests" / "fixtures" / "sample_azure_response.json").read_text())
-    conn = db.connect()
-    for index in range(times):
-        db.record_attempt(
-            conn,
-            mode=Mode.DRILL,
-            reference_text=REFERENCE,
-            recognised_text=REFERENCE,
-            audio_seconds=12.8,
-            audio_sha256=f"seed-{index}",
-            overall_scores={"pron_score": 83.0},
-            azure_raw=payload,
-            offline=False,
-            created_at=f"2026-08-{10 + index:02d}T00:00:00Z",
-        )
-    conn.close()
+def test_a_word_with_no_span_has_no_clip() -> None:
+    """An omitted word was never spoken, so there is nothing of yours to play."""
+    import audio_utils
 
+    recording, _ = audio_utils.prepare(_wav_bytes(2.0))
+    assert app_module.word_clip(recording, {"start_s": None, "end_s": None}) is None
+    assert app_module.word_clip(recording, {}) is None
 
-def test_with_no_history_the_queue_offers_nothing_rather_than_guessing(run_app) -> None:
-    """The cold-start contract. No first language, no default list, no invented target."""
-    app = run_app()
-    assert not app.exception
-    text = " ".join(info.value for info in app.info)
-    assert "promoted from your own assessed attempts" in text
 
+def test_no_recording_means_no_clip_rather_than_an_error() -> None:
+    """A gitignored file can legitimately be gone, months after the attempt."""
+    assert app_module.word_clip(None, {"start_s": 0.0, "end_s": 1.0}) is None
 
-def test_one_attempt_is_not_a_pattern(run_app) -> None:
-    """A sound has to recur before it becomes a target — one bad reading is not evidence."""
-    seed_flagged_history(times=1)
-    app = run_app()
-    assert not app.exception
-    conn = db.connect()
-    assert db.targets(conn) == []
-    assert any("recurred often enough" in info.value for info in app.info)
 
+def test_a_span_past_the_end_of_the_recording_has_no_clip() -> None:
+    import audio_utils
 
-def test_a_recurring_substitution_is_promoted_from_the_stored_attempts(run_app) -> None:
-    """Every target has to trace back to a sound the recordings actually flagged."""
-    import practice_queue
-    import progress_view
+    recording, _ = audio_utils.prepare(_wav_bytes(2.0))
+    assert app_module.word_clip(recording, {"start_s": 30.0, "end_s": 31.0}) is None
 
-    seed_flagged_history()
-    app = run_app()
-    assert not app.exception
 
-    conn = db.connect()
-    rows = db.targets(conn)
-    assert rows, "the capture's recurring faults should reach the queue"
-
-    parsed = progress_view.parse_attempts(db.attempt_payloads(conn))
-    offered = {
-        (c.item, c.kind)
-        for c in practice_queue.candidates(
-            progress_view.flagged_phonemes(parsed).to_dict("records"),
-            progress_view.weak_syllables(parsed).to_dict("records"),
-        )
-    }
-    for row in rows:
-        assert (row["item"], row["kind"]) in offered, (
-            f"{row['item']} is on the list without evidence behind it"
-        )
-
-    markdown = " ".join(block.value for block in app.markdown)
-    assert rows[0]["item"] in markdown
-
-
-def test_the_three_slots_go_to_three_different_kinds(run_app) -> None:
-    """Three consonant contrasts would crowd out a vowel gap flagged just as often, and
-    sounds and rhythm are different problems."""
-    seed_flagged_history()
-    run_app()
-    conn = db.connect()
-    kinds = {row["kind"] for row in db.targets(conn)}
-    assert kinds == {"contrast", "vowel", "stress"}
-
-
-def test_a_promoted_target_survives_a_restart(run_app) -> None:
-    """The queue's whole promise: thirty days of use is not thirty first sessions."""
-    seed_flagged_history()
-    run_app()
-
-    import streamlit as st
-
-    st.cache_resource.clear()  # a fresh process would have no connection either
-    conn = db.connect()
-    rows = db.targets(conn)
-    assert rows and rows[0]["state"] == "active"
-    assert rows[0]["next_due"], "a target with no due date is not scheduled"
-
-
-def test_the_block_cannot_be_started_offline(run_app) -> None:
-    """A block is live synthesis by definition; OFFLINE_MODE keeps its absolute meaning."""
-    seed_flagged_history()
-    app = run_app()
-    starts = [button for button in app.button if "Start the block" in button.label]
-    assert starts, "the due block should be offered"
-    assert all(button.disabled for button in starts)
-
-
-def test_the_evidence_and_the_rule_are_both_on_screen(run_app) -> None:
-    """The brief requires promotion and graduation to be visible, not implicit."""
-    seed_flagged_history()
-    app = run_app()
-    rendered = " ".join(block.value for block in app.markdown)
-    assert "flagged in 2 separate attempts" in rendered  # the evidence, with numbers
-    assert "90%" in rendered  # the rule
-    assert "50%" in rendered  # and the chance floor beside it
-
-
-def test_the_target_set_is_capped_at_three(run_app) -> None:
-    """A target set you cannot hold in your head while speaking is not a target set."""
-    seed_flagged_history(times=3)
-    run_app()
-    conn = db.connect()
-    assert len(db.targets(conn)) <= utils.MAX_ACTIVE_TARGETS
-
-
-# --- Running a block end to end ------------------------------------------------------------
-# Headless, with the one seam that costs money replaced. A browser cannot easily click twenty
-# trials, and doing it live would buy the same clips for every run of the suite.
-
-
-WAV = b"RIFF" + b"\x00" * 40
-
-
-@pytest.fixture
-def no_synthesis(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    """Replace the single call that reaches Azure, and point the cache somewhere throwaway.
-
-    `tts.synthesise` is stubbed rather than `_speak`, so the meter accounting around it is
-    the real code — the point of the exercise is what the block charges, not what Azure
-    returns.
-    """
-    import tts
-
-    monkeypatch.setenv("TTS_CACHE_DIR", str(tmp_path / "tts_cache"))
-    monkeypatch.setenv("OFFLINE_MODE", "false")
-    monkeypatch.setenv("AZURE_SPEECH_KEY", "test-key-not-a-real-one")
-    monkeypatch.setenv("AZURE_SPEECH_REGION", "westeurope")
-    monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
-
-    calls: list[tuple[str, str]] = []
-
-    def fake(text, *, voice=None, slow=False, on_attempt=None):
-        if on_attempt is not None:
-            on_attempt(1)
-        chosen = voice or tts.voice_name()
-        calls.append((text, chosen))
-        return tts.Synthesis(audio=WAV, characters=len(text), voice=chosen, attempts=1)
-
-    monkeypatch.setattr(tts, "synthesise", fake)
-    return calls
-
-
-def start_a_block(app: AppTest) -> AppTest:
-    for button in app.button:
-        if "Start the block" in button.label:
-            return button.click().run()
-    raise AssertionError("no block was offered")
-
-
-def answer_every_trial(app: AppTest) -> AppTest:
-    """Answer the first alternative on every trial, then step past each reveal."""
-    for _ in range(utils.PERCEPTION_BLOCK_TRIALS * 3):
-        state = app.session_state["perception_block"]
-        if state is None:
-            break
-        index = int(state["index"])
-        if index >= len(state["block"].trials):
-            break
-        if state["revealed"]:
-            app = [b for b in app.button if b.label.startswith("Next")][0].click().run()
-            continue
-        trial = state["block"].trials[index]
-        choice = [b for b in app.button if b.label == trial.alternatives[0]][0]
-        app = choice.click().run()
-    return app
-
-
-def test_a_block_runs_end_to_end_and_charges_only_what_it_synthesised(
-    run_app, no_synthesis
-) -> None:
-    seed_flagged_history()
-    conn = db.connect()
-    before = db.monthly_tts_characters(conn)
-
-    app = start_a_block(run_app())
-    assert not app.exception
-
-    block = app.session_state["perception_block"]["block"]
-    import perception_trainer
-
-    expected = perception_trainer.stimuli(block)
-    assert sorted(no_synthesis) == sorted(expected), "every clip the block needs, and nothing else"
-    charged = db.monthly_tts_characters(conn) - before
-    assert charged == sum(len(text) for text, _ in expected)
-
-
-def test_no_clip_is_ever_bought_twice(run_app, no_synthesis) -> None:
-    """The disk cache is checked before the pre-flight and before the meter.
-
-    A second block is not free — it plans different stimuli out of the same pool, and the
-    ones it has never played have to be synthesised. What must never happen is paying again
-    for a clip already on disk, and the charge has to match exactly the new ones.
-    """
-    seed_flagged_history()
-    app = start_a_block(run_app())
-    first = list(no_synthesis)
-    app.session_state["perception_block"] = None
-    app = app.run()
-
-    conn = db.connect()
-    before = db.monthly_tts_characters(conn)
-    no_synthesis.clear()
-
-    start_a_block(app)
-    second = list(no_synthesis)
-
-    assert not set(first) & set(second), "a clip already on disk was bought again"
-    assert len(second) == len(set(second)), "the same clip was bought twice in one block"
-    charged = db.monthly_tts_characters(conn) - before
-    assert charged == sum(len(text) for text, _ in second)
-
-
-def test_a_repeated_block_plan_costs_nothing_at_all(run_app, no_synthesis) -> None:
-    """The exact-repeat case: the same stimuli asked for twice charge once."""
-    import perception_trainer
-    import tts
-
-    seed_flagged_history()
-    app = start_a_block(run_app())
-    block = app.session_state["perception_block"]["block"]
-
-    conn = db.connect()
-    before = db.monthly_tts_characters(conn)
-    no_synthesis.clear()
-
-    for text, voice in perception_trainer.stimuli(block):
-        assert tts.cached_audio(voice, text) is not None
-
-    assert no_synthesis == []
-    assert db.monthly_tts_characters(conn) == before
-
-
-def test_every_trial_is_stored_as_it_is_answered(run_app, no_synthesis) -> None:
-    seed_flagged_history()
-    app = start_a_block(run_app())
-    item = app.session_state["perception_block"]["block"].item
-
-    conn = db.connect()
-    assert db.trials_for(conn, item) == []
-    app = answer_every_trial(app)
-
-    trials = db.trials_for(conn, item)
-    assert len(trials) == utils.PERCEPTION_BLOCK_TRIALS
-    assert {row["alternatives"] for row in trials} == {2}
-    assert all(row["novel"] == 1 for row in trials), "a first block is entirely new"
-    assert len({row["voice"] for row in trials}) >= perception_trainer_min_voices()
-
-
-def perception_trainer_min_voices() -> int:
-    import perception_trainer
-
-    return perception_trainer.MIN_VOICES
-
-
-def test_an_abandoned_block_keeps_its_answers_but_earns_no_verdict(run_app, no_synthesis) -> None:
-    """Store the evidence, not only the verdict — the two are separate questions."""
-    import practice_queue
-
-    seed_flagged_history()
-    app = start_a_block(run_app())
-    state = app.session_state["perception_block"]
-    item = state["block"].item
-    trial = state["block"].trials[0]
-    app = [b for b in app.button if b.label == trial.alternatives[0]][0].click().run()
-    app = [b for b in app.button if b.label == "Stop the block"][0].click().run()
-
-    conn = db.connect()
-    trials = [dict(row) for row in db.trials_for(conn, item)]
-    assert len(trials) == 1, "the answer given is kept"
-
-    summaries = practice_queue.summarise_blocks(trials)
-    assert not summaries[0].complete, "a part-finished block is not a claim"
-    row = [t for t in db.targets(conn) if t["item"] == item][0]
-    assert row["state"] == "active"
-
-
-def test_finishing_a_perfect_block_reports_it_against_the_chance_floor(
-    run_app, no_synthesis
-) -> None:
-    seed_flagged_history()
-    app = start_a_block(run_app())
-    state = app.session_state["perception_block"]
-    # Answer every trial correctly by driving the state directly, then render the summary.
-    state["answers"] = [True] * len(state["block"].trials)
-    state["index"] = len(state["block"].trials)
-    app = app.run()
-
-    assert app.metric[0].value == "100%"
-    captions = " ".join(c.value for c in app.caption)
-    assert "50% is what guessing scores" in captions, (
-        "an accuracy without its floor reports near-noise as progress"
-    )
-    assert "never heard before" in captions
-
-
-def test_a_block_at_the_chance_floor_says_it_proves_nothing(run_app, no_synthesis) -> None:
-    seed_flagged_history()
-    app = start_a_block(run_app())
-    state = app.session_state["perception_block"]
-    total = len(state["block"].trials)
-    state["answers"] = [True] * (total // 2) + [False] * (total - total // 2)
-    state["index"] = total
-    app = app.run()
-
-    warnings = " ".join(w.value for w in app.warning)
-    assert "what guessing looks like" in warnings
-
-
-# --- Shadowing ---------------------------------------------------------------------------------
-# The one surface where practice happens WHILE speaking. What is checked here is the wiring the
-# pure modules cannot see: that the offer reaches Today with no history at all, that the model
-# and the recorder end up on screen together with nothing that reruns between them, and above
-# all that the tag reaches the database — an untagged shadowed read is indistinguishable from a
-# cold one afterwards and lands on the trajectory the tag exists to keep it off.
-
-
-def real_wav(seconds: float = 0.5) -> bytes:
-    """A decodable WAV, since the echo track really runs through pydub."""
+def _wav_bytes(seconds: float) -> bytes:
+    """A real WAV of a quiet sine, so pydub has something genuine to decode."""
+    import math
     import struct
     import wave
 
+    rate = 16_000
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as handle:
         handle.setnchannels(1)
         handle.setsampwidth(2)
-        handle.setframerate(24_000)
-        handle.writeframes(struct.pack("<h", 0) * int(seconds * 24_000))
+        handle.setframerate(rate)
+        handle.writeframes(
+            b"".join(
+                struct.pack("<h", int(6000 * math.sin(2 * math.pi * 220 * n / rate)))
+                for n in range(int(seconds * rate))
+            )
+        )
     return buffer.getvalue()
 
 
-@pytest.fixture
-def shadow_synthesis(monkeypatch: pytest.MonkeyPatch, tmp_path):
-    """`tts.synthesise` stubbed with real decodable audio; the meter around it stays real."""
-    import tts
+# --- The History tab ------------------------------------------------------------------------
 
-    monkeypatch.setenv("TTS_CACHE_DIR", str(tmp_path / "shadow_cache"))
-    monkeypatch.setenv("OFFLINE_MODE", "false")
-    monkeypatch.setenv("AZURE_SPEECH_KEY", "test-key-not-a-real-one")
-    monkeypatch.setenv("AZURE_SPEECH_REGION", "westeurope")
-    monkeypatch.setenv("AZURE_TIER_CONFIRMED_F0", "true")
 
-    calls: list[tuple[str, bool]] = []
-
-    def fake(text, *, voice=None, slow=False, on_attempt=None):
-        if on_attempt is not None:
-            on_attempt(1)
-        calls.append((text, slow))
-        payload = tts.payload_for(text, slow=slow, voice=voice)
-        return tts.Synthesis(
-            audio=real_wav(), characters=len(payload), voice=voice or tts.voice_name(), attempts=1
+def seed_history(app: AppTest, count: int, *, mode: Mode = Mode.PARAGRAPH) -> list[int]:
+    """Real attempt rows in the app's own database, the way an assessment would leave them."""
+    conn = app_module.get_connection()
+    return [
+        db.record_attempt(
+            conn,
+            mode=mode,
+            reference_text=f"Reading number {n}",
+            recognised_text="x",
+            audio_seconds=12.0,
+            audio_sha256=f"hash{n}",
+            overall_scores={"pron_score": 80.0 + n},
+            azure_raw=offline_assessment().raw,
+            created_at=f"2026-08-{n + 1:02d}T08:00:00Z",
         )
-
-    monkeypatch.setattr(tts, "synthesise", fake)
-    return calls
-
-
-def open_shadow(app: AppTest) -> AppTest:
-    return [b for b in app.button if "Shadow this passage" in b.label][0].click().run()
+        for n in range(count)
+    ]
 
 
-def prepare_model(app: AppTest) -> AppTest:
-    return [b for b in app.button if "Prepare the model" in b.label][0].click().run()
-
-
-def test_shadowing_is_offered_with_no_history_at_all(run_app) -> None:
-    """It is the one practice on this page that needs none: it trains rhythm against a model
-    rather than a sound the recordings flagged, so there is nothing for it to wait for."""
+def test_the_page_has_exactly_two_tabs(run_app) -> None:
+    """Analyze and History. Anything else is scope this project deleted on purpose."""
     app = run_app()
     assert not app.exception
-    assert any("Shadow this passage" in b.label for b in app.button)
+    assert [t.label for t in app.tabs] == ["Analyze", "History"]
 
 
-def test_the_shadow_offer_lists_the_paragraph_presets(run_app) -> None:
-    """Not a second list: a passage differing by one word would pair against nothing."""
+def test_an_empty_history_says_so_rather_than_rendering_a_blank(run_app) -> None:
     app = run_app()
-    options = list(app.selectbox(key="shadow-passage").options)
-    assert options == list(app_module.PRESETS[Mode.PARAGRAPH])
+    assert any("Nothing recorded yet" in i.value for i in app.info)
 
 
-def test_opening_a_session_renders_it_in_place(run_app) -> None:
-    """Streamlit cannot select a tab programmatically, so the session renders inside Today —
-    the pattern the perception block already established."""
-    app = open_shadow(run_app())
-    assert not app.exception
-    assert app.session_state[app_module.SHADOW_KEY] is not None
-    assert any("Shadowing:" in m.value for m in app.markdown)
+def history_table(app: AppTest):
+    """The History table as a pandas DataFrame, or None when no table was drawn.
+
+    Matched on its columns rather than its key: AppTest only exposes a `key` for dataframes
+    Streamlit treats as widgets, and this one is not one.
+    """
+    for element in app.dataframe:
+        frame = element.value
+        if "Text" in frame.columns and "Delete" in frame.columns:
+            return frame
+    return None
 
 
-def test_the_surface_says_nothing_is_scored_while_shadowing(run_app) -> None:
-    app = open_shadow(run_app())
-    captions = " ".join(c.value for c in app.caption)
-    assert "not another reading you get marked on" in captions
+def open_attempt(app: AppTest, attempt_id: int) -> AppTest:
+    """Open one attempt the way an Actions click does.
+
+    The Actions column lives inside `st.dataframe`, which AppTest cannot click into, so the
+    session key its callback would set is set directly. What is under test on the far side
+    of that click is the detail rendering, not Streamlit's own grid.
+    """
+    app.session_state[app_module.HISTORY_OPEN_KEY] = attempt_id
+    return app.run()
 
 
-def test_the_surface_demands_headphones(run_app) -> None:
-    """On speakers Azure hears the model too and scores the mixture."""
-    app = open_shadow(run_app())
-    assert any("Headphones" in w.value for w in app.warning)
+def arm_delete(app: AppTest, attempt_id: int) -> AppTest:
+    """Arm the delete confirmation the way an Actions click does. See `open_attempt`."""
+    app.session_state[app_module.HISTORY_PENDING_DELETE_KEY] = attempt_id
+    return app.run()
 
 
-def test_preparing_the_model_is_disabled_offline(run_app) -> None:
-    """Synthesis is a live call by definition and there is no fixture to replay for audio —
-    the same rule "Hear it" follows."""
-    app = open_shadow(run_app())
-    prepare = [b for b in app.button if "Prepare the model" in b.label][0]
-    assert prepare.disabled
-    captions = " ".join(c.value for c in app.caption)
-    assert "OFFLINE_MODE" in captions
+def test_history_lists_what_was_recorded_newest_first(run_app) -> None:
+    app = run_app()
+    seed_history(app, 3)
+    app.run()
+    table = history_table(app)
+    assert "3 attempts" in " ".join(c.value for c in app.caption)
+    assert list(table["Text"]) == [
+        "Reading number 2",
+        "Reading number 1",
+        "Reading number 0",
+    ]
 
 
-def today_recorders(app: AppTest) -> list:
-    """Audio inputs on the Today tab only — the Practice tab has its own on every pass."""
-    return list(app.tabs[0].get("audio_input"))
+def test_the_table_carries_a_column_for_every_facet_the_filters_offer(run_app) -> None:
+    app = run_app()
+    seed_history(app, 1)
+    app.run()
+    table = history_table(app)
+    for column in ("Text", "Pron", "Accuracy", "Fluency", "Date", "Type", "Audio", "Source"):
+        assert column in table.columns
 
 
-def test_no_recorder_appears_before_the_model_does(run_app) -> None:
-    """The recorder is only useful next to a player, and one that reruns to fetch the model
-    mid-take would cut the recording in half."""
-    app = open_shadow(run_app())
-    assert today_recorders(app) == []
+def test_every_matching_row_goes_to_the_grid_which_scrolls_them_itself(run_app) -> None:
+    """The table is bounded by `HISTORY_TABLE_HEIGHT`, not by slicing rows away from it.
+
+    There is deliberately no pager of our own: an external one on top of the grid's own
+    scrollback was the thing this table replaced.
+    """
+    app = run_app()
+    seed_history(app, 20)
+    app.run()
+
+    assert len(history_table(app)) == 20
+    assert any("20 attempts" in c.value for c in app.caption)
+    assert not [b for b in app.button if b.key and b.key.startswith("pager-")]
 
 
-def test_the_model_and_the_recorder_arrive_together(run_app, shadow_synthesis) -> None:
-    """The layout constraint, asserted: `st.audio_input` holds a live MediaRecorder, so
-    nothing may rerun between pressing record and pressing play."""
-    app = prepare_model(open_shadow(run_app()))
-    assert not app.exception
-    assert today_recorders(app)
-    assert not any("Prepare the model" in b.label for b in app.button)
-
-
-def test_the_whole_passage_is_bought_as_one_clip_for_speaking_along(
-    run_app, shadow_synthesis
-) -> None:
-    app = open_shadow(run_app())
-    passage = app.session_state[app_module.SHADOW_KEY]["passage"]
-    prepare_model(app)
-    assert [text for text, _ in shadow_synthesis] == [passage]
-
-
-def test_a_second_preparation_charges_nothing(run_app, shadow_synthesis) -> None:
-    """The disk lookup happens before the pre-flight and before the meter, the same ordering
-    `play()` depends on."""
-    app = prepare_model(open_shadow(run_app()))
-    app.session_state[app_module.SHADOW_KEY]["audio"] = {}
-    prepare_model(app.run())
-    assert len(shadow_synthesis) == 1
-
-
-def test_echo_mode_buys_one_clip_per_phrase(run_app, shadow_synthesis) -> None:
-    import shadowing
-
-    app = open_shadow(run_app())
-    passage = app.session_state[app_module.SHADOW_KEY]["passage"]
-    app = app.radio(key="shadow-mode").set_value(shadowing.ECHO).run()
-    prepare_model(app)
-    assert [text for text, _ in shadow_synthesis] == shadowing.phrases(passage)
-
-
-def test_echo_mode_offers_no_recorder_at_all(run_app, shadow_synthesis) -> None:
-    """Its recording would pause between every phrase, so Azure would mark the delivery down
-    for a gap the format put there. Offering it as a warm-up is honest; scoring it is not."""
-    import shadowing
-
-    app = open_shadow(run_app())
-    app = app.radio(key="shadow-mode").set_value(shadowing.ECHO).run()
-    app = prepare_model(app)
-    assert today_recorders(app) == []
-    assert not any("Assess this read" in b.label for b in app.button)
-    assert any("not assessed" in m.value for m in app.markdown)
-
-
-def test_the_slow_rate_is_a_separate_purchase(run_app, shadow_synthesis) -> None:
-    app = prepare_model(open_shadow(run_app()))
-    app = app.checkbox(key="shadow-slow").set_value(True).run()
-    prepare_model(app)
-    assert [slow for _, slow in shadow_synthesis] == [False, True]
-
-
-def test_a_shadowed_read_is_stored_tagged(run_app, shadow_synthesis) -> None:
-    """The load-bearing assertion of the whole chunk."""
-    import shadowing
-
-    app = prepare_model(open_shadow(run_app()))
-    state = app.session_state[app_module.SHADOW_KEY]
-    passage = str(state["passage"])
-
-    conn = db.connect(os.environ["DB_PATH"])
-    attempt_id = db.record_attempt(
+def test_offline_replays_appear_in_history_and_are_labelled(run_app) -> None:
+    """A fixture replay is a real row a real click produced. Hiding it made History lie."""
+    app = run_app()
+    conn = app_module.get_connection()
+    db.record_attempt(
         conn,
         mode=Mode.PARAGRAPH,
-        reference_text=passage,
-        recognised_text=passage,
-        audio_seconds=70.0,
-        audio_sha256="shadowed-read",
-        overall_scores={
-            "pron_score": 80.0,
-            "accuracy": 85.0,
-            "fluency": 78.0,
-            "completeness": 100.0,
-            "prosody": 70.0,
-        },
-        azure_raw={"RecognitionStatus": "Success"},
+        reference_text="A replayed reading",
+        recognised_text="x",
+        audio_seconds=1.0,
+        audio_sha256="h",
+        overall_scores={},
+        azure_raw=offline_assessment().raw,
+        offline=True,
     )
-    db.tag_attempt(conn, attempt_id, shadowing.SHADOW_TAG)
-
-    row = [r for r in db.attempt_series(conn) if r["id"] == attempt_id][0]
-    conn.close()
-    assert row["shadowed"]
-
-
-def test_finishing_a_read_puts_the_passage_on_the_queue(run_app, shadow_synthesis) -> None:
-    """Created on first USE — a session opened and abandoned adds no standing practice."""
-    import practice_queue
-
-    app = open_shadow(run_app())
-    state = app.session_state[app_module.SHADOW_KEY]
-    conn = db.connect(os.environ["DB_PATH"])
-    assert [r for r in db.targets(conn) if r["kind"] == practice_queue.SHADOW] == []
-
-    app_module.record_shadow_session(
-        conn,
-        str(state["title"]),
-        str(state["passage"]),
-        now=datetime(2026, 8, 19, tzinfo=UTC),
-    )
-    rows = [r for r in db.targets(conn) if r["kind"] == practice_queue.SHADOW]
-    conn.close()
-    assert len(rows) == 1
-    assert rows[0]["next_due"] > "2026-08-19"
+    app.run()
+    table = history_table(app)
+    assert "A replayed reading" in list(table["Text"])
+    assert list(table["Source"]) == ["Fixture replay"]
 
 
-def test_a_shadow_target_does_not_appear_in_the_three_slots(run_app, shadow_synthesis) -> None:
-    """It is never promoted into one and never graduates out of one, so counting it would
-    retire a sound the recordings are still flagging."""
-    import practice_queue
-
-    seed_flagged_history()
-    conn = db.connect(os.environ["DB_PATH"])
-    app_module.record_shadow_session(
-        conn,
-        "Benchmark",
-        app_module.PRESETS[Mode.PARAGRAPH][list(app_module.PRESETS[Mode.PARAGRAPH])[0]],
-        now=datetime(2026, 8, 19, tzinfo=UTC),
-    )
-    conn.close()
-
+def test_the_type_filter_narrows_the_table(run_app) -> None:
     app = run_app()
+    seed_history(app, 2)
+    seed_history(app, 1, mode=Mode.UNSCRIPTED)
+    app.run()
+    assert len(history_table(app)) == 3
+
+    app = app.multiselect(key="history-f-type").set_value([Mode.UNSCRIPTED.value]).run()
     assert not app.exception
-    headings = " ".join(m.value for m in app.markdown)
-    # The promoted targets are counted; the shadowing passage sitting beside them is not, and
-    # it gets its own section rather than a card in this list.
-    conn = db.connect(os.environ["DB_PATH"])
-    expected = len(
-        [
-            r
-            for r in db.targets(conn, state=practice_queue.ACTIVE)
-            if practice_queue.promotable(str(r["kind"]))
-        ]
-    )
-    conn.close()
-    assert expected, "the seeded history promoted nothing, so this proves nothing"
-    assert f"Working on ({expected} of {utils.MAX_ACTIVE_TARGETS})" in headings
-    assert practice_queue.KIND_LABELS[practice_queue.SHADOW] not in headings
+    assert len(history_table(app)) == 1
+    assert any("1 attempt of 3" in c.value for c in app.caption)
 
 
-def test_backing_out_of_a_session_returns_to_today(run_app) -> None:
-    app = open_shadow(run_app())
-    app = [b for b in app.button if "Back to Today" in b.label][0].click().run()
-    assert app.session_state[app_module.SHADOW_KEY] is None
-    assert any("Shadow this passage" in b.label for b in app.button)
-
-
-def test_the_progress_tab_names_the_delta_against_a_cold_read(run_app) -> None:
-    """The exit criterion, on screen: a shadowed read and a cold read of the same passage
-    side by side with their fluency and prosody delta named."""
-    import progress_view
-    import shadowing
-
-    conn = db.connect(os.environ["DB_PATH"])
-    for index, (fluency, prosody, shadowed) in enumerate([(70.0, 60.0, False), (78.0, 69.0, True)]):
-        attempt_id = db.record_attempt(
-            conn,
-            mode=Mode.PARAGRAPH,
-            reference_text=progress_view.BENCHMARK_PASSAGE,
-            recognised_text=progress_view.BENCHMARK_PASSAGE,
-            audio_seconds=70.0,
-            audio_sha256=f"pair-{index}",
-            overall_scores={
-                "pron_score": 80.0,
-                "accuracy": 85.0,
-                "fluency": fluency,
-                "completeness": 100.0,
-                "prosody": prosody,
-            },
-            azure_raw={"RecognitionStatus": "Success"},
-            created_at=f"2026-07-0{index + 1}T08:00:00Z",
-        )
-        if shadowed:
-            db.tag_attempt(conn, attempt_id, shadowing.SHADOW_TAG)
-    conn.close()
-
+def test_the_text_filter_narrows_the_table(run_app) -> None:
     app = run_app()
+    seed_history(app, 3)
+    app.run()
+
+    app = app.text_input(key="history-f-text").set_value("number 1").run()
     assert not app.exception
-    said = " ".join(m.value for m in app.markdown)
-    assert "Fluency +8.0" in said
-    assert "Prosody +9.0" in said
-    assert "1 pair" in said
+    assert list(history_table(app)["Text"]) == ["Reading number 1"]
 
 
-def test_the_tag_travels_through_the_worker_thread(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The row and its tag are written under one `_DB_LOCK`, on the assessment thread.
-
-    Exercised through `run_assessment_job` itself rather than by writing the row directly:
-    that function is the only place a tag is ever attached, it runs off the script thread, and
-    a tag that failed to land there would be invisible until a shadowed read had already gone
-    onto the cold trajectory. Offline, so it replays the fixture and spends nothing.
-    """
-    import shadowing
-
-    conn = db.connect(":memory:")
-    outcome = app_module.run_assessment_job(
-        conn,
-        b"RIFF" + b"\x00" * 40,
-        12.0,
-        REFERENCE,
-        Mode.DRILL,
-        threading.Event(),
-        (shadowing.SHADOW_TAG,),
-    )
-
-    assert outcome.error is None, outcome.error
-    assert outcome.attempt_id is not None
-    # The speech-style tag rides alongside, on every attempt, since v0.10.0 — see below.
-    assert db.tags_for(conn, outcome.attempt_id) == {shadowing.SHADOW_TAG, app_module.STYLE_READ}
-    # `attempt_series` is deliberately NOT asserted here: this row is an offline replay, and
-    # both progress readers exclude those — the fixture scores the same every time, so thirty
-    # identical points would not be a trajectory. `test_db` covers the join on a real row.
-    conn.close()
-
-
-def test_a_cold_read_carries_its_style_tag_and_nothing_else(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A cold read must not be tagged `shadowed`, or it would leave the trajectory it belongs on.
-
-    It does carry a **speech-style** tag, and that is not the same thing. Every attempt gets
-    one from v0.10.0 onward, because read speech is hyperarticulated and spontaneous speech is
-    systematically more centralised: pooling the two makes a change of register look like a
-    regression toward the middle of the vowel space. The tag has to exist before v0.12.0 adds
-    spontaneous speech, since an untagged token can never be reclassified afterwards.
-    """
-    import shadowing
-
-    conn = db.connect(":memory:")
-    outcome = app_module.run_assessment_job(
-        conn,
-        b"RIFF" + b"\x00" * 40,
-        12.0,
-        REFERENCE,
-        Mode.DRILL,
-        threading.Event(),
-    )
-    assert outcome.attempt_id is not None
-    tags = db.tags_for(conn, outcome.attempt_id)
-    assert tags == {app_module.STYLE_READ}
-    assert shadowing.SHADOW_TAG not in tags
-    conn.close()
-
-
-def test_the_style_tag_follows_the_mode_rather_than_being_asked_for() -> None:
-    """Derived, so it cannot be forgotten on an attempt."""
-    assert app_module.style_for(Mode.DRILL) == app_module.STYLE_READ
-    assert app_module.style_for(Mode.PARAGRAPH) == app_module.STYLE_READ
-    assert app_module.style_for(Mode.UNSCRIPTED) == app_module.STYLE_SPONTANEOUS
-
-
-def test_a_shadowed_result_renders_on_exactly_one_surface(
-    run_app, shadow_synthesis, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Regression, found live rather than in a test: `StreamlitDuplicateElementKey`.
-
-    `last_key` is a single slot and Streamlit executes EVERY tab body on every rerun, so once
-    the shadow surface could also start an assessment, both it and the Practice tab rendered
-    the same result. `render_result` derives its widget keys from the attempt, so the second
-    render did not merely look odd — it collided with the first and blew up the page.
-    """
-    app = prepare_model(open_shadow(run_app()))
-    state = app.session_state[app_module.SHADOW_KEY]
-    passage = str(state["passage"])
-
-    # Stand in for a finished shadowed read: the cache entry plus the ownership the shadow
-    # surface claims when it starts one.
-    from collections import OrderedDict
-
-    # Back offline now the model is bought: the stand-in assessment below is a fixture replay,
-    # and the audio already in session state keeps the surface rendering exactly as it was.
-    monkeypatch.setenv("OFFLINE_MODE", "true")
-
-    key = utils.attempt_hash(passage, b"take", Mode.PARAGRAPH)
-    state["key"] = key
-    app.session_state["assessments"] = OrderedDict(
-        {
-            key: app_module.CachedAttempt(
-                key=key,
-                assessment=sa.analyse("/nonexistent.wav", passage, Mode.PARAGRAPH),
-                reference_text=passage,
-                attempt_id=1,
-                mode=Mode.PARAGRAPH,
-            )
-        }
-    )
-    app.session_state["last_key"] = key
-    app.session_state[app_module.RESULT_OWNER_KEY] = app_module.SHADOW_OWNER
-    app = app.run()
-
-    assert not app.exception
-    coach_buttons = [b for b in app.button if b.label.startswith("✨")]
-    assert len(coach_buttons) == 1, "the result rendered on both tabs at once"
-
-
-def test_leaving_a_shadow_session_takes_its_result_with_it(run_app, shadow_synthesis) -> None:
-    """A shadowed read's report must not reappear under the Practice tab, which did not
-    produce it."""
-    app = prepare_model(open_shadow(run_app()))
-    app.session_state["last_key"] = "some-shadowed-attempt"
-    app.session_state[app_module.RESULT_OWNER_KEY] = app_module.SHADOW_OWNER
-    app = app.run()
-    app = [b for b in app.button if "Back to Today" in b.label][0].click().run()
-
-    assert not app.exception
-    assert app.session_state["last_key"] is None
-    assert app.session_state[app_module.RESULT_OWNER_KEY] is None
-
-
-def test_a_shadow_row_alone_still_reads_as_an_empty_queue(run_app, shadow_synthesis) -> None:
-    """Found live: a queue holding nothing but a shadowing passage is still an empty queue.
-
-    A shadow row is a standing practice, not something the recordings promoted, so letting it
-    make `targets` non-empty answered "what am I doing today?" with *"nothing due, they are all
-    on the review schedule"* about targets that had never been promoted at all — and captioned
-    the empty list *"everything promoted so far has graduated"*.
-    """
-    conn = db.connect(os.environ["DB_PATH"])
-    app_module.record_shadow_session(
-        conn,
-        "Benchmark",
-        app_module.PRESETS[Mode.PARAGRAPH][list(app_module.PRESETS[Mode.PARAGRAPH])[0]],
-        now=datetime(2026, 8, 19, tzinfo=UTC),
-    )
-    conn.close()
-
+def test_a_score_filter_narrows_the_table(run_app) -> None:
+    """`seed_history` scores rows 80, 81, 82 — the bound below keeps only the last two."""
     app = run_app()
+    seed_history(app, 3)
+    app.run()
+
+    app = app.slider(key="history-f-pron").set_value((81.0, 100.0)).run()
     assert not app.exception
-    said = " ".join(i.value for i in app.info) + " ".join(c.value for c in app.caption)
-    assert "Nothing to practise yet" in said
-    assert "everything promoted so far has graduated" not in said
-    assert not any("Nothing due today" in s.value for s in app.success)
+    assert sorted(history_table(app)["Pron"]) == [81.0, 82.0]
+
+
+def test_filters_that_match_nothing_say_so_rather_than_rendering_a_blank(run_app) -> None:
+    app = run_app()
+    seed_history(app, 2)
+    app.run()
+
+    app = app.text_input(key="history-f-text").set_value("no such attempt").run()
+    assert not app.exception
+    assert history_table(app) is None
+    assert any("No attempt matches" in i.value for i in app.info)
+
+
+def test_a_legacy_drill_row_still_renders_and_says_how_it_was_recorded(run_app) -> None:
+    """Rows written before 2026-08-25 carry `mode = 'drill'`, which the enum no longer has."""
+    app = run_app()
+    conn = app_module.get_connection()
+    attempt_id = seed_history(app, 1)[0]
+    conn.execute("UPDATE attempts SET mode = 'drill' WHERE id = ?", (attempt_id,))
+    conn.commit()
+    app.run()
+
+    assert not app.exception, "Mode('drill') would raise and take the page down"
+    assert "as drill" in list(history_table(app)["Type"])[0]
+
+    app = open_attempt(app, attempt_id)
+    assert not app.exception
+    assert any("Score breakdown" in m.value for m in app.markdown)
+
+
+def test_opening_an_attempt_renders_the_result_without_the_inputs(run_app) -> None:
+    app = run_app()
+    attempt_id = seed_history(app, 1)[0]
+    app = open_attempt(app, attempt_id)
+
+    assert not app.exception
+    rendered = " ".join(m.value for m in app.markdown)
+    assert "Score breakdown" in rendered
+    # The Analyze tab still draws its own inputs — this asserts History added none of its own,
+    # and that the two tabs did not both render a result and collide on a widget key.
+    assert len(app.file_uploader) == 1
+    assert len(app.text_area) == 1
+    assert any("Back to the list" in b.label for b in app.button)
+
+
+def test_opening_an_attempt_stands_the_analyze_result_down(run_app) -> None:
+    """Both tab bodies run on every rerun, and two `render_result`s collide on widget keys.
+
+    Asserted as "exactly one result was drawn" rather than by inspecting the session key that
+    happens to enforce it, so the invariant holds however the attempt came to be open.
+    """
+    app = seed_result(run_app(), offline_assessment())
+    attempt_id = seed_history(app, 1)[0]
+    app = open_attempt(app, attempt_id)
+    assert not app.exception, "a second render_result collides on its widget keys"
+    breakdowns = [m for m in app.markdown if "Score breakdown" in m.value]
+    assert len(breakdowns) == 1
+
+
+def test_closing_an_opened_attempt_returns_to_the_list(run_app) -> None:
+    app = run_app()
+    ids = seed_history(app, 2)
+    app = open_attempt(app, ids[0])
+    app = next(b for b in app.button if "Back to the list" in b.label).click().run()
+    assert not app.exception
+    assert len(history_table(app)) == 2
+
+
+def test_an_unreadable_stored_payload_says_so_instead_of_crashing(run_app) -> None:
+    """One bad row must not take the page down; the row itself is still intact."""
+    app = run_app()
+    attempt_id = seed_history(app, 1)[0]
+    conn = app_module.get_connection()
+    conn.execute("UPDATE attempts SET azure_raw_json = ? WHERE id = ?", ("{not json", attempt_id))
+    conn.commit()
+    app = open_attempt(app, attempt_id)
+
+    assert not app.exception
+    assert any("could not be read" in e.value for e in app.error)
+
+
+# --- Routing a button-column click ----------------------------------------------------------
+#
+# The Open and Delete buttons live inside `st.dataframe`, which renders to a canvas: neither
+# AppTest nor a browser driver can click them. What is testable — and what this project wrote —
+# is the routing from "row N of the list as rendered" to an attempt id, so it is tested here
+# against a stand-in session state.
+
+
+@pytest.fixture
+def fake_session(monkeypatch: pytest.MonkeyPatch) -> dict:
+    state: dict = {}
+    monkeypatch.setattr(app_module.st, "session_state", state)
+    return state
+
+
+ROWS = [{"id": 11}, {"id": 22}, {"id": 33}]
+
+
+def test_a_delete_click_arms_the_row_it_landed_on(fake_session) -> None:
+    fake_session[app_module.HISTORY_DELETE_CLICK_KEY] = {"row": 1, "label": ""}
+    app_module._history_delete_click(ROWS)
+    assert fake_session[app_module.HISTORY_PENDING_DELETE_KEY] == 22
+
+
+def test_an_open_click_opens_the_row_it_landed_on(fake_session) -> None:
+    fake_session[app_module.HISTORY_OPEN_CLICK_KEY] = {"row": 2, "label": ""}
+    app_module._history_open_click(ROWS)
+    assert fake_session[app_module.HISTORY_OPEN_KEY] == 33
+
+
+def test_a_click_past_the_end_of_the_list_is_ignored(fake_session) -> None:
+    """The click carries an index into the list as it was rendered, which can go stale."""
+    fake_session[app_module.HISTORY_DELETE_CLICK_KEY] = {"row": 9, "label": ""}
+    app_module._history_delete_click(ROWS)
+    assert app_module.HISTORY_PENDING_DELETE_KEY not in fake_session
+
+
+def test_no_click_routes_nowhere(fake_session) -> None:
+    """Every rerun runs the callbacks' module; only a real click leaves the key set."""
+    app_module._history_delete_click(ROWS)
+    app_module._history_open_click(ROWS)
+    assert not fake_session
+
+
+def test_deleting_asks_before_it_deletes(run_app) -> None:
+    """Nothing in this app could destroy history before, so the click has to be deliberate."""
+    app = run_app()
+    attempt_id = seed_history(app, 1)[0]
+    app = arm_delete(app, attempt_id)
+
+    assert any("cannot be undone" in w.value for w in app.warning)
+    assert app_module.db.attempt_count(app_module.get_connection()) == 1
+
+    app = next(b for b in app.button if b.key and b.key.startswith("do-delete-")).click().run()
+    assert not app.exception
+    assert app_module.db.attempt_count(app_module.get_connection()) == 0
+    assert any("Nothing recorded yet" in i.value for i in app.info)
+
+
+def test_cancelling_a_delete_leaves_the_attempt_alone(run_app) -> None:
+    app = run_app()
+    attempt_id = seed_history(app, 1)[0]
+    app = arm_delete(app, attempt_id)
+
+    app = next(b for b in app.button if b.key == "cancel-delete").click().run()
+    assert not app.exception
+    assert not app.warning
+    assert app_module.db.attempt_count(app_module.get_connection()) == 1
+
+
+def test_deleting_removes_the_recording_from_disk_too(run_app, tmp_path) -> None:
+    app = run_app()
+    attempt_id = seed_history(app, 1)[0]
+    conn = app_module.get_connection()
+    recording = tmp_path / "kept.wav"
+    recording.write_bytes(_wav_bytes(0.5))
+    db.record_audio(
+        conn,
+        attempt_id,
+        path=str(recording),
+        sha256="h",
+        size_bytes=recording.stat().st_size,
+        sample_rate=16_000,
+    )
+    app = arm_delete(app, attempt_id)
+    app = next(b for b in app.button if b.key and b.key.startswith("do-delete-")).click().run()
+
+    assert not app.exception
+    assert not recording.exists()
+    assert db.audio_for(conn, attempt_id) is None

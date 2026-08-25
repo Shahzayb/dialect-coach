@@ -12,7 +12,7 @@
       "port": 8501
     },
     {
-      "name": "coach-seeded-demo",
+      "name": "coach-offline",
       "runtimeExecutable": "docker",
       "runtimeArgs": [
         "compose",
@@ -20,11 +20,9 @@
         "--rm",
         "--service-ports",
         "-e",
-        "DB_PATH=data/seed_demo.db",
-        "-e",
         "OFFLINE_MODE=true",
         "-e",
-        "GA_REFERENCE_SET=men",
+        "DB_PATH=data/offline_check.db",
         "app",
         "streamlit",
         "run",

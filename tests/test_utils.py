@@ -39,32 +39,54 @@ def test_check_required_reports_missing_keys_when_online(
     assert set(utils.check_required()) == {"AZURE_SPEECH_KEY", "AZURE_SPEECH_REGION"}
 
 
-def test_max_duration_is_per_mode() -> None:
-    assert utils.max_duration_seconds(Mode.DRILL) == 30
-    assert utils.max_duration_seconds(Mode.PARAGRAPH) == 120
-    assert utils.max_duration_seconds(Mode.UNSCRIPTED) == 300
+def test_a_legacy_drill_row_reads_as_scripted() -> None:
+    """Rows written before 2026-08-25 carry `mode = 'drill'`, and History must render them."""
+    assert utils.mode_of("drill") is Mode.PARAGRAPH
+    assert "drill" in utils.LEGACY_MODE_NAMES
+
+
+def test_mode_of_round_trips_the_live_modes() -> None:
+    for mode in Mode:
+        assert utils.mode_of(mode.value) is mode
+        assert utils.mode_of(mode) is mode
+
+
+def test_an_unknown_stored_mode_reads_as_scripted_rather_than_raising() -> None:
+    """`Mode(value)` would raise and take the whole History page down with it."""
+    assert utils.mode_of("something-nobody-wrote") is Mode.PARAGRAPH
+    assert utils.mode_of(None) is Mode.PARAGRAPH
+    assert utils.mode_of("") is Mode.PARAGRAPH
+
+
+def test_truncate_cuts_on_a_word_boundary() -> None:
+    assert utils.truncate("one two three four", 11) == "one two…"
+    assert utils.truncate("short", 40) == "short"
+    assert utils.truncate("  collapses   whitespace  ", 40) == "collapses whitespace"
 
 
 def test_attempt_hash_separates_text_from_audio() -> None:
     # Without a delimiter, ("ab", b"c") and ("a", b"bc") would collide.
-    assert utils.attempt_hash("ab", b"c", Mode.DRILL) != utils.attempt_hash("a", b"bc", Mode.DRILL)
+    assert utils.attempt_hash("ab", b"c", Mode.PARAGRAPH) != utils.attempt_hash(
+        "a", b"bc", Mode.PARAGRAPH
+    )
 
 
 def test_attempt_hash_is_stable() -> None:
-    assert utils.attempt_hash("hello", b"\x01\x02", Mode.DRILL) == utils.attempt_hash(
-        "hello", b"\x01\x02", Mode.DRILL
+    assert utils.attempt_hash("hello", b"\x01\x02", Mode.PARAGRAPH) == utils.attempt_hash(
+        "hello", b"\x01\x02", Mode.PARAGRAPH
     )
 
 
 def test_attempt_hash_separates_mode_from_the_rest() -> None:
-    """The same text read into the same recording is assessed differently per mode —
+    """The same recording is a legitimate thing to assess scripted and then unscripted.
 
-    Drill is single-shot, Paragraph is continuous — so the same (text, audio) pair must
-    not collide across modes. A collision would silently serve the other mode's cached
-    result on Assess: no error, no re-assessment, just the wrong report on screen.
+    The two go through different Azure code paths — one scores against the typed reference,
+    the other transcribes first and scores against the transcript — so the same (text, audio)
+    pair must not collide across modes. A collision would silently serve the other mode's
+    cached result on Assess: no error, no re-assessment, just the wrong report on screen.
     """
-    assert utils.attempt_hash("hello", b"\x01\x02", Mode.DRILL) != utils.attempt_hash(
-        "hello", b"\x01\x02", Mode.PARAGRAPH
+    assert utils.attempt_hash("hello", b"\x01\x02", Mode.PARAGRAPH) != utils.attempt_hash(
+        "hello", b"\x01\x02", Mode.UNSCRIPTED
     )
 
 

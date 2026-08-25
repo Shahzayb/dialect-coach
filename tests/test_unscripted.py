@@ -195,7 +195,7 @@ def test_the_probe_flag_never_leaks_into_a_scripted_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("UNSCRIPTED_CONTENT_PROBE", "true")
-    for mode in (Mode.DRILL, Mode.PARAGRAPH):
+    for mode in (Mode.PARAGRAPH, Mode.PARAGRAPH):
         assert "enableContentAssessment" not in json.loads(
             sa.assessment_config_json("hello", mode, topic=PROMPT)
         )

@@ -7,11 +7,19 @@ again.
 
 **Audio is now kept too, since v0.10.0.** This used to say the brief ruled it out; that
 stopped being true on 2026-08-19, when the "no stored audio" rule was lifted — recordings
-may be kept locally, never committed, with the path and hash in the database. The accent
-measurement is the first feature that needs it, for exactly the reason the raw payloads are
-kept: a changed normalisation scheme or reference table has to be a re-derivation, and a
-re-derivation must never require that the passage be read again. The bytes live under a
-gitignored directory and only the path and digest are stored here (see `attempt_audio`).
+may be kept locally, never committed, with the path and hash in the database. Two surfaces
+need it, for exactly the reason the raw payloads are kept: History replays an attempt's own
+recording months later, and `audio_utils.slice_wav` cuts one word out of it at Azure's own
+offsets so "how I said it" can sit beside the native rendering. Neither may require that the
+passage be read again. The bytes live under a gitignored directory and only the path and
+digest are stored here (see `attempt_audio`).
+
+**Several tables here have no writer any more.** `practice_targets`, `perception_trials`,
+`attempt_tags`, `attempt_content_scores`, `speaker_baseline`, `vowel_measurements` and
+`native_renderings` belonged to features deleted on 2026-08-25 (tag `v0.12.0-full`). Their
+DDL stays and their rows stay: they hold real recorded evidence — calibration reads, answered
+perception trials — and dropping them is unrecoverable in a way that removing the code is
+not. `user_version` does not move.
 
 This module never imports Streamlit, so tests and scripts can use it. `app.py` is
 responsible for wrapping `connect()` in `@st.cache_resource`: Streamlit re-runs the whole
@@ -29,18 +37,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import utils
-from shadowing import SHADOW_TAG
 from utils import Mode
-
-# A banked repetition from the practice ladder. An ordinary attempt in every other way — same
-# scores, same payload, same re-derivability — but ten repetitions of one sentence drawn into
-# the free-practice cloud would measure that sentence's difficulty rather than the speaker,
-# which is the information noise #37 is about arriving out of the feature meant to fix it.
-# Demoted from the default view, never deleted.
-#
-# Defined here rather than in `ladder`, whose import chain reaches the charting stack: `db` is
-# imported by everything and has to stay cheap.
-REP_TAG = "rep"
 
 logger = logging.getLogger(__name__)
 
@@ -286,6 +283,22 @@ CREATE TABLE IF NOT EXISTS native_renderings (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_native_renderings_identity
   ON native_renderings(voice, text_key);
 CREATE INDEX IF NOT EXISTS idx_native_renderings_text ON native_renderings(text_key);
+
+-- Gemini's prosody annotation of one attempt's passage: the same words, marked up with stress,
+-- phrase boundaries and linking. Added 2026-08-25 when Gemini stopped writing the coaching.
+--
+-- **Its own table rather than a reuse of `gemini_raw_json`.** That column now holds the
+-- deterministic coaching report with `coach_source = 'fallback'`, and rows written before this
+-- date hold a Gemini *CoachingReport* there. Writing an annotation into the same column would
+-- make one column mean three things and make every stored row ambiguous to re-read.
+--
+-- Verbatim, like every other raw payload here, so changing what the UI renders is a re-parse
+-- rather than another call. Additive: `user_version` never moves.
+CREATE TABLE IF NOT EXISTS attempt_annotations (
+  attempt_id  INTEGER PRIMARY KEY REFERENCES attempts(id) ON DELETE CASCADE,
+  raw_json    TEXT    NOT NULL,
+  created_at  TEXT    NOT NULL
+);
 """
 
 
@@ -384,30 +397,6 @@ def record_attempt(
     return attempt_id
 
 
-def tag_attempt(
-    conn: sqlite3.Connection, attempt_id: int, tag: str, *, created_at: str | None = None
-) -> None:
-    """Mark how an attempt was produced. Idempotent — re-tagging the same row is a no-op.
-
-    Written in the same transaction as `record_attempt` by the caller that knows how the
-    audio was made, because an untagged shadowed read is indistinguishable from a cold one
-    afterwards and would land on the trajectory the tag exists to keep it off.
-    """
-    conn.execute(
-        "INSERT OR IGNORE INTO attempt_tags (attempt_id, tag, created_at) VALUES (?, ?, ?)",
-        (int(attempt_id), tag, created_at or utc_now_iso()),
-    )
-    conn.commit()
-
-
-def tags_for(conn: sqlite3.Connection, attempt_id: int) -> set[str]:
-    """Every tag on one attempt."""
-    rows = conn.execute(
-        "SELECT tag FROM attempt_tags WHERE attempt_id = ?", (int(attempt_id),)
-    ).fetchall()
-    return {str(row["tag"]) for row in rows}
-
-
 def attach_coaching(
     conn: sqlite3.Connection,
     attempt_id: int,
@@ -415,11 +404,18 @@ def attach_coaching(
     gemini_raw: Any,
     coach_source: str,
 ) -> None:
-    """Attach the coaching response to an existing attempt.
+    """Attach the coaching report to an existing attempt.
 
-    Called once per attempt, right after `ai_coach.coach` returns — whichever coach wrote
-    the report. The columns have existed since schema version 1, so this was always an
-    UPDATE over rows already recorded rather than a migration.
+    Called once per attempt, right after the coach runs. The columns have existed since
+    schema version 1, so this was always an UPDATE over rows already recorded rather than a
+    migration.
+
+    **`coach_source` still matters even though there is only one coach now.** As of
+    2026-08-25 every new row is written `'fallback'` — Gemini no longer writes coaching, it
+    writes the prosody annotation, which lives in `attempt_annotations`. Rows written before
+    that date carry `'gemini'` and hold a Gemini-authored report in `gemini_raw_json`. Both
+    shapes are the same `CoachingReport` schema and both still re-read; the column is what
+    tells History which coach a row's advice came from.
     """
     conn.execute(
         "UPDATE attempts SET gemini_raw_json = ?, coach_source = ? WHERE id = ?",
@@ -430,49 +426,6 @@ def attach_coaching(
         ),
     )
     conn.commit()
-
-
-def attach_content_score(
-    conn: sqlite3.Connection,
-    attempt_id: int,
-    *,
-    scores: Any,
-    created_at: str | None = None,
-) -> None:
-    """Store one attempt's content scores, or the stated reason it has none.
-
-    `scores` is a `content_score.Scores`; it is passed structurally rather than imported so
-    `db` keeps knowing nothing about the coaching layer. Replaces on re-score — an attempt has
-    one content verdict, and a second one supersedes rather than accumulates.
-    """
-    conn.execute(
-        """
-        INSERT OR REPLACE INTO attempt_content_scores (
-            attempt_id, created_at, source, vocabulary, grammar, topic, payload
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            int(attempt_id),
-            created_at or utc_now_iso(),
-            scores.source,
-            scores.vocabulary,
-            scores.grammar,
-            scores.topic,
-            json.dumps(scores.to_json(), ensure_ascii=False),
-        ),
-    )
-    conn.commit()
-
-
-def content_score_for(conn: sqlite3.Connection, attempt_id: int) -> dict[str, Any] | None:
-    """The stored content verdict for one attempt, as the payload it was written from."""
-    row = conn.execute(
-        "SELECT payload FROM attempt_content_scores WHERE attempt_id = ?", (int(attempt_id),)
-    ).fetchone()
-    if row is None:
-        return None
-    loaded: dict[str, Any] = json.loads(row["payload"])
-    return loaded
 
 
 def record_tts_usage(
@@ -532,239 +485,10 @@ def get_attempt(conn: sqlite3.Connection, attempt_id: int) -> sqlite3.Row | None
     return cast("sqlite3.Row | None", row)
 
 
-# --- Readers for the progress view ----------------------------------------------------------
-# Both exclude `offline = 1` deliberately. An OFFLINE_MODE run replays the same committed
-# fixture every time, so its scores are a constant; thirty identical points is not a
-# trajectory, and the words it flags are the fixture's, not the speaker's.
-#
-# Both also order by `created_at`, not by `id` as `recent_attempts` does. A time series has
-# to be ordered by its timestamp — `record_attempt` accepts an explicit `created_at`, so id
-# order and chronological order are not the same thing. `idx_attempts_created_at` backs it.
-
-
-def attempt_series(conn: sqlite3.Connection) -> Sequence[sqlite3.Row]:
-    """Every real attempt, oldest first, without the raw JSON. The progress chart's input."""
-    return conn.execute(
-        """
-        SELECT a.id, a.created_at, a.mode, a.reference_text, a.recognised_text,
-               a.audio_seconds, a.pron_score, a.accuracy, a.fluency, a.completeness,
-               a.prosody, a.coach_source, a.offline,
-               EXISTS (SELECT 1 FROM attempt_tags t
-                       WHERE t.attempt_id = a.id AND t.tag = ?) AS shadowed,
-               EXISTS (SELECT 1 FROM attempt_tags t
-                       WHERE t.attempt_id = a.id AND t.tag = ?) AS rep
-        FROM attempts a WHERE a.offline = 0 ORDER BY a.created_at, a.id
-        """,
-        (SHADOW_TAG, REP_TAG),
-    ).fetchall()
-
-
-def attempt_payloads(conn: sqlite3.Connection) -> Sequence[sqlite3.Row]:
-    """Every real attempt with its verbatim Azure payload, oldest first.
-
-    Separate from `attempt_series` because these blobs are 45-170 kB each: the score chart
-    never needs them, and only the phoneme/word aggregation pays for reading them.
-    """
-    return conn.execute(
-        """
-        SELECT a.id, a.created_at, a.mode, a.reference_text, a.azure_raw_json,
-               EXISTS (SELECT 1 FROM attempt_tags t
-                       WHERE t.attempt_id = a.id AND t.tag = ?) AS shadowed,
-               EXISTS (SELECT 1 FROM attempt_tags t
-                       WHERE t.attempt_id = a.id AND t.tag = ?) AS rep
-        FROM attempts a WHERE a.offline = 0 ORDER BY a.created_at, a.id
-        """,
-        (SHADOW_TAG, REP_TAG),
-    ).fetchall()
-
-
-def attempt_fingerprint(conn: sqlite3.Connection) -> tuple[int, int]:
-    """(highest attempt id, row count) — a cheap cache key for the re-parsed aggregates.
-
-    Re-parsing every stored payload on every Streamlit rerun is not affordable, and both tab
-    bodies render on each of the 0.4 s poll reruns during an assessment. This is what
-    `app.py` keys its `@st.cache_data` on: it changes exactly when a new attempt lands.
-    """
-    row = conn.execute(
-        "SELECT COALESCE(MAX(id), 0) AS top, COUNT(*) AS total FROM attempts WHERE offline = 0"
-    ).fetchone()
-    return int(row["top"]), int(row["total"])
-
-
-# --- The practice queue ---------------------------------------------------------------------
-# SQL only. Every rule about *what* gets promoted, *when* it is due and *whether* it has
-# graduated lives in `practice_queue.py`, which is pure and testable without a database.
-# Keeping the two apart is the same split `progress_view.py` has against this module.
-
-ACTIVE = "active"
-GRADUATED = "graduated"
-
-
-def upsert_target(
-    conn: sqlite3.Connection,
-    *,
-    item: str,
-    kind: str,
-    evidence: Any,
-    added: str | None = None,
-    next_due: str | None = None,
-    state: str = ACTIVE,
-) -> int:
-    """Add a target, or refresh the evidence on one that is already there.
-
-    `(item, kind)` is unique, so re-running promotion after a new attempt updates the counts
-    behind an existing target rather than creating a duplicate — and it deliberately leaves
-    `added`, `state`, `next_due` and `reviews_passed` alone, because re-reading the same
-    evidence is not a reason to reset an item's schedule or un-graduate it.
-    """
-    when = added or utc_now_iso()
-    payload = json.dumps(evidence, ensure_ascii=False)
-    conn.execute(
-        """
-        INSERT INTO practice_targets (item, kind, added, next_due, state, evidence)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(item, kind) DO UPDATE SET evidence = excluded.evidence
-        """,
-        (item, kind, when, next_due or when, state, payload),
-    )
-    conn.commit()
-    row = conn.execute(
-        "SELECT id FROM practice_targets WHERE item = ? AND kind = ?", (item, kind)
-    ).fetchone()
-    return int(row["id"])
-
-
-def targets(conn: sqlite3.Connection, state: str | None = None) -> Sequence[sqlite3.Row]:
-    """Every target, oldest first, optionally filtered to one state."""
-    if state is None:
-        return conn.execute("SELECT * FROM practice_targets ORDER BY added, id").fetchall()
-    return conn.execute(
-        "SELECT * FROM practice_targets WHERE state = ? ORDER BY added, id", (state,)
-    ).fetchall()
-
-
-def update_target(
-    conn: sqlite3.Connection,
-    target_id: int,
-    *,
-    state: str | None = None,
-    next_due: str | None = None,
-    last_seen: str | None = None,
-    reviews_passed: int | None = None,
-) -> None:
-    """Apply a scheduling decision. Only the fields given are written."""
-    sets: list[str] = []
-    values: list[Any] = []
-    for column, value in (
-        ("state", state),
-        ("next_due", next_due),
-        ("last_seen", last_seen),
-        ("reviews_passed", reviews_passed),
-    ):
-        if value is not None:
-            sets.append(f"{column} = ?")
-            values.append(value)
-    if not sets:
-        return
-    values.append(target_id)
-    conn.execute(f"UPDATE practice_targets SET {', '.join(sets)} WHERE id = ?", values)
-    conn.commit()
-
-
-def remove_target(conn: sqlite3.Connection, target_id: int) -> None:
-    """Drop a target. Its trials keep their own `item` string, so the history survives it."""
-    conn.execute("UPDATE perception_trials SET target_id = NULL WHERE target_id = ?", (target_id,))
-    conn.execute("DELETE FROM practice_targets WHERE id = ?", (target_id,))
-    conn.commit()
-
-
-def record_trial(
-    conn: sqlite3.Connection,
-    *,
-    block_id: str,
-    target_id: int | None,
-    item: str,
-    word: str,
-    voice: str,
-    novel: bool,
-    alternatives: int,
-    answered: str,
-    correct: bool,
-    review: bool = False,
-    created_at: str | None = None,
-) -> None:
-    """Store one answered trial, as it is answered rather than at the end of the block.
-
-    Writing per answer means an abandoned block still leaves its evidence behind. Whether
-    that block *counts* toward graduation is a separate question, decided in
-    `practice_queue` from the trial count — the evidence is kept either way.
-    """
-    conn.execute(
-        """
-        INSERT INTO perception_trials (
-            block_id, target_id, created_at, item, word, voice, novel,
-            alternatives, answered, correct, review
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            block_id,
-            target_id,
-            created_at or utc_now_iso(),
-            item,
-            word,
-            voice,
-            int(novel),
-            int(alternatives),
-            answered,
-            int(correct),
-            int(review),
-        ),
-    )
-    conn.commit()
-
-
-def trials_for(conn: sqlite3.Connection, item: str) -> Sequence[sqlite3.Row]:
-    """Every trial ever answered for one item, oldest first."""
-    return conn.execute(
-        "SELECT * FROM perception_trials WHERE item = ? ORDER BY created_at, id", (item,)
-    ).fetchall()
-
-
-def all_trials(conn: sqlite3.Connection) -> Sequence[sqlite3.Row]:
-    """Every trial, oldest first. The perception chart's input."""
-    return conn.execute("SELECT * FROM perception_trials ORDER BY created_at, id").fetchall()
-
-
-def heard_stimuli(conn: sqlite3.Connection, item: str) -> dict[tuple[str, str], str]:
-    """`(word, voice) -> when it was last played`, for one item.
-
-    This is what makes "unseen" mean something: a block prefers combinations absent from
-    this map, and falls back to the least recently heard once they run out.
-    """
-    rows = conn.execute(
-        "SELECT word, voice, MAX(created_at) AS last FROM perception_trials "
-        "WHERE item = ? GROUP BY word, voice",
-        (item,),
-    ).fetchall()
-    return {(str(r["word"]), str(r["voice"])): str(r["last"]) for r in rows}
-
-
-def queue_fingerprint(conn: sqlite3.Connection) -> tuple[int, int, int]:
-    """(target count, highest target id, trial count) — a cache key for the Today tab.
-
-    Streamlit runs every tab body on every rerun, the 0.4 s assessment polls included, so
-    the queue's reads need the same treatment `attempt_fingerprint` gives the progress view.
-    """
-    targets_row = conn.execute(
-        "SELECT COUNT(*) AS total, COALESCE(MAX(id), 0) AS top FROM practice_targets"
-    ).fetchone()
-    trials_row = conn.execute("SELECT COUNT(*) AS total FROM perception_trials").fetchone()
-    return int(targets_row["total"]), int(targets_row["top"]), int(trials_row["total"])
-
-
-# --- Audio, baselines and vowel measurements -------------------------------------------------
-# Added in v0.10.0. SQL only, like everything else here: what a baseline MEANS and when it is
-# stale is `vowel_measure`'s business, and the split is the same one `practice_queue` has.
+# --- Stored recordings -------------------------------------------------------------------------
+# Added in v0.10.0 for the accent measurement, which is gone. Two surfaces need it now: History
+# replays an attempt's own recording months later, and `audio_utils.slice_wav` cuts one word out
+# of it at Azure's own offsets so "how I said it" can sit beside the native rendering.
 
 
 def record_audio(
@@ -810,245 +534,130 @@ def audio_for(conn: sqlite3.Connection, attempt_id: int) -> sqlite3.Row | None:
     return cast("sqlite3.Row | None", row)
 
 
-def stored_audio(conn: sqlite3.Connection) -> Sequence[sqlite3.Row]:
-    """Every kept recording, oldest first. What a re-derivation pass walks."""
-    return conn.execute(
-        """
-        SELECT a.attempt_id, a.path, a.sha256, a.bytes, t.mode, t.reference_text,
-               t.azure_raw_json, t.created_at
-        FROM attempt_audio a JOIN attempts t ON t.id = a.attempt_id
-        ORDER BY t.created_at, a.attempt_id
-        """
-    ).fetchall()
-
-
-def record_vowel_measurements(
-    conn: sqlite3.Connection, attempt_id: int, rows: Sequence[dict[str, Any]]
-) -> int:
-    """Store one attempt's vowel tokens, replacing any already there.
-
-    Replacing rather than appending: re-deriving an attempt's measurements after a change to
-    the pipeline must leave one set of rows, not two generations interleaved.
-    """
-    conn.execute("DELETE FROM vowel_measurements WHERE attempt_id = ?", (int(attempt_id),))
-    conn.executemany(
-        """
-        INSERT INTO vowel_measurements (
-            attempt_id, vowel, word, word_index, start_s, duration_ms,
-            f1_20, f2_20, f3_20, f1_50, f2_50, f3_50, f1_80, f2_80, f3_80,
-            rms_dbfs, f0_hz, stressed, stress_digit, azure_score, coda_voiceless,
-            snr_db_min, lpc_ceiling_hz, style_tag, accepted, rejected_reason
-        ) VALUES (
-            :attempt_id, :vowel, :word, :word_index, :start_s, :duration_ms,
-            :f1_20, :f2_20, :f3_20, :f1_50, :f2_50, :f3_50, :f1_80, :f2_80, :f3_80,
-            :rms_dbfs, :f0_hz, :stressed, :stress_digit, :azure_score, :coda_voiceless,
-            :snr_db_min, :lpc_ceiling_hz, :style_tag, :accepted, :rejected_reason
-        )
-        """,
-        [{**row, "attempt_id": int(attempt_id)} for row in rows],
-    )
-    conn.commit()
-    return len(rows)
-
-
-def vowel_measurements_for(conn: sqlite3.Connection, attempt_id: int) -> Sequence[sqlite3.Row]:
-    """Every token measured for one attempt, in the order it was spoken."""
-    return conn.execute(
-        "SELECT * FROM vowel_measurements WHERE attempt_id = ? ORDER BY start_s, id",
-        (int(attempt_id),),
-    ).fetchall()
-
-
-def vowel_measurement_series(
-    conn: sqlite3.Connection, *, style_tag: str | None = None
-) -> Sequence[sqlite3.Row]:
-    """Accepted tokens across every real attempt, oldest first — the trend query's input.
-
-    Filters `offline = 1` for the reason every other progress reader does: a replayed fixture
-    is a constant, and thirty identical points is not a trajectory.
-
-    **`style_tag` is not optional in spirit even though it defaults to None.** Read speech is
-    hyperarticulated and spontaneous speech is systematically more centralised; pooling the two
-    makes a change of register look like a regression toward the middle of the vowel space.
-    Every trend surface passes one.
-    """
-    sql = """
-        SELECT v.*, a.created_at
-        FROM vowel_measurements v JOIN attempts a ON a.id = v.attempt_id
-        WHERE a.offline = 0 AND v.accepted = 1
-    """
-    params: list[Any] = []
-    if style_tag is not None:
-        sql += " AND v.style_tag = ?"
-        params.append(style_tag)
-    return conn.execute(sql + " ORDER BY a.created_at, v.id", params).fetchall()
-
-
-def save_baseline(
+def attach_annotation(
     conn: sqlite3.Connection,
+    attempt_id: int,
     *,
-    positions: Any,
-    normaliser: Any,
-    noise_floor: Any,
-    lpc_ceiling_hz: float,
-    reference_set: str,
-    style_tag: str,
-    tokens: int,
-    attempt_ids: Sequence[int],
-    created_at: str | None = None,
-) -> int:
-    """Store a new baseline and retire the one it replaces.
-
-    Both in one transaction: a moment with two current baselines, or none, would make every
-    z-score on screen ambiguous about which space it is in.
-    """
-    when = created_at or utc_now_iso()
-    with conn:
-        # **Scoped to this style.** Read speech and spontaneous speech are different
-        # populations — vowels centralise and unstressed syllables collapse further toward
-        # schwa the moment a speaker generates language instead of reading it — so each style
-        # has its own current baseline and neither ever retires or averages into the other.
-        # Superseding across styles would mean the first Mode C calibration silently deleted
-        # the read baseline every Mode B reading is normalised against.
-        conn.execute(
-            "UPDATE speaker_baseline SET superseded_at = ? "
-            "WHERE superseded_at IS NULL AND style_tag = ?",
-            (when, style_tag),
-        )
-        cursor = conn.execute(
-            """
-            INSERT INTO speaker_baseline (
-                created_at, positions_json, normaliser_json, noise_floor_json,
-                lpc_ceiling_hz, reference_set, style_tag, tokens, attempt_ids
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                when,
-                json.dumps(positions, ensure_ascii=False),
-                json.dumps(normaliser, ensure_ascii=False),
-                json.dumps(noise_floor, ensure_ascii=False),
-                float(lpc_ceiling_hz),
-                reference_set,
-                style_tag,
-                int(tokens),
-                json.dumps(list(attempt_ids)),
-            ),
-        )
-    return int(cursor.lastrowid or 0)
-
-
-def current_baseline(conn: sqlite3.Connection, *, style: str) -> sqlite3.Row | None:
-    """The baseline in force **for one speech style**, or None if that style has none yet.
-
-    `style` is required and has no default. A default would be a guess about which population a
-    reading belongs to, and getting it wrong normalises spontaneous speech against a read
-    centroid — which makes a change of register look like a regression toward the middle of the
-    vowel space. There are up to two current rows, one per style; asking without saying which
-    is not a question this table can answer.
-    """
-    row = conn.execute(
-        "SELECT * FROM speaker_baseline WHERE superseded_at IS NULL AND style_tag = ? "
-        "ORDER BY id DESC LIMIT 1",
-        (style,),
-    ).fetchone()
-    return cast("sqlite3.Row | None", row)
-
-
-def any_current_baseline(conn: sqlite3.Connection) -> sqlite3.Row | None:
-    """The oldest current baseline of any style. **Used for the LPC ceiling and nothing else.**
-
-    The ceiling has to match vocal tract length, which is a property of the speaker and not of
-    whether they happen to be reading or talking. It is established once by a sweep and then
-    held still, because a reading measured at a different ceiling is not comparable to the
-    baseline it is set against — so a later spontaneous calibration reuses the ceiling the read
-    calibration already settled rather than sweeping to a second, incompatible one. Oldest
-    first, deliberately: the first sweep is the one everything else was measured against.
-
-    Never use this to pick a normaliser. That is `current_baseline(conn, style=...)`, and the
-    whole point of the split is that a centroid IS style-specific even though a ceiling is not.
-    """
-    row = conn.execute(
-        "SELECT * FROM speaker_baseline WHERE superseded_at IS NULL ORDER BY id ASC LIMIT 1"
-    ).fetchone()
-    return cast("sqlite3.Row | None", row)
-
-
-def baseline_history(conn: sqlite3.Connection) -> Sequence[sqlite3.Row]:
-    """Every baseline ever set, newest first. A re-calibration is a fact worth keeping."""
-    return conn.execute("SELECT * FROM speaker_baseline ORDER BY id DESC").fetchall()
-
-
-# --- The model's own readings -----------------------------------------------------------------
-
-
-def record_native_rendering(
-    conn: sqlite3.Connection,
-    *,
-    voice: str,
-    text_key: str,
-    reference_text: str,
-    wav_path: str,
-    payloads: Any,
-    seconds: float,
-    characters: int,
+    raw: Any,
     created_at: str | None = None,
 ) -> None:
-    """Store one voice's assessed reading of one text. Idempotent per (voice, text).
+    """Store Gemini's prosody annotation for an attempt. Idempotent per attempt.
 
-    Upserts rather than inserting, so a re-capture after a better voice list or a longer
-    passage replaces the row instead of leaving two readings that disagree about what the
-    model does.
+    Only ever called with an annotation that already passed `ai_coach.validated`, so a row
+    here is one whose word sequence matched the passage. Re-annotating replaces it rather
+    than accumulating, because there is one right answer per passage and the newest model
+    output is the one worth keeping.
     """
     conn.execute(
         """
-        INSERT INTO native_renderings
-            (voice, text_key, reference_text, wav_path, payloads_json, seconds, characters,
-             created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(voice, text_key) DO UPDATE SET
-            reference_text = excluded.reference_text,
-            wav_path = excluded.wav_path,
-            payloads_json = excluded.payloads_json,
-            seconds = excluded.seconds,
-            characters = excluded.characters,
-            created_at = excluded.created_at
+        INSERT INTO attempt_annotations (attempt_id, raw_json, created_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(attempt_id) DO UPDATE SET
+            raw_json = excluded.raw_json, created_at = excluded.created_at
         """,
-        (
-            voice,
-            text_key,
-            reference_text,
-            wav_path,
-            json.dumps(payloads, ensure_ascii=False),
-            float(seconds),
-            int(characters),
-            created_at or utc_now_iso(),
-        ),
+        (int(attempt_id), json.dumps(raw, ensure_ascii=False), created_at or utc_now_iso()),
     )
     conn.commit()
 
 
-def native_rendering(conn: sqlite3.Connection, voice: str, text_key: str) -> sqlite3.Row | None:
-    """One voice's reading of one text, or None when it has not been captured."""
+def annotation_for(conn: sqlite3.Connection, attempt_id: int) -> Any | None:
+    """One attempt's stored annotation payload, or None. Never raises on a bad row."""
     row = conn.execute(
-        "SELECT * FROM native_renderings WHERE voice = ? AND text_key = ?",
-        (voice, text_key),
+        "SELECT raw_json FROM attempt_annotations WHERE attempt_id = ?", (int(attempt_id),)
     ).fetchone()
-    return cast("sqlite3.Row | None", row)
+    if row is None:
+        return None
+    try:
+        return json.loads(row["raw_json"])
+    except (ValueError, TypeError):
+        logger.warning("Attempt %d has an unreadable stored annotation", attempt_id)
+        return None
 
 
-def native_renderings_for(conn: sqlite3.Connection, text_key: str) -> Sequence[sqlite3.Row]:
-    """Every captured voice for one text, by voice name. The population a band is drawn from."""
-    return conn.execute(
-        "SELECT * FROM native_renderings WHERE text_key = ? ORDER BY voice",
-        (text_key,),
-    ).fetchall()
+# --- The History page --------------------------------------------------------------------------
+# Ordered by `id DESC`, not `created_at`: `record_attempt` accepts an explicit `created_at`, so
+# the two orders are not the same, and History is a list of what was recorded rather than a time
+# series. `idx_attempts_created_at` is left in place for the date filter a later reader may want.
+#
+# **`offline = 1` rows are INCLUDED here**, unlike the progress readers this replaced. A fixture
+# replay is a real row that a real click produced; hiding it made History disagree with the
+# database. The surface labels them instead.
 
 
-def native_rendering_voices(conn: sqlite3.Connection, text_key: str) -> set[str]:
-    """Which voices already exist for this text. What makes a capture run resumable."""
-    return {
-        str(row["voice"])
-        for row in conn.execute(
-            "SELECT voice FROM native_renderings WHERE text_key = ?", (text_key,)
-        ).fetchall()
-    }
+def attempt_page(
+    conn: sqlite3.Connection,
+    *,
+    limit: int,
+    offset: int = 0,
+    mode: str | None = None,
+) -> Sequence[sqlite3.Row]:
+    """One page of attempts, newest first. Raw JSON columns omitted — they are large.
+
+    `mode` filters on the stored string rather than on a `Mode`, deliberately: rows written
+    before 2026-08-25 carry `'drill'`, which is no longer an enum member. The caller passes
+    `utils.Mode.PARAGRAPH.value` and gets scripted rows; legacy rows are picked up by the
+    `IN` list below rather than being stranded outside every filter.
+    """
+    sql = """
+        SELECT id, created_at, mode, reference_text, recognised_text, audio_seconds,
+               pron_score, accuracy, fluency, completeness, prosody, coach_source, offline
+        FROM attempts
+    """
+    params: list[Any] = []
+    if mode is not None:
+        names = _mode_group(mode)
+        sql += f" WHERE mode IN ({', '.join('?' * len(names))})"
+        params.extend(names)
+    sql += " ORDER BY id DESC LIMIT ? OFFSET ?"
+    params.extend([int(limit), int(offset)])
+    return conn.execute(sql, params).fetchall()
+
+
+def attempt_count(conn: sqlite3.Connection, *, mode: str | None = None) -> int:
+    """How many attempts a page listing would walk. Same filter as `attempt_page`."""
+    if mode is None:
+        row = conn.execute("SELECT COUNT(*) AS total FROM attempts").fetchone()
+    else:
+        names = _mode_group(mode)
+        row = conn.execute(
+            f"SELECT COUNT(*) AS total FROM attempts WHERE mode IN ({', '.join('?' * len(names))})",
+            names,
+        ).fetchone()
+    return int(row["total"])
+
+
+def _mode_group(mode: str) -> list[str]:
+    """Every stored `mode` string that reads as `mode` today, legacy values included.
+
+    `'drill'` was scripted single-shot, so it belongs with `'paragraph'`. Derived from
+    `utils.mode_of` rather than hard-coded a second time, so adding a legacy alias there
+    cannot leave this filter silently behind.
+    """
+    target = utils.mode_of(mode)
+    return sorted(
+        {
+            name
+            for name in (*(m.value for m in Mode), *utils.LEGACY_MODE_NAMES)
+            if utils.mode_of(name) is target
+        }
+    )
+
+
+def delete_attempt(conn: sqlite3.Connection, attempt_id: int) -> str | None:
+    """Delete one attempt and everything hanging off it. Returns the audio path, if any.
+
+    The recording FILE is not deleted here — this module owns rows, not the filesystem, and
+    a delete that half-succeeded because a file was locked would leave a row pointing at
+    audio that may or may not exist. The path comes back so the caller can unlink it after
+    the transaction commits, and a failure there is a stray file rather than a broken row.
+
+    The cascades do the rest: `attempt_audio`, `attempt_annotations`, `attempt_tags` and
+    `attempt_content_scores` all declare ON DELETE CASCADE and `connect` turns foreign keys
+    on. `vowel_measurements` rows for the attempt go the same way.
+    """
+    row = conn.execute(
+        "SELECT path FROM attempt_audio WHERE attempt_id = ?", (int(attempt_id),)
+    ).fetchone()
+    conn.execute("DELETE FROM attempts WHERE id = ?", (int(attempt_id),))
+    conn.commit()
+    return str(row["path"]) if row is not None else None

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Print the live en-US neural voice roster, by introspection rather than from memory.
 
-Run this BEFORE touching `perception_trainer.VOICES`. The roster changes without notice —
-voices are added, renamed and retired — and a hardcoded name that no longer exists fails as a
+Run this BEFORE changing `AZURE_TTS_VOICE`. The roster changes without notice — voices are
+added, renamed and retired — and a configured name that no longer exists fails as a
 `BadRequest` at synthesis time, after the pre-flight has already approved the spend.
 
 This lists voices. It synthesises nothing, so it should charge no characters, and the script
@@ -11,9 +11,10 @@ compared. Run inside the container, since only it has the pinned SDK:
 
     docker compose run --rm app python scripts/list_voices.py
 
-Voice variety is the active ingredient of the perception trainer, not a garnish, so the four
-names chosen from this output must differ in sex and in timbre. Four voices of the same
-character is a single-talker block wearing a disguise.
+The configured voice is what every "hear the native version" on the Analyze page is
+rendered with, so it is the reference this whole application compares against. Choose a
+General American neural voice and then leave it alone: changing it changes what every
+stored `native_renderings` cache key means.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 import db  # noqa: E402
-import perception_trainer  # noqa: E402
+import tts  # noqa: E402
 import utils  # noqa: E402
 
 LOCALE = "en-US"
@@ -73,16 +74,15 @@ def main() -> int:
         print(f"  {voice.short_name:<34} {gender:<8} {kind:<22} styles: {styles}")
 
     available = {voice.short_name for voice in voices}
-    print("\n[voices] Currently hardcoded in perception_trainer.VOICES:")
-    for name in perception_trainer.VOICES:
-        mark = "ok " if name in available else "GONE"
-        print(f"  [{mark}] {name}")
-    absent = [name for name in perception_trainer.VOICES if name not in available]
+    configured = tts.voice_name()
+    present = configured in available
+    print(f"\n[voices] AZURE_TTS_VOICE is {configured}: {'ok' if present else 'GONE'}")
+    absent = [] if present else [configured]
     if absent:
         print(
-            f"\n[voices] {len(absent)} configured voice(s) no longer exist. Replace them "
-            f"before running a block — a block refuses to start under "
-            f"{perception_trainer.MIN_VOICES} voices rather than degrading."
+            "\n[voices] The configured voice no longer exists. Every playback on the Analyze "
+            "page would fail at synthesis time, after the spend guard has already approved "
+            "it. Set AZURE_TTS_VOICE to a name from the list above."
         )
 
     after = db.monthly_tts_characters(conn)
