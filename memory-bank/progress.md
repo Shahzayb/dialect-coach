@@ -2,7 +2,7 @@
 
 ## Current state
 
-v0.13.0 is implemented: the two-page scope the brief describes, and nothing else. Analyze
+v1.0.0 is released: the two-page scope the brief describes, and nothing else. Analyze
 records scripted or unscripted audio and shows every documented field Azure returned, the
 deterministic coaching, and — on a click — Gemini's prosody annotation. History is one
 `st.dataframe` — attempt text, Pron/Accuracy/Fluency, date, type, audio length and Live vs
@@ -16,11 +16,26 @@ own toolbar chip is hidden by CSS because the poll loop keeps it permanently lit
 
 `make check` (ruff format + ruff + strict mypy + 480 tests) passes. Verified live through
 `coach-offline` on 2026-08-26: the History table renders every column, the text filter narrows
-it to "1 attempt of 38", and switching tabs keeps the grid sized. See the caveat below about
-what a browser cannot verify here.
+it to "1 attempt of 38", and switching tabs keeps the grid sized.
+
+**A human pass on 2026-08-26 closed the three items a driver could not reach.** History's Open
+and Delete icons both route to the right attempt, so Streamlit does deliver clicks into a
+`st.dataframe` button column — the unit-tested row-to-id routing was the whole risk, and it
+holds. The prosody annotation ran against a real Gemini call and rendered, not just the refusal
+path. Per-word "how you said it" clips played from a real recording, so the common case works
+rather than only the outside-the-audio guard.
 
 Everything else was deleted behind tag `v0.12.0-full`. `techContext.md` maps each removed
 feature to its plan file.
+
+**v1.0.0 (2026-08-26)** closes GitHub milestone `v1.0.0` — issues #35–#42, the eight that
+argued the scope down to "this is an accent coach, and it stops at the diagnosis". The
+previous release is v0.12.0: `0.13.0` was written into `pyproject.toml` on 2026-08-25 and
+never tagged, so the generated notes span both. The version lives only in `pyproject.toml`;
+`0.13.0` and earlier numbers elsewhere in `plans/` and `memory-bank/` are historical prose and
+stay as they are. The three UI items that a browser driver could not reach were closed by a
+human pass before the tag; what remains below is service behaviour and a real spontaneous
+baseline, neither of which a release can settle.
 
 ## Next concrete work
 
@@ -29,19 +44,10 @@ pages are actually missing.
 
 ## Live evidence still needed
 
-- The History table's Open and Delete buttons have never been clicked. `st.dataframe` renders
-  to a canvas, so neither AppTest nor a browser driver can reach a cell — even column-header
-  sorting does not respond to a synthetic click. The routing from "row N as rendered" to an
-  attempt id is unit-tested against a stand-in session state, and everything on the far side
-  of the click (the confirm step, the delete, the detail view) is covered by driving the
-  session keys directly. What is unproven is only Streamlit's own click delivery. A human
-  clicking both icons once settles it.
-- The prosody annotation has never run against a live Gemini call. Offline verification
-  covered the refusal path only; `scripts/coach_test.py` exercises the real one for the price
-  of one free-tier call.
-- Per-word "how you said it" clips were verified against a synthetic recording whose length
-  did not match the fixture's offsets, so most spans correctly fell outside the audio. A real
-  recording is what proves the common case rather than the guard.
+`st.dataframe` renders to a canvas, so neither AppTest nor a browser driver can reach a cell —
+automated coverage of History's buttons stops at the unit-tested row-to-id routing, and a
+human click is what confirms a change there.
+
 - Azure has produced real `Monotone` faults, but no real `UnexpectedBreak` or `MissingBreak`.
   Treat those two as service behaviour unless a real capture proves otherwise.
 - Unscripted plumbing and two-pass billing were verified with synthesized input. A human
