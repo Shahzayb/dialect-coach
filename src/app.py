@@ -51,7 +51,7 @@ from utils import AzureBand, Band, Mode
 
 logger = logging.getLogger(__name__)
 
-PAGE_TITLE = "Pronunciation Coach"
+PAGE_TITLE = "Dialect Coach"
 PAGE_ICON = "🗣️"
 
 # Cap on the session cache. Streamlit re-runs the entire script on every widget
@@ -662,11 +662,16 @@ PRESET_KEY = "preset_choice"
 # Analyze tab body runs first on every rerun — a keyed value would be dropped before History
 # ever drew the control that owns it. Same mechanism the old Accent picker needed.
 HISTORY_OPEN_KEY = "history_open_attempt"
-HISTORY_PAGE_KEY = "history_page"
-HISTORY_MODE_KEY = "history_mode_filter"
+# Which attempt the table has armed for deletion, or None. Same reasoning as the key above.
+HISTORY_PENDING_DELETE_KEY = "history_pending_delete"
+# Where each button column drops `{"row": int, "label": str}` for the pass a click triggers.
+# Streamlit owns these keys; the callbacks read them and they reset on the next rerun.
+HISTORY_OPEN_CLICK_KEY = "history_open_click"
+HISTORY_DELETE_CLICK_KEY = "history_delete_click"
 
-# Rows per History page. Twelve fits a screen without scrolling past the pager.
-HISTORY_PAGE_SIZE = 12
+# Height of the History grid in pixels. Fixed rather than "auto" so the table shows roughly
+# a dozen rows and scrolls the rest itself, instead of growing the page without limit.
+HISTORY_TABLE_HEIGHT = 460
 
 
 def _generation(name: str) -> int:
@@ -1895,20 +1900,23 @@ def render_analyze(conn: sqlite3.Connection, job: AssessJob | None, running: boo
     )
     source = audio or uploaded
 
-    # Nothing but the buttons goes inside these columns: a helper called within `with
-    # column:` appends into it, and an alert laid out at a button's width is unreadable.
-    left, middle, right = st.columns([1, 1, 3])
-    with left:
+    # A horizontal container rather than fixed columns: Stop only exists while an assessment
+    # is running, and a column reserved for it leaves a hole beside Assess the rest of the
+    # time. Nothing but the buttons goes in here — a helper called inside it appends into it,
+    # and an alert laid out at a button's width is unreadable.
+    with st.container(horizontal=True, gap="small"):
         assess_clicked = st.button(
             "Assess",
             type="primary",
             disabled=running or source is None,
-            width="stretch",
         )
-    with middle:
-        stop_clicked = st.button("🛑 Stop", width="stretch") if running else False
-    with right:
-        st.button("↺ Reset", on_click=_reset_form, disabled=running)
+        stop_clicked = st.button("Stop", icon=":material/stop_circle:") if running else False
+        st.button(
+            "Reset",
+            icon=":material/refresh:",
+            on_click=_reset_form,
+            disabled=running,
+        )
 
     if stop_clicked and job is not None:
         job.cancel_event.set()
@@ -1935,7 +1943,10 @@ def render_analyze(conn: sqlite3.Connection, job: AssessJob | None, running: boo
                     st.rerun()
 
     if running:
-        st.info("Assessing… click Stop to cancel.", icon="⏳")
+        # `st.status` rather than `st.spinner`: it animates the same way but is a real
+        # element, so a test can still assert the user was told what is happening. A spinner
+        # is a transient context manager and AppTest cannot see it at all.
+        st.status("Assessing… click Stop to cancel.", state="running")
         # The only way to wait on a worker thread here: end this pass and start another.
         # Each rerun re-renders Stop and picks up a click made since the last one.
         time.sleep(JOB_POLL_SECONDS)
@@ -2002,7 +2013,11 @@ def attempt_from_row(row: Any) -> CachedAttempt | None:
 
 def render_history_detail(conn: sqlite3.Connection, attempt_id: int) -> None:
     """One stored attempt, rendered as Analyze renders a fresh one — minus the inputs."""
-    st.button("← Back to the list", on_click=_close_history_attempt)
+    st.button(
+        "Back to the list",
+        icon=":material/arrow_back:",
+        on_click=_close_history_attempt,
+    )
 
     with _DB_LOCK:
         row = db.get_attempt(conn, attempt_id)
@@ -2034,11 +2049,159 @@ def render_history_detail(conn: sqlite3.Connection, attempt_id: int) -> None:
     render_result(conn, entry, recording)
 
 
-def render_history(conn: sqlite3.Connection) -> None:
-    """Everything recorded, paginated, newest first. Click a row to re-open it.
+def _attempt_record(row: Any) -> dict[str, Any]:
+    """One database row flattened into the table's own column names.
 
-    `offline = 1` rows are INCLUDED and labelled. A fixture replay is a real row that a real
-    click produced, and hiding it made History disagree with the database.
+    `id` rides along so a clicked table row can be mapped back to an attempt; it is dropped
+    from the rendered column order rather than shown.
+    """
+    mode = utils.mode_of(row["mode"])
+    text = str(row["reference_text"] or row["recognised_text"] or "").strip()
+    # A legacy `drill` row keeps its recorded name in the Type cell rather than being
+    # silently relabelled: the table must never claim a row was recorded in a mode that did
+    # not exist for it.
+    recorded_as = str(row["mode"])
+    type_label = mode.value if recorded_as == mode.value else f"{mode.value} (as {recorded_as})"
+
+    def score(name: str) -> float | None:
+        value = row[name]
+        return float(value) if isinstance(value, (int, float)) else None
+
+    return {
+        "id": int(row["id"]),
+        "Text": text or "(no text recorded)",
+        "Pron": score("pron_score"),
+        "Accuracy": score("accuracy"),
+        "Fluency": score("fluency"),
+        "Date": utils.parse_timestamp(row["created_at"]),
+        "Type": type_label,
+        "Audio": float(row["audio_seconds"]),
+        "Source": "Fixture replay" if row["offline"] else "Live",
+        "Open": ":material/open_in_new:",
+        "Delete": ":material/delete:",
+    }
+
+
+def _history_filters(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One filter control per column, applied in Python over the fetched records.
+
+    Filtering happens here rather than in SQL because the score, duration and source columns
+    have no index behind them and the table is small; a WHERE clause per column would spread
+    the same predicate across two places for no gain at this size.
+    """
+    with st.expander("Filters", icon=":material/filter_list:"):
+        text_col, type_col, source_col = st.columns(3)
+        with text_col:
+            needle = st.text_input("Text contains", key="history-f-text").strip().lower()
+        with type_col:
+            types = sorted({str(r["Type"]) for r in records})
+            chosen_types = st.multiselect("Type", types, key="history-f-type")
+        with source_col:
+            sources = sorted({str(r["Source"]) for r in records})
+            chosen_sources = st.multiselect("Mode", sources, key="history-f-source")
+
+        pron_col, accuracy_col, fluency_col = st.columns(3)
+        score_bounds: dict[str, tuple[float, float]] = {}
+        for column, holder in (
+            ("Pron", pron_col),
+            ("Accuracy", accuracy_col),
+            ("Fluency", fluency_col),
+        ):
+            with holder:
+                score_bounds[column] = st.slider(
+                    column,
+                    0.0,
+                    100.0,
+                    (0.0, 100.0),
+                    key=f"history-f-{column.lower()}",
+                )
+
+        date_col, audio_col = st.columns(2)
+        with date_col:
+            dates = [r["Date"] for r in records if r["Date"] is not None]
+            # `st.date_input` yields a 1-tuple mid-edit, before the second date is picked;
+            # the bounds stay None until both ends exist so a half-entered range filters
+            # nothing away.
+            date_from = date_to = None
+            if dates:
+                span = st.date_input(
+                    "Date range",
+                    (min(dates).date(), max(dates).date()),
+                    key="history-f-date",
+                )
+                if isinstance(span, tuple) and len(span) == 2:
+                    date_from, date_to = span
+        with audio_col:
+            longest = max((float(r["Audio"]) for r in records), default=0.0)
+            ceiling = max(1.0, round(longest) + 1.0)
+            audio_range = st.slider(
+                "Audio seconds",
+                0.0,
+                ceiling,
+                (0.0, ceiling),
+                key="history-f-audio",
+            )
+
+    def keeps(record: dict[str, Any]) -> bool:
+        if needle and needle not in str(record["Text"]).lower():
+            return False
+        if chosen_types and str(record["Type"]) not in chosen_types:
+            return False
+        if chosen_sources and str(record["Source"]) not in chosen_sources:
+            return False
+        for column, (low, high) in score_bounds.items():
+            value = record[column]
+            # A row with no score for this column is only excluded once the bound is
+            # actually narrowed — an untouched slider must not hide unscored attempts.
+            if value is None:
+                if (low, high) != (0.0, 100.0):
+                    return False
+            elif not low <= float(value) <= high:
+                return False
+        low_audio, high_audio = audio_range
+        if not low_audio <= float(record["Audio"]) <= high_audio:
+            return False
+        stamp = record["Date"]
+        if date_from is not None and date_to is not None and stamp is not None:
+            return bool(date_from <= stamp.date() <= date_to)
+        return True
+
+    return [r for r in records if keeps(r)]
+
+
+def _clicked_attempt_id(state_key: str, records: list[dict[str, Any]]) -> int | None:
+    """The attempt behind a button-column click, or None if the row is no longer there.
+
+    The click carries a row index into the list as it was rendered, so it is resolved against
+    that same list rather than against the database.
+    """
+    click = st.session_state.get(state_key)
+    if not click:
+        return None
+    index = int(click["row"])
+    if not 0 <= index < len(records):
+        return None
+    return int(records[index]["id"])
+
+
+def _history_open_click(records: list[dict[str, Any]]) -> None:
+    attempt_id = _clicked_attempt_id(HISTORY_OPEN_CLICK_KEY, records)
+    if attempt_id is not None:
+        _open_history_attempt(attempt_id)
+
+
+def _history_delete_click(records: list[dict[str, Any]]) -> None:
+    attempt_id = _clicked_attempt_id(HISTORY_DELETE_CLICK_KEY, records)
+    if attempt_id is not None:
+        st.session_state[HISTORY_PENDING_DELETE_KEY] = attempt_id
+
+
+def render_history(conn: sqlite3.Connection) -> None:
+    """Everything recorded as one sortable, filterable, paginated table, newest first.
+
+    `offline = 1` rows are INCLUDED and labelled in the Mode column. A fixture replay is a
+    real row that a real click produced, and hiding it made History disagree with the
+    database.
     """
     open_id = st.session_state.get(HISTORY_OPEN_KEY)
     if open_id:
@@ -2047,109 +2210,135 @@ def render_history(conn: sqlite3.Connection) -> None:
 
     with _DB_LOCK:
         st.caption(budget.summary_line(conn))
-
-    choice = st.radio(
-        "Show",
-        ["All", "Scripted", "Unscripted"],
-        horizontal=True,
-        key=HISTORY_MODE_KEY,
-    )
-    mode_filter = {
-        "Scripted": Mode.PARAGRAPH.value,
-        "Unscripted": Mode.UNSCRIPTED.value,
-    }.get(choice)
-
-    with _DB_LOCK:
-        total = db.attempt_count(conn, mode=mode_filter)
+        total = db.attempt_count(conn)
 
     if not total:
         st.info("Nothing recorded yet. Assess something on the Analyze tab.", icon="🗒️")
         return
 
-    pages = max(1, -(-total // HISTORY_PAGE_SIZE))
-    # Clamped rather than trusted: changing the filter can leave the stored page number past
-    # the end of the shorter list, and an out-of-range OFFSET renders an empty page with no
-    # explanation.
-    page = min(int(st.session_state.get(HISTORY_PAGE_KEY, 1)), pages)
-    st.session_state[HISTORY_PAGE_KEY] = page
-
+    # Every row, then filtered and paged in Python. The whole table is fetched because the
+    # filters below are Python predicates: an SQL LIMIT applied first would page through the
+    # unfiltered list and leave pages that render empty for no visible reason.
     with _DB_LOCK:
-        rows = db.attempt_page(
-            conn,
-            limit=HISTORY_PAGE_SIZE,
-            offset=(page - 1) * HISTORY_PAGE_SIZE,
-            mode=mode_filter,
-        )
+        rows = db.attempt_page(conn, limit=total)
+    records = [_attempt_record(row) for row in rows]
 
-    st.caption(f"{total} attempt{'' if total == 1 else 's'} · page {page} of {pages}")
+    matching = _history_filters(records)
+    render_pending_delete(conn, records)
 
-    for row in rows:
-        render_history_row(conn, row)
+    if not matching:
+        st.info("No attempt matches these filters.", icon=":material/filter_alt_off:")
+        return
 
-    if pages > 1:
-        render_pager(page, pages)
+    shown = len(matching)
+    suffix = "" if shown == total else f" of {total}"
+    st.caption(f"{shown} attempt{'' if shown == 1 else 's'}{suffix}")
+
+    # Every matching row goes to the grid, which scrolls and virtualises them itself. No
+    # slicing and no pager of our own: a second set of page controls above Streamlit's own
+    # scrollback is the thing this table replaced.
+    st.dataframe(
+        matching,
+        key="history-table",
+        hide_index=True,
+        width="stretch",
+        height=HISTORY_TABLE_HEIGHT,
+        placeholder="—",
+        column_order=(
+            "Text",
+            "Pron",
+            "Accuracy",
+            "Fluency",
+            "Date",
+            "Type",
+            "Audio",
+            "Source",
+            "Open",
+            "Delete",
+        ),
+        column_config={
+            "Text": st.column_config.TextColumn("Attempt", width="large", pinned=True),
+            "Pron": st.column_config.ProgressColumn(
+                "Pron",
+                help="Overall pronunciation score",
+                min_value=0,
+                max_value=100,
+                format="%.0f",
+                width="small",
+            ),
+            "Accuracy": st.column_config.NumberColumn("Accuracy", format="%.0f", width="small"),
+            "Fluency": st.column_config.NumberColumn("Fluency", format="%.0f", width="small"),
+            "Date": st.column_config.DatetimeColumn(
+                "Date", format="YYYY-MM-DD HH:mm", width="medium"
+            ),
+            "Type": st.column_config.TextColumn("Type", width="small"),
+            "Audio": st.column_config.NumberColumn(
+                "Audio", help="Recording length", format="%.0f s", width="small"
+            ),
+            "Source": st.column_config.TextColumn("Mode", width="small"),
+            # Two single-button columns rather than one multi-action cell: a list of labels
+            # renders as a "⋮" menu, which hides both actions behind an extra click.
+            "Open": st.column_config.ButtonColumn(
+                "",
+                help="Open this attempt",
+                type="tertiary",
+                width="small",
+                key=HISTORY_OPEN_CLICK_KEY,
+                on_click=_history_open_click,
+                args=(matching,),
+            ),
+            "Delete": st.column_config.ButtonColumn(
+                "",
+                help="Delete this attempt",
+                type="tertiary",
+                width="small",
+                key=HISTORY_DELETE_CLICK_KEY,
+                on_click=_history_delete_click,
+                args=(matching,),
+            ),
+        },
+    )
 
 
-def render_history_row(conn: sqlite3.Connection, row: Any) -> None:
-    """One line of the list: what it was, how it scored, and the two things you can do to it."""
-    attempt_id = int(row["id"])
-    mode = utils.mode_of(row["mode"])
-    text = str(row["reference_text"] or row["recognised_text"] or "").strip()
-    label = utils.truncate(text, 70) if text else "(no text recorded)"
-    score = row["pron_score"]
-    shown = f"{float(score):.0f}" if isinstance(score, (int, float)) else "—"
+def render_pending_delete(conn: sqlite3.Connection, records: list[dict[str, Any]]) -> None:
+    """The second half of the two-step delete: the table arms it, this confirms it.
+
+    Deliberately not a dialog. The row being destroyed is named here, so a mis-click on the
+    wrong line is visible before the irreversible button is reached.
+    """
+    pending = st.session_state.get(HISTORY_PENDING_DELETE_KEY)
+    if not pending:
+        return
+    match = next((r for r in records if r["id"] == int(pending)), None)
+    if match is None:
+        st.session_state[HISTORY_PENDING_DELETE_KEY] = None
+        return
 
     with st.container(border=True):
-        left, right = st.columns([5, 2])
-        with left:
-            st.markdown(f"**{html.escape(label)}**")
-            flags = [row["created_at"], mode.value, f"{float(row['audio_seconds']):.0f}s"]
-            if row["offline"]:
-                flags.append("fixture replay")
-            if str(row["mode"]) != mode.value:
-                # A legacy `drill` row. Named rather than silently relabelled, so the list
-                # never claims a row was recorded in a mode that did not exist for it.
-                flags.append(f"recorded as {row['mode']}")
-            st.caption(" · ".join(flags))
-        with right:
-            st.markdown(f"Pron **{shown}**")
-
-        # Nothing but the buttons goes inside these columns: an alert laid out at a button's
-        # width is unreadable, and a helper called within `with column:` appends into it.
-        open_col, delete_col = st.columns(2)
-        with open_col:
+        st.warning(
+            f"Delete **{utils.truncate(str(match['Text']), 60)}**? This removes the attempt, "
+            "its recording, its coaching and its annotation. It cannot be undone.",
+            icon=":material/warning:",
+        )
+        confirm_col, cancel_col = st.columns(2)
+        with confirm_col:
             st.button(
-                "Open",
-                key=f"open-{attempt_id}",
-                on_click=_open_history_attempt,
-                args=(attempt_id,),
+                "Delete permanently",
+                key=f"do-delete-{match['id']}",
+                type="primary",
+                icon=":material/delete_forever:",
+                on_click=_delete_attempt,
+                args=(conn, int(match["id"])),
                 width="stretch",
             )
-        with delete_col:
-            confirm_key = f"confirm-delete-{attempt_id}"
-            if st.session_state.get(confirm_key):
-                st.button(
-                    "Really delete",
-                    key=f"do-delete-{attempt_id}",
-                    type="primary",
-                    on_click=_delete_attempt,
-                    args=(conn, attempt_id),
-                    width="stretch",
-                )
-            else:
-                st.button(
-                    "🗑️ Delete",
-                    key=f"ask-delete-{attempt_id}",
-                    on_click=lambda k=confirm_key: st.session_state.__setitem__(k, True),
-                    width="stretch",
-                )
-    if st.session_state.get(f"confirm-delete-{attempt_id}"):
-        # Outside the columns, deliberately: see the note above about alert width.
-        st.warning(
-            "This removes the attempt, its recording, its coaching and its annotation. "
-            "It cannot be undone.",
-            icon="⚠️",
-        )
+        with cancel_col:
+            st.button(
+                "Cancel",
+                key="cancel-delete",
+                icon=":material/close:",
+                on_click=lambda: st.session_state.__setitem__(HISTORY_PENDING_DELETE_KEY, None),
+                width="stretch",
+            )
 
 
 def _delete_attempt(conn: sqlite3.Connection, attempt_id: int) -> None:
@@ -2166,44 +2355,23 @@ def _delete_attempt(conn: sqlite3.Connection, attempt_id: int) -> None:
             Path(path).unlink(missing_ok=True)
         except OSError:
             logger.warning("Could not remove the recording at %s", path, exc_info=True)
-    st.session_state.pop(f"confirm-delete-{attempt_id}", None)
+    st.session_state[HISTORY_PENDING_DELETE_KEY] = None
     if st.session_state.get(HISTORY_OPEN_KEY) == attempt_id:
         st.session_state[HISTORY_OPEN_KEY] = None
 
 
-def _set_history_page(page: int) -> None:
-    st.session_state[HISTORY_PAGE_KEY] = page
-
-
-def render_pager(page: int, pages: int) -> None:
-    """Previous / next, with the position between them."""
-    previous, position, following = st.columns([1, 2, 1])
-    with previous:
-        st.button(
-            "← Newer",
-            disabled=page <= 1,
-            on_click=_set_history_page,
-            args=(page - 1,),
-            width="stretch",
-        )
-    with position:
-        st.markdown(
-            f'<div style="text-align:center;padding-top:0.4rem;">{page} / {pages}</div>',
-            unsafe_allow_html=True,
-        )
-    with following:
-        st.button(
-            "Older →",
-            disabled=page >= pages,
-            on_click=_set_history_page,
-            args=(page + 1,),
-            width="stretch",
-        )
-
-
 def render() -> None:
-    st.set_page_config(page_title=PAGE_TITLE, page_icon=PAGE_ICON, layout="centered")
-    st.title(f"{PAGE_ICON} {PAGE_TITLE}")
+    st.set_page_config(page_title=PAGE_TITLE, page_icon=PAGE_ICON, layout="wide")
+    # Streamlit's own "Running" chip sits in the toolbar and would be lit for the whole of an
+    # assessment: waiting on the worker thread is a poll loop of `sleep` and `st.rerun`, so
+    # the script is permanently re-running and the chip permanently on. The spinner beside
+    # Stop is the honest one — it says what is happening and how to cancel it — so the chip
+    # is hidden rather than shown as a second, less useful copy of the same state.
+    st.markdown(
+        '<style>[data-testid="stStatusWidget"]{display:none;}</style>',
+        unsafe_allow_html=True,
+    )
+    st.title(PAGE_TITLE)
     st.caption("Personal English pronunciation and delivery coach — en-US.")
 
     check_startup()

@@ -47,7 +47,7 @@ def run_app(monkeypatch: pytest.MonkeyPatch):
 def test_the_page_renders_offline(run_app) -> None:
     app = run_app()
     assert not app.exception
-    assert "Pronunciation Coach" in app.title[0].value
+    assert "Dialect Coach" in app.title[0].value
     assert any("OFFLINE_MODE is on" in i.value for i in app.info)
 
 
@@ -895,7 +895,7 @@ def test_a_running_job_disables_assess_and_offers_stop(run_app, settled_poll) ->
         assert next(b for b in app.button if b.label == "Assess").disabled
         assert [b for b in app.button if "Stop" in b.label], "Stop must be offered"
         assert next(b for b in app.button if "Reset" in b.label).disabled
-        assert any("Assessing" in i.value for i in app.info)
+        assert any("Assessing" in s.label for s in app.status)
     finally:
         never_finishes.set()
 
@@ -1121,28 +1121,71 @@ def test_an_empty_history_says_so_rather_than_rendering_a_blank(run_app) -> None
     assert any("Nothing recorded yet" in i.value for i in app.info)
 
 
+def history_table(app: AppTest):
+    """The History table as a pandas DataFrame, or None when no table was drawn.
+
+    Matched on its columns rather than its key: AppTest only exposes a `key` for dataframes
+    Streamlit treats as widgets, and this one is not one.
+    """
+    for element in app.dataframe:
+        frame = element.value
+        if "Text" in frame.columns and "Delete" in frame.columns:
+            return frame
+    return None
+
+
+def open_attempt(app: AppTest, attempt_id: int) -> AppTest:
+    """Open one attempt the way an Actions click does.
+
+    The Actions column lives inside `st.dataframe`, which AppTest cannot click into, so the
+    session key its callback would set is set directly. What is under test on the far side
+    of that click is the detail rendering, not Streamlit's own grid.
+    """
+    app.session_state[app_module.HISTORY_OPEN_KEY] = attempt_id
+    return app.run()
+
+
+def arm_delete(app: AppTest, attempt_id: int) -> AppTest:
+    """Arm the delete confirmation the way an Actions click does. See `open_attempt`."""
+    app.session_state[app_module.HISTORY_PENDING_DELETE_KEY] = attempt_id
+    return app.run()
+
+
 def test_history_lists_what_was_recorded_newest_first(run_app) -> None:
     app = run_app()
     seed_history(app, 3)
     app.run()
-    rendered = " ".join(m.value for m in app.markdown)
+    table = history_table(app)
     assert "3 attempts" in " ".join(c.value for c in app.caption)
-    assert "Reading number 2" in rendered
+    assert list(table["Text"]) == [
+        "Reading number 2",
+        "Reading number 1",
+        "Reading number 0",
+    ]
 
 
-def test_history_paginates_rather_than_listing_everything(run_app) -> None:
+def test_the_table_carries_a_column_for_every_facet_the_filters_offer(run_app) -> None:
     app = run_app()
-    seed_history(app, app_module.HISTORY_PAGE_SIZE + 3)
+    seed_history(app, 1)
+    app.run()
+    table = history_table(app)
+    for column in ("Text", "Pron", "Accuracy", "Fluency", "Date", "Type", "Audio", "Source"):
+        assert column in table.columns
+
+
+def test_every_matching_row_goes_to_the_grid_which_scrolls_them_itself(run_app) -> None:
+    """The table is bounded by `HISTORY_TABLE_HEIGHT`, not by slicing rows away from it.
+
+    There is deliberately no pager of our own: an external one on top of the grid's own
+    scrollback was the thing this table replaced.
+    """
+    app = run_app()
+    seed_history(app, 20)
     app.run()
 
-    opens = [b for b in app.button if b.label == "Open"]
-    assert len(opens) == app_module.HISTORY_PAGE_SIZE
-    assert any("page 1 of 2" in c.value for c in app.caption)
-
-    app = next(b for b in app.button if "Older" in b.label).click().run()
-    assert not app.exception
-    assert len([b for b in app.button if b.label == "Open"]) == 3
-    assert any("page 2 of 2" in c.value for c in app.caption)
+    assert len(history_table(app)) == 20
+    assert any("20 attempts" in c.value for c in app.caption)
+    assert not [b for b in app.button if b.key and b.key.startswith("pager-")]
 
 
 def test_offline_replays_appear_in_history_and_are_labelled(run_app) -> None:
@@ -1161,21 +1204,54 @@ def test_offline_replays_appear_in_history_and_are_labelled(run_app) -> None:
         offline=True,
     )
     app.run()
-    captions = " ".join(c.value for c in app.caption)
-    assert "A replayed reading" in " ".join(m.value for m in app.markdown)
-    assert "fixture replay" in captions
+    table = history_table(app)
+    assert "A replayed reading" in list(table["Text"])
+    assert list(table["Source"]) == ["Fixture replay"]
 
 
-def test_the_mode_filter_narrows_the_list(run_app) -> None:
+def test_the_type_filter_narrows_the_table(run_app) -> None:
     app = run_app()
     seed_history(app, 2)
     seed_history(app, 1, mode=Mode.UNSCRIPTED)
     app.run()
-    assert any("3 attempts" in c.value for c in app.caption)
+    assert len(history_table(app)) == 3
 
-    app = app.radio(key=app_module.HISTORY_MODE_KEY).set_value("Unscripted").run()
+    app = app.multiselect(key="history-f-type").set_value([Mode.UNSCRIPTED.value]).run()
     assert not app.exception
-    assert any("1 attempt " in c.value or "1 attempt·" in c.value for c in app.caption)
+    assert len(history_table(app)) == 1
+    assert any("1 attempt of 3" in c.value for c in app.caption)
+
+
+def test_the_text_filter_narrows_the_table(run_app) -> None:
+    app = run_app()
+    seed_history(app, 3)
+    app.run()
+
+    app = app.text_input(key="history-f-text").set_value("number 1").run()
+    assert not app.exception
+    assert list(history_table(app)["Text"]) == ["Reading number 1"]
+
+
+def test_a_score_filter_narrows_the_table(run_app) -> None:
+    """`seed_history` scores rows 80, 81, 82 — the bound below keeps only the last two."""
+    app = run_app()
+    seed_history(app, 3)
+    app.run()
+
+    app = app.slider(key="history-f-pron").set_value((81.0, 100.0)).run()
+    assert not app.exception
+    assert sorted(history_table(app)["Pron"]) == [81.0, 82.0]
+
+
+def test_filters_that_match_nothing_say_so_rather_than_rendering_a_blank(run_app) -> None:
+    app = run_app()
+    seed_history(app, 2)
+    app.run()
+
+    app = app.text_input(key="history-f-text").set_value("no such attempt").run()
+    assert not app.exception
+    assert history_table(app) is None
+    assert any("No attempt matches" in i.value for i in app.info)
 
 
 def test_a_legacy_drill_row_still_renders_and_says_how_it_was_recorded(run_app) -> None:
@@ -1188,18 +1264,17 @@ def test_a_legacy_drill_row_still_renders_and_says_how_it_was_recorded(run_app) 
     app.run()
 
     assert not app.exception, "Mode('drill') would raise and take the page down"
-    assert "recorded as drill" in " ".join(c.value for c in app.caption)
+    assert "as drill" in list(history_table(app)["Type"])[0]
 
-    app = next(b for b in app.button if b.label == "Open").click().run()
+    app = open_attempt(app, attempt_id)
     assert not app.exception
     assert any("Score breakdown" in m.value for m in app.markdown)
 
 
 def test_opening_an_attempt_renders_the_result_without_the_inputs(run_app) -> None:
     app = run_app()
-    seed_history(app, 1)
-    app.run()
-    app = next(b for b in app.button if b.label == "Open").click().run()
+    attempt_id = seed_history(app, 1)[0]
+    app = open_attempt(app, attempt_id)
 
     assert not app.exception
     rendered = " ".join(m.value for m in app.markdown)
@@ -1212,23 +1287,26 @@ def test_opening_an_attempt_renders_the_result_without_the_inputs(run_app) -> No
 
 
 def test_opening_an_attempt_stands_the_analyze_result_down(run_app) -> None:
-    """Both tab bodies run on every rerun, and two `render_result`s collide on widget keys."""
+    """Both tab bodies run on every rerun, and two `render_result`s collide on widget keys.
+
+    Asserted as "exactly one result was drawn" rather than by inspecting the session key that
+    happens to enforce it, so the invariant holds however the attempt came to be open.
+    """
     app = seed_result(run_app(), offline_assessment())
-    seed_history(app, 1)
-    app.run()
-    app = next(b for b in app.button if b.label == "Open").click().run()
-    assert not app.exception
-    assert app.session_state["last_key"] is None
+    attempt_id = seed_history(app, 1)[0]
+    app = open_attempt(app, attempt_id)
+    assert not app.exception, "a second render_result collides on its widget keys"
+    breakdowns = [m for m in app.markdown if "Score breakdown" in m.value]
+    assert len(breakdowns) == 1
 
 
 def test_closing_an_opened_attempt_returns_to_the_list(run_app) -> None:
     app = run_app()
-    seed_history(app, 2)
-    app.run()
-    app = next(b for b in app.button if b.label == "Open").click().run()
+    ids = seed_history(app, 2)
+    app = open_attempt(app, ids[0])
     app = next(b for b in app.button if "Back to the list" in b.label).click().run()
     assert not app.exception
-    assert len([b for b in app.button if b.label == "Open"]) == 2
+    assert len(history_table(app)) == 2
 
 
 def test_an_unreadable_stored_payload_says_so_instead_of_crashing(run_app) -> None:
@@ -1238,27 +1316,80 @@ def test_an_unreadable_stored_payload_says_so_instead_of_crashing(run_app) -> No
     conn = app_module.get_connection()
     conn.execute("UPDATE attempts SET azure_raw_json = ? WHERE id = ?", ("{not json", attempt_id))
     conn.commit()
-    app.run()
-    app = next(b for b in app.button if b.label == "Open").click().run()
+    app = open_attempt(app, attempt_id)
 
     assert not app.exception
     assert any("could not be read" in e.value for e in app.error)
 
 
+# --- Routing a button-column click ----------------------------------------------------------
+#
+# The Open and Delete buttons live inside `st.dataframe`, which renders to a canvas: neither
+# AppTest nor a browser driver can click them. What is testable — and what this project wrote —
+# is the routing from "row N of the list as rendered" to an attempt id, so it is tested here
+# against a stand-in session state.
+
+
+@pytest.fixture
+def fake_session(monkeypatch: pytest.MonkeyPatch) -> dict:
+    state: dict = {}
+    monkeypatch.setattr(app_module.st, "session_state", state)
+    return state
+
+
+ROWS = [{"id": 11}, {"id": 22}, {"id": 33}]
+
+
+def test_a_delete_click_arms_the_row_it_landed_on(fake_session) -> None:
+    fake_session[app_module.HISTORY_DELETE_CLICK_KEY] = {"row": 1, "label": ""}
+    app_module._history_delete_click(ROWS)
+    assert fake_session[app_module.HISTORY_PENDING_DELETE_KEY] == 22
+
+
+def test_an_open_click_opens_the_row_it_landed_on(fake_session) -> None:
+    fake_session[app_module.HISTORY_OPEN_CLICK_KEY] = {"row": 2, "label": ""}
+    app_module._history_open_click(ROWS)
+    assert fake_session[app_module.HISTORY_OPEN_KEY] == 33
+
+
+def test_a_click_past_the_end_of_the_list_is_ignored(fake_session) -> None:
+    """The click carries an index into the list as it was rendered, which can go stale."""
+    fake_session[app_module.HISTORY_DELETE_CLICK_KEY] = {"row": 9, "label": ""}
+    app_module._history_delete_click(ROWS)
+    assert app_module.HISTORY_PENDING_DELETE_KEY not in fake_session
+
+
+def test_no_click_routes_nowhere(fake_session) -> None:
+    """Every rerun runs the callbacks' module; only a real click leaves the key set."""
+    app_module._history_delete_click(ROWS)
+    app_module._history_open_click(ROWS)
+    assert not fake_session
+
+
 def test_deleting_asks_before_it_deletes(run_app) -> None:
     """Nothing in this app could destroy history before, so the click has to be deliberate."""
     app = run_app()
-    seed_history(app, 1)
-    app.run()
+    attempt_id = seed_history(app, 1)[0]
+    app = arm_delete(app, attempt_id)
 
-    app = next(b for b in app.button if "Delete" in b.label).click().run()
     assert any("cannot be undone" in w.value for w in app.warning)
     assert app_module.db.attempt_count(app_module.get_connection()) == 1
 
-    app = next(b for b in app.button if "Really delete" in b.label).click().run()
+    app = next(b for b in app.button if b.key and b.key.startswith("do-delete-")).click().run()
     assert not app.exception
     assert app_module.db.attempt_count(app_module.get_connection()) == 0
     assert any("Nothing recorded yet" in i.value for i in app.info)
+
+
+def test_cancelling_a_delete_leaves_the_attempt_alone(run_app) -> None:
+    app = run_app()
+    attempt_id = seed_history(app, 1)[0]
+    app = arm_delete(app, attempt_id)
+
+    app = next(b for b in app.button if b.key == "cancel-delete").click().run()
+    assert not app.exception
+    assert not app.warning
+    assert app_module.db.attempt_count(app_module.get_connection()) == 1
 
 
 def test_deleting_removes_the_recording_from_disk_too(run_app, tmp_path) -> None:
@@ -1275,10 +1406,8 @@ def test_deleting_removes_the_recording_from_disk_too(run_app, tmp_path) -> None
         size_bytes=recording.stat().st_size,
         sample_rate=16_000,
     )
-    app.run()
-
-    app = next(b for b in app.button if "Delete" in b.label).click().run()
-    app = next(b for b in app.button if "Really delete" in b.label).click().run()
+    app = arm_delete(app, attempt_id)
+    app = next(b for b in app.button if b.key and b.key.startswith("do-delete-")).click().run()
 
     assert not app.exception
     assert not recording.exists()

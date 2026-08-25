@@ -14,6 +14,7 @@ import random
 import re
 import time
 from collections.abc import Callable, Iterable
+from datetime import datetime
 from enum import Enum
 from typing import Any, Protocol
 
@@ -334,6 +335,22 @@ def truncate(text: str, limit: int) -> str:
         return cleaned
     cut = cleaned[:limit].rsplit(" ", 1)[0]
     return f"{cut or cleaned[:limit]}…"
+
+
+def parse_timestamp(value: Any) -> datetime | None:
+    """A stored `created_at` as a datetime, or None when it cannot be read.
+
+    Rows carry an ISO-8601 string ending in `Z`, which `fromisoformat` rejected before
+    Python 3.11 and which the History table needs as a real datetime to sort and filter on.
+    A row whose timestamp is unreadable still belongs in the table, so this returns None
+    rather than raising.
+    """
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
 
 
 def normalise_words(text: str) -> list[str]:
