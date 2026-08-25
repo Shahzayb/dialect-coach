@@ -2,7 +2,7 @@
 
 Record yourself speaking English, see which sounds you got wrong, and get coached on how to fix them.
 
-Pet project, for local use only. In progress, nowhere near done.
+Pet project, for local use only.
 
 ## Run
 
