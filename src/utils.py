@@ -27,25 +27,55 @@ class RowLike(Protocol):
 
     `sqlite3.Row` and `dict` both satisfy this and neither is a subtype of the other.
     A Row is not a `Mapping` — it has no `.get`, and it raises `IndexError` where a dict
-    raises `KeyError`, which is why `progress_view.is_shadowed` catches both. Readers that
-    only subscript should say only that, rather than claiming `Mapping[str, Any]` and being
-    handed a `sqlite3.Row` anyway.
+    raises `KeyError`, so a reader that handles a missing column has to catch both. Readers
+    that only subscript should say only that, rather than claiming `Mapping[str, Any]` and
+    being handed a `sqlite3.Row` anyway.
     """
 
     def __getitem__(self, key: str, /) -> Any: ...
 
 
 class Mode(str, Enum):
-    """The three recording modes.
+    """The two recording modes: read a script, or speak freely.
 
-    Mode C is the one that measures the register this project is about: generating language and
-    monitoring pronunciation at the same time. It is not a longer paragraph — it is a different
-    speech population, which is why every attempt carries a style tag.
+    UNSCRIPTED measures the register this project is about — generating language and
+    monitoring pronunciation at the same time. It is not a longer PARAGRAPH; it is a
+    different speech population, assessed by a different path.
+
+    **`DRILL` was removed on 2026-08-25 and its value must still be readable.** Single-shot
+    recognition was the only path Azure honoured `enableMiscue` on, but it caps at roughly
+    15 s of audio, which is incompatible with reading something as long as you like. Rows
+    written before the cut carry `mode = 'drill'`; `mode_of` below maps them onto PARAGRAPH
+    so History renders them. Stored rows are never rewritten.
     """
 
-    DRILL = "drill"
     PARAGRAPH = "paragraph"
     UNSCRIPTED = "unscripted"
+
+
+# What a stored `mode` string meant, for values the enum no longer has. `drill` was scripted
+# single-shot; a legacy row is a scripted row. Anything unrecognised is read as scripted too:
+# an unreadable history row is worse than one shown under the wrong-but-adjacent label.
+_LEGACY_MODES: dict[str, Mode] = {"drill": Mode.PARAGRAPH}
+
+# Exported so `db._mode_group` can build a History filter that catches legacy rows without
+# hard-coding the same list a second time and letting the two drift.
+LEGACY_MODE_NAMES: tuple[str, ...] = tuple(_LEGACY_MODES)
+
+
+def mode_of(value: str | Mode | None) -> Mode:
+    """The `Mode` a stored `attempts.mode` string names, legacy values included.
+
+    Read history through this, never through `Mode(value)` — that raises on `'drill'` and
+    takes the whole History page down with it.
+    """
+    if isinstance(value, Mode):
+        return value
+    text = str(value or "").strip().lower()
+    try:
+        return Mode(text)
+    except ValueError:
+        return _LEGACY_MODES.get(text, Mode.PARAGRAPH)
 
 
 # --- Colour thresholds -------------------------------------------------------------------
@@ -126,45 +156,6 @@ def azure_score_band(score: float | None) -> AzureBand:
     return AzureBand.EXCELLENT
 
 
-# --- Perception-training conventions -------------------------------------------------------
-# Like WORD_RED/WORD_AMBER above, these are cut points THIS PROJECT chose. They are NOT
-# values Azure defines, and they are not fixed by any published training protocol either:
-# the HVPT literature varies block length and criterion from study to study, so these are a
-# defensible reading of it rather than a citation. Kept here so there is exactly one place
-# to retune them.
-PERCEPTION_BLOCK_TRIALS = 20  # a block short enough to do daily without dreading it
-PERCEPTION_REVIEW_TRIALS = 10  # a spaced re-check is a spot check, not a full block
-PERCEPTION_GRADUATE_ACCURACY = 0.90
-PERCEPTION_GRADUATE_BLOCKS = 2  # sustained across two, so one lucky block cannot graduate
-PERCEPTION_REGRESS_ACCURACY = 0.75  # a review below this returns the item to rotation
-
-# At most three active targets, because a target set you cannot hold in your head while
-# speaking is not a target set.
-MAX_ACTIVE_TARGETS = 3
-
-# Widening gaps for a graduated item. A graduated contrast that is never re-tested is an
-# unverified claim; the last interval is the point past which it stops being re-checked.
-REVIEW_INTERVAL_DAYS = (3, 7, 21, 60)
-
-# How many separate attempts a substitution or a weak syllable has to appear in before the
-# queue will promote it. One bad reading is not evidence of a pattern.
-RECUR_ATTEMPTS = 2
-
-# How often a shadowing session comes back. Unlike REVIEW_INTERVAL_DAYS this gap never widens:
-# shadowing does not graduate, so there is nothing for a widening schedule to be confident
-# about. Three days leaves room for cold reads in between, which is what the shadowed-versus-
-# cold comparison needs to have anything to compare. A tuning value, kept here to be retuned.
-SHADOW_INTERVAL_DAYS = 3
-
-# Below this many minimal pairs a contrast cannot fill a block with enough item variety to
-# be worth calling training, so it is not offered. `phoneme_reference` has eleven contrasts
-# with no pairs at all, which are honest empties rather than gaps to paper over.
-MIN_PAIRS_FOR_BLOCK = 3
-
-# NOTE: the chance floor is deliberately NOT here. It is arithmetic, not a threshold —
-# `perception_trainer.chance_floor` derives it from the number of alternatives on the trial.
-
-
 # How many times a paid call may be sent before giving up. Named here because the budget
 # guard has to price the worst case (every attempt reaches the provider and is charged),
 # not the lucky case, and the guard and the retry loop must not drift apart.
@@ -187,16 +178,11 @@ _DEFAULTS: dict[str, str] = {
     "GEMINI_MODEL": "gemini-3.6-flash",
     "AZURE_TTS_VOICE": "en-US-BrianNeural",
     "DB_PATH": "./data/coach.db",
+    # The floor, and no ceiling. Per-mode maximums were removed on 2026-08-25: a read should
+    # be as long as the thing being read. Nothing is lost by removing them — a recording is
+    # billed for its own seconds either way, and `budget.py` meters what was actually spent.
     "MIN_DURATION_SECONDS": "1.5",
-    "MAX_DURATION_SECONDS_DRILL": "30",
-    # 180, not 120, because of shadowing: the benchmark passage runs 61.8 s through Azure TTS
-    # at the normal rate (measured, `tests/fixtures/benchmark_tts_baseline.json`) and ~95 s at
-    # the slow rate, and a shadowed read starts recording before the model and stops after it.
-    # A read is billed for its own seconds either way, so the ceiling costs nothing unspent.
-    "MAX_DURATION_SECONDS_PARAGRAPH": "180",
-    "MAX_DURATION_SECONDS_UNSCRIPTED": "300",
     "UNSCRIPTED_TWO_PASS": "true",
-    "UNSCRIPTED_CONTENT_PROBE": "false",
     "OFFLINE_MODE": "false",
     "MONTHLY_BUDGET_USD": "0.00",
     "AZURE_TIER_CONFIRMED_F0": "false",
@@ -207,26 +193,14 @@ _DEFAULTS: dict[str, str] = {
     "AZURE_TTS_USD_PER_MILLION_CHARS": "16.00",
     "GEMINI_USD_PER_MTOK_IN": "0.00",
     "GEMINI_USD_PER_MTOK_OUT": "0.00",
-    # --- Accent measurement (v0.10.0) --------------------------------------------------
+    # --- Stored recordings -----------------------------------------------------------
     # Keep every recording. `projectbrief.md` permits this — the "no stored audio" rule was
-    # lifted on 2026-08-19 — and the accent measurement is the first thing that needs it: a
-    # normalisation scheme or a reference table changing must be a re-derivation over stored
-    # audio, never a request that the passage be read again. Roughly 2.9 MB per 90-second
-    # read, so a hundred reads is about 290 MB. Set false to go back to deleting.
+    # lifted on 2026-08-19 — and two surfaces need it: History replays an old attempt months
+    # later, and `audio_utils.slice_wav` cuts one word out of it at Azure's own offsets so
+    # "how I said it" can sit beside the native rendering. Roughly 2.9 MB per 90-second read,
+    # so a hundred reads is about 290 MB. Set false to go back to deleting.
     "KEEP_AUDIO": "true",
     "AUDIO_DIR": "./audio/attempts",
-    # Which published reference set the numbers are scored against. **No default on purpose.**
-    # Formants scale with vocal tract length, the men's and women's tables are far apart, and
-    # an average of the two describes nobody — so this is refused until it is set, rather than
-    # guessed from f0 and quietly wrong for every reading afterwards.
-    "GA_REFERENCE_SET": "",
-    # Overrides the ceiling stored on the baseline. Normally empty: the ceiling is established
-    # once by the calibration sweep and then held still, or later readings stop being
-    # comparable to the baseline they are measured against.
-    "LPC_CEILING_HZ": "",
-    # How far apart the two calibration reads must be. Their displacement IS the measurement
-    # noise floor, and two back-to-back reads measure only the microphone.
-    "CALIBRATION_GAP_MINUTES": "10",
 }
 
 _TRUTHY = {"1", "true", "yes", "on"}
@@ -325,20 +299,16 @@ def check_required() -> list[str]:
     return [name for name in _REQUIRED_VARS if not get(name)]
 
 
-def max_duration_seconds(mode: Mode) -> float:
-    return get_float(f"MAX_DURATION_SECONDS_{mode.value.upper()}")
-
-
 def attempt_hash(reference_text: str, audio_bytes: bytes, mode: Mode) -> str:
     """SHA-256 over the mode, the reference text and the audio — the session cache key.
 
-    `mode` has to be part of the digest: the same reference text read into the same
-    recording is a legitimate thing to assess in Drill and then in Paragraph, and each
-    goes through a different Azure code path (single-shot versus continuous) with a
-    different result shape. Without `mode` in the key, switching modes and re-assessing
-    identical (text, audio) would hit the other mode's cached entry and silently show a
-    stale result — no error, no re-assessment, and a `CachedAttempt.mode` that disagrees
-    with what is on screen.
+    `mode` has to be part of the digest: the same recording is a legitimate thing to assess
+    scripted and then unscripted, and the two go through different Azure code paths — one
+    assesses against the typed reference, the other transcribes first and assesses against
+    the transcript — producing different result shapes. Without `mode` in the key, switching
+    modes and re-assessing identical (text, audio) would hit the other mode's cached entry
+    and silently show a stale result — no error, no re-assessment, and a `CachedAttempt.mode`
+    that disagrees with what is on screen.
     """
     digest = hashlib.sha256()
     digest.update(mode.value.encode("utf-8"))
@@ -351,6 +321,19 @@ def attempt_hash(reference_text: str, audio_bytes: bytes, mode: Mode) -> str:
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def truncate(text: str, limit: int) -> str:
+    """`text` cut to `limit` characters on a word boundary, with an ellipsis when it was cut.
+
+    Used for the History row labels: a 900-word paragraph and a 900-word unscripted
+    transcript are both legitimate, and neither is a list entry.
+    """
+    cleaned = " ".join((text or "").split())
+    if len(cleaned) <= limit:
+        return cleaned
+    cut = cleaned[:limit].rsplit(" ", 1)[0]
+    return f"{cut or cleaned[:limit]}…"
 
 
 def normalise_words(text: str) -> list[str]:

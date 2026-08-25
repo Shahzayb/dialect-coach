@@ -110,7 +110,7 @@ def test_a_cancel_set_before_the_call_never_reaches_azure() -> None:
     event.set()
 
     with pytest.raises(sa.Cancelled) as caught:
-        sa.recognise("unused.wav", REFERENCE, Mode.DRILL, cancel_event=event)
+        sa.recognise("unused.wav", REFERENCE, Mode.PARAGRAPH, cancel_event=event)
 
     # The distinction that drives the message: nothing was sent, so nothing was spent.
     assert caught.value.reached_azure is False
@@ -175,7 +175,9 @@ def test_a_cancelled_run_writes_no_attempt_row(tmp_path, monkeypatch) -> None:
     event = threading.Event()
     event.set()
 
-    outcome = app_module.run_assessment_job(conn, b"RIFFfake", 5.0, REFERENCE, Mode.DRILL, event)
+    outcome = app_module.run_assessment_job(
+        conn, b"RIFFfake", 5.0, REFERENCE, Mode.PARAGRAPH, event
+    )
 
     assert outcome.cancelled is True
     assert conn.execute("SELECT COUNT(*) FROM attempts").fetchone()[0] == 0
@@ -189,7 +191,7 @@ def test_a_cancelled_run_leaves_the_meter_at_zero(tmp_path) -> None:
     event = threading.Event()
     event.set()
 
-    app_module.run_assessment_job(conn, b"RIFFfake", 12.0, REFERENCE, Mode.DRILL, event)
+    app_module.run_assessment_job(conn, b"RIFFfake", 12.0, REFERENCE, Mode.PARAGRAPH, event)
 
     assert db.monthly_stt_seconds(conn) == 0.0
 
@@ -213,7 +215,9 @@ def test_a_result_that_arrives_after_a_stop_is_discarded(tmp_path, monkeypatch) 
 
     monkeypatch.setattr(sa, "analyse", analyse_then_stop)
 
-    outcome = app_module.run_assessment_job(conn, b"RIFFfake", 5.0, REFERENCE, Mode.DRILL, event)
+    outcome = app_module.run_assessment_job(
+        conn, b"RIFFfake", 5.0, REFERENCE, Mode.PARAGRAPH, event
+    )
 
     assert outcome.cancelled is True
     assert outcome.assessment is None
@@ -238,7 +242,7 @@ def test_a_completed_run_does_write_its_row(tmp_path, monkeypatch) -> None:
     )
 
     outcome = app_module.run_assessment_job(
-        conn, b"RIFFfake", 5.0, REFERENCE, Mode.DRILL, threading.Event()
+        conn, b"RIFFfake", 5.0, REFERENCE, Mode.PARAGRAPH, threading.Event()
     )
 
     assert outcome.cancelled is False
@@ -256,7 +260,7 @@ def test_the_worker_never_raises_even_on_an_unexpected_bug(tmp_path, monkeypatch
     monkeypatch.setattr(sa, "analyse", explode)
 
     outcome = app_module.run_assessment_job(
-        conn, b"RIFFfake", 5.0, REFERENCE, Mode.DRILL, threading.Event()
+        conn, b"RIFFfake", 5.0, REFERENCE, Mode.PARAGRAPH, threading.Event()
     )
 
     assert outcome.error is not None
@@ -276,7 +280,7 @@ def test_a_worker_failure_is_returned_not_rendered(tmp_path, monkeypatch) -> Non
     )
 
     outcome = app_module.run_assessment_job(
-        conn, b"RIFFfake", 5.0, REFERENCE, Mode.DRILL, threading.Event()
+        conn, b"RIFFfake", 5.0, REFERENCE, Mode.PARAGRAPH, threading.Event()
     )
 
     assert outcome.error is not None

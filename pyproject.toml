@@ -79,16 +79,8 @@ check_untyped_defs = true
 # Third-party packages that ship no type information. Each is a native or data-science SDK
 # whose absence of stubs is upstream's decision, not something this project can fix.
 [[tool.mypy.overrides]]
-module = ["azure.*", "pydub.*", "pandas.*", "parselmouth.*"]
+module = ["azure.*", "pydub.*"]
 ignore_missing_imports = true
-
-# progress_view builds altair charts, and altair's builders compose into a union
-# (LayerChart | FacetChart) whose chained methods mypy widens to Any. warn_return_any fires
-# on all six chart builders and on nothing else in the module; silencing it would take six
-# casts asserting a concrete type altair itself does not commit to.
-[[tool.mypy.overrides]]
-module = ["progress_view"]
-warn_return_any = false
 
 # The strict tier: every module under src/, listed one by one because they are flat modules
 # with no common package prefix for mypy to match on. That is a feature — a new module has to
@@ -105,22 +97,11 @@ module = [
     "budget",
     "speech_analyzer",
     "audio_utils",
-    "shadowing",
-    "ladder",
-    "ladder_reference",
-    "perception_trainer",
-    "practice_queue",
     "phoneme_reference",
     "tts",
-    "rhythm",
-    "acoustics",
-    "vowel_reference",
     "stress_lexicon",
-    "vowel_measure",
-    "accent_view",
     "fallback_coach",
     "ai_coach",
-    "progress_view",
     "app",
 ]
 disallow_untyped_defs = true

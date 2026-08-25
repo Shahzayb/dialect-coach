@@ -32,7 +32,7 @@ def conn() -> Iterator[sqlite3.Connection]:
 
 def add(connection: sqlite3.Connection, **overrides: Any) -> int:
     kwargs: dict[str, Any] = {
-        "mode": Mode.DRILL,
+        "mode": Mode.PARAGRAPH,
         "reference_text": "the thin man",
         "recognised_text": "the tin man",
         "audio_seconds": 12.0,
@@ -145,192 +145,150 @@ def test_a_newer_schema_version_is_refused(tmp_path) -> None:
         db.connect(path)
 
 
-# --- The practice queue ---------------------------------------------------------------------
-# The queue's whole promise is that it survives a restart. These run against a real file
-# rather than :memory: so "reconnect" means what it says.
+# --- The tables that outlived their features ---------------------------------------------------
+# `practice_targets`, `perception_trials`, `attempt_tags`, `attempt_content_scores`,
+# `speaker_baseline`, `vowel_measurements` and `native_renderings` lost their writers on
+# 2026-08-25. The DDL and the rows stay: they hold real recorded evidence — calibration reads,
+# answered perception trials — and dropping them is unrecoverable in a way that deleting the
+# code is not. These tests are what stops a later cleanup pass quietly removing them.
 
 
-def test_the_new_tables_appear_without_moving_the_schema_version(tmp_path) -> None:
-    """Additive, so an existing version-1 database gains them on the next connect."""
+def test_the_retired_tables_still_exist_so_their_rows_are_not_lost(tmp_path) -> None:
     path = tmp_path / "coach.db"
     conn = db.connect(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 1
     tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    assert {"practice_targets", "perception_trials"} <= tables
+    assert {
+        "practice_targets",
+        "perception_trials",
+        "attempt_tags",
+        "attempt_content_scores",
+        "speaker_baseline",
+        "vowel_measurements",
+        "native_renderings",
+    } <= tables
     conn.close()
 
 
-def test_a_target_and_its_due_date_survive_a_restart(tmp_path) -> None:
-    path = tmp_path / "coach.db"
-    conn = db.connect(path)
-    db.upsert_target(
-        conn,
-        item="/θ/ → /s/",
-        kind="contrast",
-        evidence={"attempts": 4},
-        next_due="2026-09-01T00:00:00Z",
-    )
-    conn.close()
-
-    reopened = db.connect(path)
-    rows = reopened.execute("SELECT * FROM practice_targets").fetchall()
-    assert len(rows) == 1
-    assert rows[0]["item"] == "/θ/ → /s/"
-    assert rows[0]["next_due"] == "2026-09-01T00:00:00Z"
-    assert rows[0]["state"] == "active"
-    assert json.loads(rows[0]["evidence"]) == {"attempts": 4}
-    reopened.close()
-
-
-def test_upserting_refreshes_evidence_without_resetting_the_schedule(tmp_path) -> None:
-    """Re-reading the same evidence is not a reason to un-graduate an item."""
+def test_the_schema_version_never_moved(tmp_path) -> None:
+    """Every table below the first is additive, so an existing v1 database gains them all."""
     conn = db.connect(tmp_path / "coach.db")
-    target_id = db.upsert_target(conn, item="/v/ → /w/", kind="contrast", evidence={"attempts": 2})
-    db.update_target(
-        conn, target_id, state="graduated", reviews_passed=2, next_due="2026-12-01T00:00:00Z"
-    )
-    again = db.upsert_target(conn, item="/v/ → /w/", kind="contrast", evidence={"attempts": 5})
-    assert again == target_id
-
-    row = db.targets(conn)[0]
-    assert row["state"] == "graduated"
-    assert row["reviews_passed"] == 2
-    assert row["next_due"] == "2026-12-01T00:00:00Z"
-    assert json.loads(row["evidence"])["attempts"] == 5
-
-
-def test_trials_are_stored_with_their_own_chance_floor(tmp_path) -> None:
-    """`alternatives` is a fact on the row, not an assumption in whatever reads it."""
-    conn = db.connect(tmp_path / "coach.db")
-    target_id = db.upsert_target(conn, item="/θ/ → /s/", kind="contrast", evidence={})
-    db.record_trial(
-        conn,
-        block_id="b1",
-        target_id=target_id,
-        item="/θ/ → /s/",
-        word="think",
-        voice="en-US-AvaNeural",
-        novel=True,
-        alternatives=2,
-        answered="sink",
-        correct=False,
-    )
-    row = db.all_trials(conn)[0]
-    assert row["alternatives"] == 2
-    assert row["correct"] == 0 and row["novel"] == 1 and row["review"] == 0
-
-
-def test_heard_stimuli_reports_the_last_time_each_combination_played(tmp_path) -> None:
-    conn = db.connect(tmp_path / "coach.db")
-    for when in ("2026-08-01T00:00:00Z", "2026-08-09T00:00:00Z"):
-        db.record_trial(
-            conn,
-            block_id="b",
-            target_id=None,
-            item="/θ/ → /s/",
-            word="think",
-            voice="en-US-AvaNeural",
-            novel=False,
-            alternatives=2,
-            answered="think",
-            correct=True,
-            created_at=when,
-        )
-    heard = db.heard_stimuli(conn, "/θ/ → /s/")
-    assert heard[("think", "en-US-AvaNeural")] == "2026-08-09T00:00:00Z"
-
-
-def test_trials_outlive_the_target_they_belonged_to(tmp_path) -> None:
-    """The item string is denormalised precisely so history is not lost with a row."""
-    conn = db.connect(tmp_path / "coach.db")
-    target_id = db.upsert_target(conn, item="/θ/ → /s/", kind="contrast", evidence={})
-    db.record_trial(
-        conn,
-        block_id="b1",
-        target_id=target_id,
-        item="/θ/ → /s/",
-        word="think",
-        voice="v",
-        novel=True,
-        alternatives=2,
-        answered="think",
-        correct=True,
-    )
-    db.remove_target(conn, target_id)
-    assert db.targets(conn) == []
-    assert len(db.trials_for(conn, "/θ/ → /s/")) == 1
-
-
-def test_the_queue_fingerprint_moves_when_anything_it_covers_does(tmp_path) -> None:
-    conn = db.connect(tmp_path / "coach.db")
-    start = db.queue_fingerprint(conn)
-    target_id = db.upsert_target(conn, item="x", kind="contrast", evidence={})
-    after_target = db.queue_fingerprint(conn)
-    assert after_target != start
-    db.record_trial(
-        conn,
-        block_id="b",
-        target_id=target_id,
-        item="x",
-        word="w",
-        voice="v",
-        novel=True,
-        alternatives=2,
-        answered="w",
-        correct=True,
-    )
-    assert db.queue_fingerprint(conn) != after_target
-
-
-# --- Attempt tags -----------------------------------------------------------------------------
-# How an attempt was produced, when it was produced in some way other than reading the text
-# cold. A separate table rather than a column: `attempts` is created with CREATE TABLE IF NOT
-# EXISTS, so a column would need a real ALTER TABLE and `_migrate` has no upgrade path.
-
-
-def test_tagging_an_attempt_is_readable_back(conn: sqlite3.Connection) -> None:
-    attempt_id = add(conn)
-    db.tag_attempt(conn, attempt_id, db.SHADOW_TAG)
-    assert db.tags_for(conn, attempt_id) == {db.SHADOW_TAG}
-
-
-def test_an_untagged_attempt_has_no_tags(conn: sqlite3.Connection) -> None:
-    assert db.tags_for(conn, add(conn)) == set()
-
-
-def test_tagging_twice_is_a_no_op(conn: sqlite3.Connection) -> None:
-    """Streamlit re-runs the script constantly; a second write must not raise or duplicate."""
-    attempt_id = add(conn)
-    db.tag_attempt(conn, attempt_id, db.SHADOW_TAG)
-    db.tag_attempt(conn, attempt_id, db.SHADOW_TAG)
-    assert db.tags_for(conn, attempt_id) == {db.SHADOW_TAG}
-
-
-def test_the_tag_table_did_not_move_the_schema_version(conn: sqlite3.Connection) -> None:
-    """Additive, exactly like the v0.7.0 queue tables: an existing v1 database gains it on the
-    next connect() and `user_version` never moves."""
     assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION == 1
+    conn.close()
 
 
-def test_the_series_reader_carries_the_shadow_flag(conn: sqlite3.Connection) -> None:
-    cold = add(conn, created_at="2026-08-01T08:00:00Z")
-    shadowed = add(conn, created_at="2026-08-02T08:00:00Z")
-    db.tag_attempt(conn, shadowed, db.SHADOW_TAG)
-
-    by_id = {row["id"]: row for row in db.attempt_series(conn)}
-    assert not by_id[cold]["shadowed"]
-    assert by_id[shadowed]["shadowed"]
+# --- The History page --------------------------------------------------------------------------
 
 
-def test_the_payload_reader_carries_the_shadow_flag_too(conn: sqlite3.Connection) -> None:
-    """Both readers, or the rhythm chart and the score chart would disagree about one row."""
-    shadowed = add(conn)
-    db.tag_attempt(conn, shadowed, db.SHADOW_TAG)
-    assert db.attempt_payloads(conn)[0]["shadowed"]
+def test_a_page_is_newest_first_and_offset_walks_backwards(conn: sqlite3.Connection) -> None:
+    ids = [add(conn, created_at=f"2026-08-0{n}T08:00:00Z") for n in range(1, 6)]
+    first = [row["id"] for row in db.attempt_page(conn, limit=2)]
+    second = [row["id"] for row in db.attempt_page(conn, limit=2, offset=2)]
+    assert first == [ids[4], ids[3]]
+    assert second == [ids[2], ids[1]]
 
 
-def test_a_tag_never_reaches_the_meter(conn: sqlite3.Connection) -> None:
-    """A shadowed read is real billable audio and stays on the meter like any other."""
-    attempt_id = add(conn, audio_seconds=70.0, created_at=f"{db.month_prefix()}-05T08:00:00Z")
-    db.tag_attempt(conn, attempt_id, db.SHADOW_TAG)
-    assert db.monthly_stt_seconds(conn) == pytest.approx(70.0)
+def test_a_page_omits_the_raw_json_columns(conn: sqlite3.Connection) -> None:
+    """A page of twelve would otherwise carry twelve verbatim Azure payloads."""
+    add(conn)
+    row = db.attempt_page(conn, limit=1)[0]
+    assert "azure_raw_json" not in row
+    assert "gemini_raw_json" not in row
+
+
+def test_offline_replays_appear_in_history(conn: sqlite3.Connection) -> None:
+    """Unlike the progress readers this replaced: a fixture replay is a real recorded row."""
+    add(conn, offline=True)
+    assert db.attempt_count(conn) == 1
+    assert len(db.attempt_page(conn, limit=10)) == 1
+
+
+def test_the_mode_filter_catches_legacy_drill_rows(conn: sqlite3.Connection) -> None:
+    """Rows written before 2026-08-25 carry `mode = 'drill'` and must not be stranded."""
+    scripted = add(conn)
+    unscripted = add(conn, mode=Mode.UNSCRIPTED)
+    legacy = add(conn)
+    conn.execute("UPDATE attempts SET mode = 'drill' WHERE id = ?", (legacy,))
+    conn.commit()
+
+    ids = {row["id"] for row in db.attempt_page(conn, limit=10, mode=Mode.PARAGRAPH.value)}
+    assert ids == {scripted, legacy}
+    assert db.attempt_count(conn, mode=Mode.PARAGRAPH.value) == 2
+    assert db.attempt_count(conn, mode=Mode.UNSCRIPTED.value) == 1
+    assert {row["id"] for row in db.attempt_page(conn, limit=10, mode=Mode.UNSCRIPTED.value)} == {
+        unscripted
+    }
+
+
+def test_the_count_matches_what_the_pages_actually_walk(conn: sqlite3.Connection) -> None:
+    for _ in range(7):
+        add(conn)
+    total = db.attempt_count(conn)
+    walked: list[int] = []
+    offset = 0
+    while True:
+        page = db.attempt_page(conn, limit=3, offset=offset)
+        if not page:
+            break
+        walked.extend(row["id"] for row in page)
+        offset += 3
+    assert len(walked) == total == 7
+
+
+def test_deleting_an_attempt_takes_its_cascaded_rows_with_it(conn: sqlite3.Connection) -> None:
+    attempt_id = add(conn)
+    db.record_audio(
+        conn, attempt_id, path="/tmp/x.wav", sha256="h", size_bytes=1, sample_rate=16_000
+    )
+    db.attach_annotation(conn, attempt_id, raw={"words": []})
+
+    path = db.delete_attempt(conn, attempt_id)
+
+    assert path == "/tmp/x.wav"
+    assert db.get_attempt(conn, attempt_id) is None
+    assert db.audio_for(conn, attempt_id) is None
+    assert db.annotation_for(conn, attempt_id) is None
+
+
+def test_deleting_an_attempt_without_a_recording_reports_no_path(
+    conn: sqlite3.Connection,
+) -> None:
+    """The caller unlinks the file, so None has to mean "there is nothing to unlink"."""
+    assert db.delete_attempt(conn, add(conn)) is None
+
+
+# --- The prosody annotation ---------------------------------------------------------------------
+
+
+def test_an_annotation_round_trips(conn: sqlite3.Connection) -> None:
+    attempt_id = add(conn)
+    db.attach_annotation(conn, attempt_id, raw={"words": [{"word": "hello"}]})
+    assert db.annotation_for(conn, attempt_id) == {"words": [{"word": "hello"}]}
+
+
+def test_re_annotating_replaces_rather_than_accumulating(conn: sqlite3.Connection) -> None:
+    """One right answer per passage; the newest model output is the one worth keeping."""
+    attempt_id = add(conn)
+    db.attach_annotation(conn, attempt_id, raw={"words": [], "summary": "first"})
+    db.attach_annotation(conn, attempt_id, raw={"words": [], "summary": "second"})
+    stored = db.annotation_for(conn, attempt_id)
+    assert stored is not None
+    assert stored["summary"] == "second"
+    rows = conn.execute("SELECT COUNT(*) FROM attempt_annotations").fetchone()[0]
+    assert rows == 1
+
+
+def test_an_attempt_with_no_annotation_reads_as_none(conn: sqlite3.Connection) -> None:
+    assert db.annotation_for(conn, add(conn)) is None
+
+
+def test_an_unreadable_stored_annotation_is_none_rather_than_a_crash(
+    conn: sqlite3.Connection,
+) -> None:
+    """A bad row must not take the History page down with it."""
+    attempt_id = add(conn)
+    conn.execute(
+        "INSERT INTO attempt_annotations (attempt_id, raw_json, created_at) VALUES (?, ?, ?)",
+        (attempt_id, "{not json", db.utc_now_iso()),
+    )
+    conn.commit()
+    assert db.annotation_for(conn, attempt_id) is None

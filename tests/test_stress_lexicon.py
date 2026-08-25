@@ -7,14 +7,12 @@ import json
 import pytest
 
 import phoneme_reference
-import progress_view
 import speech_analyzer
 import stress_lexicon
-import utils
 from utils import Mode
 
 FIXTURE_MODES = {
-    "sample_azure_response.json": Mode.DRILL,
+    "sample_azure_response.json": Mode.PARAGRAPH,
     "sample_azure_continuous.json": Mode.PARAGRAPH,
     "bad_delivery_capture.json": Mode.PARAGRAPH,
 }
@@ -76,30 +74,11 @@ def test_every_vowel_has_a_wells_keyword_and_it_agrees_with_its_label() -> None:
 
 
 # --- Coverage, measured rather than assumed --------------------------------------------------
-
-
-def test_the_dictionary_covers_every_word_of_the_calibration_passage() -> None:
-    """The passage is read twice to calibrate, so a miss here is a hole in the baseline."""
-    words = utils.normalise_words(progress_view.BENCHMARK_PASSAGE)
-    missing = sorted({word for word in words if not stress_lexicon.variants(word)})
-    assert missing == [], f"not in CMUdict: {missing}"
-
-
-def test_the_passage_yields_plenty_of_unstressed_vowels_to_build_a_schwa_centroid() -> None:
-    """Reduction is measured against the speaker's own schwa, so the tokens have to exist."""
-    total = reduced = 0
-    for word in utils.normalise_words(progress_view.BENCHMARK_PASSAGE):
-        listed = stress_lexicon.variants(word)
-        if not listed:
-            continue
-        for phone in listed[0]:
-            stress = phoneme_reference.arpabet_stress(phone)
-            if stress is None:
-                continue
-            total += 1
-            reduced += stress == stress_lexicon.REDUCED
-    assert total > 200, total
-    assert reduced > 50, f"only {reduced} unstressed vowels in the calibration passage"
+# The two passage-coverage tests that lived here were deleted on 2026-08-25 with the benchmark
+# and the calibration reads they measured. They asserted that CMUdict covered every word of
+# `progress_view.BENCHMARK_PASSAGE` and yielded enough unstressed vowels for a schwa centroid;
+# neither the passage nor the centroid exists any more, and retargeting them at an arbitrary
+# preset would have been a new claim wearing an old test's name.
 
 
 @pytest.mark.parametrize("name", sorted(FIXTURE_MODES))

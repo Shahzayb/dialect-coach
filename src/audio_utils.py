@@ -1,4 +1,4 @@
-"""Audio conversion, duration validation, temp-file lifecycle, and kept recordings.
+"""Audio conversion, duration validation, span slicing, temp files, and kept recordings.
 
 Azure's `AudioConfig(filename=...)` needs a real path on disk, which is why the temp file in
 `temp_wav` exists. It is deleted in a `finally` block so it goes even when the call it was
@@ -7,11 +7,11 @@ created for raises mid-flight.
 **`keep` is a separate thing and a newer one.** Until v0.10.0 this module deleted every
 recording and said so in a comment that called it a project constraint. That stopped being
 true on 2026-08-19, when the "no stored audio" rule was lifted: recordings may be kept
-locally, never committed, with the path and hash in the database. The accent measurement is
-the first feature that needs it — not to defer the measurement, which still runs inside the
-assessment request while the audio is in memory, but so that a changed normalisation scheme
-or reference table is a re-derivation over stored audio rather than a request that the
-calibration passage be read again.
+locally, never committed, with the path and hash in the database. Two things need it: the
+History page, which replays an old attempt's recording months later, and `slice_wav`, which
+cuts one word out of that recording at Azure's own offsets so "how I said it" can sit beside
+the native rendering. A stored recording is what makes both a re-read of existing bytes
+rather than a request that the passage be read again.
 
 `temp_wav` still deletes, because a temp file is still a temp file.
 """
@@ -22,14 +22,14 @@ import io
 import logging
 import os
 import tempfile
-from collections.abc import Iterator, Sequence
+import wave
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
 from pydub import AudioSegment
 
 import utils
-from utils import Mode
 
 logger = logging.getLogger(__name__)
 
@@ -84,24 +84,79 @@ def duration_seconds(wav_bytes: bytes) -> float:
     return len(segment) / 1000.0
 
 
-def validate_duration(seconds: float, mode: Mode) -> None:
-    """Reject audio that is too short or too long for `mode`, before any API call.
+def validate_duration(seconds: float) -> None:
+    """Reject audio that is too short to assess, before any API call.
 
-    Azure returns confusing errors on near-silent or sub-second audio, and the per-mode
-    maximum is the client-side half of the quota guard: seconds sent are seconds spent.
+    **There is no maximum any more.** Per-mode ceilings were removed on 2026-08-25: a read
+    should be as long as the thing being read, and the client-side half of the quota guard
+    was never what stood between this project and a bill — `budget.py` and an F0 resource
+    that physically cannot bill are. What survives is the floor, because Azure returns
+    confusing errors on near-silent or sub-second audio and a 0.2 s recording is a misclick.
     """
     minimum = utils.get_float("MIN_DURATION_SECONDS")
-    maximum = utils.max_duration_seconds(mode)
-
     if seconds < minimum:
         raise AudioError(
             f"That recording is {seconds:.1f}s — too short to assess. Record at least {minimum:g}s."
         )
-    if seconds > maximum:
-        raise AudioError(
-            f"That recording is {seconds:.1f}s, over the {maximum:g}s limit for "
-            f"{mode.value} mode. Shorten it, or switch mode."
-        )
+
+
+# A cut never starts or ends exactly on a phoneme boundary in practice, and a formant
+# transition carries the identity of the sound before it. This much audio is kept either side
+# so a sliced word does not begin mid-burst — small enough not to pull in a neighbouring
+# vowel at connected-speech rates, where a short word runs about 200 ms.
+PAD_S = 0.02
+
+
+def _framerate(wav_bytes: bytes) -> int:
+    """The recording's sample rate, read from its own header rather than assumed."""
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as source:
+            return int(source.getframerate())
+    except (wave.Error, EOFError) as exc:
+        raise AudioError("That recording could not be read as WAV audio.") from exc
+
+
+def slice_wav(wav_bytes: bytes, start_s: float, end_s: float, *, pad_s: float = PAD_S) -> bytes:
+    """The audio between `start_s` and `end_s`, as its own WAV.
+
+    This is what puts "how I said it" next to the native rendering on a flagged word: the
+    span comes from Azure's own word offsets, so the clip is the recogniser's idea of that
+    word rather than a guess at where it fell.
+
+    Plain PCM frame arithmetic through the standard library, deliberately. A span for
+    LISTENING does not need a signal-processing library, and Praat's `Extract part` returns
+    the WHOLE sound on an empty range — a trap that spliced an entire recording into a clip
+    once already in this project's history. Frame slicing cannot do that.
+
+    Clamped to the recording rather than raising at the edges — a first-word span padded
+    backwards starts before zero, and that is ordinary, not an error.
+    """
+    if end_s <= start_s:
+        raise AudioError("That span has no duration.")
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as source:
+            params = source.getparams()
+            frames = source.readframes(params.nframes)
+    except (wave.Error, EOFError) as exc:
+        raise AudioError("That recording could not be read as WAV audio.") from exc
+
+    rate = params.framerate
+    width = params.sampwidth * params.nchannels
+    total = len(frames) // width
+
+    first = max(0, int((start_s - pad_s) * rate))
+    last = min(total, int((end_s + pad_s) * rate))
+    if last <= first:
+        raise AudioError("That span falls outside the recording.")
+
+    cut = frames[first * width : last * width]
+    out = io.BytesIO()
+    with wave.open(out, "wb") as sink:
+        sink.setnchannels(params.nchannels)
+        sink.setsampwidth(params.sampwidth)
+        sink.setframerate(rate)
+        sink.writeframes(cut)
+    return out.getvalue()
 
 
 @contextmanager
@@ -127,49 +182,12 @@ def temp_wav(wav_bytes: bytes) -> Iterator[str]:
             logger.warning("Could not remove temp audio file", exc_info=True)
 
 
-def prepare(data: bytes, mode: Mode) -> tuple[bytes, float]:
+def prepare(data: bytes) -> tuple[bytes, float]:
     """Convert, measure, and validate in one step. Returns (wav_bytes, seconds)."""
     wav_bytes = to_pcm_wav(data)
     seconds = duration_seconds(wav_bytes)
-    validate_duration(seconds, mode)
+    validate_duration(seconds)
     return wav_bytes, seconds
-
-
-def echo_track(clips: Sequence[bytes], *, tail_ms: int = 0) -> bytes:
-    """Concatenate synthesised clips, each followed by a silence as long as itself.
-
-    The shadowing warm-up: the model says a phrase, then leaves exactly enough room to say it
-    back. The gap is derived from the clip rather than fixed, because a fixed pause is either
-    too short for the long sentences or dead air after the short ones — and a gap that runs
-    out mid-phrase teaches the reader to rush, which is the opposite of the point.
-
-    Every clip is resampled to the assessment format on the way in. Azure's synthesiser
-    returns 24 kHz mono PCM while `to_pcm_wav` targets 16 kHz, and `AudioSegment` concatenation
-    silently keeps the *first* segment's frame rate — so a mismatch would not raise, it would
-    play the rest of the track at the wrong pitch.
-    """
-    if not clips:
-        raise AudioError("There is nothing to build an echo track from.")
-
-    track = AudioSegment.empty()
-    for index, clip in enumerate(clips):
-        try:
-            segment = AudioSegment.from_file(io.BytesIO(clip))
-        except Exception as exc:
-            logger.debug("pydub failed to decode echo clip %d", index, exc_info=True)
-            raise AudioError("One of the model clips could not be decoded.") from exc
-        segment = (
-            segment.set_frame_rate(TARGET_SAMPLE_RATE)
-            .set_sample_width(TARGET_SAMPLE_WIDTH)
-            .set_channels(TARGET_CHANNELS)
-        )
-        track += segment + AudioSegment.silent(
-            duration=len(segment) + tail_ms, frame_rate=TARGET_SAMPLE_RATE
-        )
-
-    buffer = io.BytesIO()
-    track.export(buffer, format="wav")
-    return buffer.getvalue()
 
 
 def kept_path(sha256: str) -> Path:

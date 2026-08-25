@@ -19,44 +19,21 @@ pydub==0.25.1
 # Local .env loading; on Hugging Face secrets arrive as environment variables instead.
 python-dotenv==1.2.3
 
-# The progress view's frames and chart specs. Both arrive transitively with streamlit, but
-# `progress_view.py` imports them directly, and a direct import deserves its own pin rather
-# than relying on whatever streamlit happens to resolve next month. Versions read out of the
-# built image on 2026-08-19, not recalled. (`numpy` was deliberately unpinned here until
-# v0.10.0, on the grounds that nothing imported it directly. `acoustics.py` now does, so it
-# is pinned below under the same rule that pinned these two.)
-pandas==3.0.5
-altair==6.2.2
+# pandas, altair, praat-parselmouth and numpy were pinned here until 2026-08-25 and were
+# removed with the features that imported them: the progress charts, the accent measurement
+# and the resynthesis. All four are recoverable at tag `v0.12.0-full`. numpy still arrives
+# transitively with streamlit; nothing in src/ imports it, so it gets no pin under this
+# file's own rule that a pin follows a direct import.
 
 # Structured-output schemas for the coaching model.
 pydantic==2.13.4
 
-# Formant, F0 and intensity analysis: Praat, wrapped. `acoustics.py` is the only module that
-# imports it. Verified against PyPI 2026-08-20 — 0.4.7 is the latest, and it publishes NO
-# linux-aarch64 wheel at any Python version, so on this arm64 container pip builds it from the
-# sdist. That compile is why the Dockerfile is multi-stage; see the comment at the top of it.
-#
-# Chosen over scipy-plus-hand-rolled-LPC for one reason that is not accuracy: parselmouth also
-# reaches Praat's Manipulation machinery (PSOLA resynthesis, PitchTier replacement, DurationTier
-# time-scaling), which v0.11.0's modified-self-voice surface is built on. scipy analyses and
-# cannot resynthesise. NOTE for that chunk: those are NOT bound as typed Python classes — the
-# bindings ship Formant/Pitch/Intensity/Sound and no Manipulation — so v0.11.0 goes through the
-# untyped `parselmouth.praat.call(...)`. Checked in the 0.4.7 sdist, not assumed.
-praat-parselmouth==0.4.7
-
 # Lexical stress. Azure returns syllable spans and scores but NO stress marks, so reduction and
 # stress placement are unmeasurable without a dictionary. Pure ARPABET data with 0/1/2 stress
 # digits — no nltk, no model download, no compiler, unlike g2p-en. Verified against PyPI
-# 2026-08-20. Coverage measured rather than assumed: 128/128 unique words of the benchmark
-# passage, and 100/101 words align against the committed Azure fixtures.
+# 2026-08-20. Coverage measured rather than assumed: 100/101 words align against the
+# committed Azure fixtures, asserted in tests/test_stress_lexicon.py.
 cmudict==1.1.3
-
-# Arrives transitively with pandas and with parselmouth, but `acoustics.py` imports it directly
-# to build and measure sample arrays — and this file's own rule is that a direct import deserves
-# its own pin rather than whatever a transitive dependency happens to resolve next month. This
-# is the same reasoning pandas and altair are pinned under. Version read out of the built image
-# on 2026-08-20, not recalled.
-numpy==2.5.2
 
 # Test runner. In the one manifest rather than a separate requirements-dev.txt: the image
 # is a local dev container now that hosting is not a goal, and a second manifest is a

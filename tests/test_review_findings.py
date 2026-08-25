@@ -1,9 +1,16 @@
-"""The eight confirmed code-review findings against the coaching layer.
+"""The confirmed code-review findings against the coaching layer.
 
 One test per finding, each written to fail against the code as it was released in v0.1.0.
 They are grouped here rather than scattered into the module test files because what they
 have in common is why they matter — each one is a way the coaching layer could quietly
 mislead or overspend — and keeping them together makes that legible.
+
+**Three of the original eight went on 2026-08-25.** Findings 1, 5&6 and 7 were about the
+Gemini *coaching* path — the always-returns-a-report fall-through, the anti-fabrication
+validator, and re-reading a stored `CoachingReport`. Gemini writes only the prosody
+annotation now, and the guarantees that replaced them are asserted where they now live:
+the word-sequence contract in `test_ai_coach`, and the coach's own never-raises path in
+`test_app`. The findings are recorded here rather than silently dropped.
 """
 
 from __future__ import annotations
@@ -14,7 +21,6 @@ import ai_coach
 import fallback_coach as fc
 import speech_analyzer as sa
 import utils
-from utils import Mode
 
 REFERENCE = "Thursday brought thunder and thick clouds."
 
@@ -49,34 +55,6 @@ def attempt() -> sa.Assessment:
 
 
 # --- 1. The "always returns a report" guarantee -------------------------------------------
-
-
-def test_a_broken_compaction_still_produces_a_report(attempt, monkeypatch) -> None:
-    """The guarantee has to hold on the free path too, not only Gemini's."""
-    monkeypatch.setattr(
-        fc,
-        "compact",
-        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("a bug in the compaction pipeline")),
-    )
-
-    result = ai_coach.coach(attempt, REFERENCE, Mode.DRILL)
-
-    assert result.source == fc.SOURCE_FALLBACK
-    assert result.report.overall_comment  # a real, renderable report
-    assert result.report.priority_fixes == []
-
-
-def test_a_broken_offline_build_still_produces_a_report(attempt, monkeypatch) -> None:
-    monkeypatch.setattr(
-        fc,
-        "build_from_compacted",
-        lambda *a, **k: (_ for _ in ()).throw(KeyError("observed_pairs")),
-    )
-
-    result = ai_coach.coach(attempt, REFERENCE, Mode.DRILL)
-
-    assert result.source == fc.SOURCE_FALLBACK
-    assert result.report.overall_comment
 
 
 def test_the_emergency_report_is_schema_valid_and_self_contained() -> None:
@@ -143,106 +121,13 @@ def test_builtin_transport_failures_are_still_transient() -> None:
     assert isinstance(ai_coach._classify(ConnectionError()), utils.TransientError)
 
 
-# --- 5 & 6. validated() ---------------------------------------------------------------------
-
-
-def _report(**overrides):
-    body = {
-        "overall_comment": "The /θ/ came out as /s/.",
-        "priority_fixes": [
-            {
-                "expected_phoneme": "θ",
-                "produced_phoneme": "s",
-                "affected_words": ["thursday"],
-                "why_it_matters": "A listener hears a different word.",
-                "articulation": "Tongue tip between the teeth.",
-                "minimal_pairs": [{"a": "thin", "b": "sin"}],
-            }
-        ],
-        "delivery_drills": [],
-        "stress_and_rhythm": {"issues": [], "drill": "Read it twice."},
-        "practice_plan": "Five minutes on thursday.",
-    }
-    body.update(overrides)
-    return fc.CoachingReport.model_validate(body)
-
-
-COMPACTED = {"observed_pairs": [["θ", "s"]]}
-
-
-def test_a_fabricated_phoneme_in_the_prose_rejects_the_report() -> None:
-    """The UI claims every unsupported sound was removed, so prose must be checked too."""
-    report = _report(practice_plan="Two minutes on /ð/ versus /z/, then read it back.")
-
-    assert ai_coach.validated(report, COMPACTED) is None
-
-
-def test_a_fabricated_phoneme_in_a_stress_issue_rejects_the_report() -> None:
-    report = _report(
-        stress_and_rhythm={
-            "issues": ["Your /ŋ/ endings are dropped."],
-            "drill": "Read it twice.",
-        }
-    )
-
-    assert ai_coach.validated(report, COMPACTED) is None
-
-
-def test_prose_naming_only_supported_sounds_survives() -> None:
-    report = _report(practice_plan="Two minutes on /θ/, holding it against /s/.")
-
-    checked = ai_coach.validated(report, COMPACTED)
-
-    assert checked is not None
-    assert len(checked.priority_fixes) == 1
-
-
-def test_fabricated_fixes_are_rejected_even_when_nothing_was_observed() -> None:
-    """The old guard only degraded correctly when observed_pairs was non-empty."""
-    report = _report()
-
-    assert ai_coach.validated(report, {"observed_pairs": []}) is None
-
-
-def test_a_report_with_no_fixes_and_no_evidence_is_still_usable() -> None:
-    """Claiming nothing when there is nothing to claim is a correct answer, not a failure."""
-    report = _report(priority_fixes=[], overall_comment="Nothing stood out.")
-
-    checked = ai_coach.validated(report, {"observed_pairs": []})
-
-    assert checked is not None
-    assert checked.priority_fixes == []
-
-
-# --- 7. Re-reading a stored row -------------------------------------------------------------
-
-
-def test_a_stored_flat_report_is_recoverable_under_the_gemini_source() -> None:
-    """coach() stores the flat report when the response will not serialise.
-
-    The row is still marked `gemini`, so re-reading it has to cope with either shape or the
-    report is silently lost.
-    """
-    flat = _report().model_dump()
-
-    recovered = ai_coach.report_from_raw(flat, fc.SOURCE_GEMINI)
-
-    assert recovered is not None
-    assert recovered.overall_comment == flat["overall_comment"]
-
-
-def test_a_stored_response_envelope_is_still_recoverable() -> None:
-    """The normal shape must keep working."""
-    envelope = {"candidates": [{"content": {"parts": [{"text": _report().model_dump_json()}]}}]}
-
-    recovered = ai_coach.report_from_raw(envelope, fc.SOURCE_GEMINI)
-
-    assert recovered is not None
-    assert recovered.priority_fixes[0].expected_phoneme == "θ"
-
-
-def test_an_unreadable_row_returns_none_rather_than_raising() -> None:
-    assert ai_coach.report_from_raw({"nonsense": True}, fc.SOURCE_GEMINI) is None
+# --- 5, 6 & 7. Gone with the coaching path ---------------------------------------------------
+# Findings 5 and 6 were `ai_coach.validated` refusing a report that named a phoneme Azure never
+# reported, in a fix or in the prose. Finding 7 was re-reading a stored `CoachingReport` out of
+# either the response envelope or the flat shape. Neither function exists in that form any more:
+# Gemini no longer writes coaching, and `fallback_coach` cannot fabricate a phoneme because it
+# only ever reads the ones in the payload. `ai_coach.validated` now checks the word sequence of
+# an annotation, and `test_ai_coach` asserts that contract in full.
 
 
 # --- 8. The practice-plan allocation --------------------------------------------------------

@@ -146,34 +146,44 @@ def test_local_diff_flags_insertions() -> None:
     assert [w["word"] for w in words if w["error_type"] == "Insertion"] == ["and"]
 
 
-def test_drill_mode_leaves_miscue_to_azure() -> None:
-    """Single-shot had enableMiscue on, so re-deriving it locally would double-count."""
+def test_scripted_mode_derives_miscue_locally_even_for_one_utterance() -> None:
+    """Continuous ignores enableMiscue, and continuous is the only path left.
+
+    Single-shot used to cover the one-utterance case and had Azure's own miscue detection.
+    It was removed on 2026-08-25 because `recognize_once_async` caps at roughly 15 s, so a
+    short reading now goes through the same diff as a long one.
+    """
     payloads = [utterance(SECOND, accuracy=90.0, words=["one"])]
-    _, _, words = sa.normalise(payloads, "one two three", Mode.DRILL)
-    assert all(w["error_source"] == "azure" for w in words)
-    assert not any(w["error_type"] == "Omission" for w in words)
+    _, _, words = sa.normalise(payloads, "one two three", Mode.PARAGRAPH)
+    omitted = [w["word"] for w in words if w["error_type"] == "Omission"]
+    assert omitted == ["two", "three"]
+    assert all(w["error_source"] == "local_diff" for w in words if w["error_type"] == "Omission")
 
 
 def test_normalise_rejects_an_empty_payload_list() -> None:
     with pytest.raises(sa.AssessmentError):
-        sa.normalise([], "one", Mode.DRILL)
+        sa.normalise([], "one", Mode.PARAGRAPH)
 
 
 # --- Assessment config -----------------------------------------------------------------------
 
 
-def test_miscue_is_on_for_drill_and_off_for_paragraph() -> None:
-    """enableMiscue is only honoured single-shot; True in continuous mode may be rejected."""
+def test_miscue_is_always_off_and_always_sent() -> None:
+    """Only honoured single-shot, and every path is continuous now.
+
+    Sent explicitly false rather than dropped: an absent key says nothing to the next reader
+    of a captured config, and True alongside continuous recognition may be rejected outright.
+    """
     import json
 
-    assert json.loads(sa.assessment_config_json("x", Mode.DRILL))["enableMiscue"] is True
-    assert json.loads(sa.assessment_config_json("x", Mode.PARAGRAPH))["enableMiscue"] is False
+    for mode in Mode:
+        assert json.loads(sa.assessment_config_json("x", mode))["enableMiscue"] is False
 
 
 def test_assessment_config_requests_prosody_ipa_and_nbest() -> None:
     import json
 
-    config = json.loads(sa.assessment_config_json("hello", Mode.DRILL))
+    config = json.loads(sa.assessment_config_json("hello", Mode.PARAGRAPH))
     assert config["enableProsodyAssessment"] is True  # else ProsodyScore never appears
     assert config["phonemeAlphabet"] == "IPA"
     assert config["nBestPhonemeCount"] == 5  # what was actually produced
