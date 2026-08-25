@@ -94,6 +94,16 @@ BAND_COLOURS: dict[Band, str] = {
     Band.NONE: "#8a8a8a",
 }
 
+# The same bands where the surface takes markdown rather than HTML — an expander label,
+# which cannot carry a styled span. Streamlit's `:colour[text]` accepts only its own named
+# colours, so these are the nearest names to the hex above rather than a second palette.
+BAND_LABEL_COLOURS: dict[Band, str] = {
+    Band.RED: "red",
+    Band.AMBER: "orange",
+    Band.GREEN: "green",
+    Band.NONE: "gray",
+}
+
 # Azure's own pron/accuracy/fluency/prosody bands (utils.AzureBand) — a different
 # convention from BAND_COLOURS above, which colours word/phoneme accuracy against this
 # project's own heuristics. LOW and FAIR intentionally reuse the same red/amber as
@@ -1527,49 +1537,52 @@ def render_azure_detail(word: dict[str, Any]) -> None:
         st.markdown("\n".join(rows))
 
 
+def word_card_label(word: dict[str, Any]) -> str:
+    """The whole diagnosis on one line: word, score, worst sound, what was wrong with it.
+
+    This is the collapsed card, so it carries everything a reader scans the list *for* — a
+    paragraph flags seventy words, and seventy expanded cards is several screens of scroll
+    before the delivery panel below them. Colour is Streamlit's named-colour markdown rather
+    than the hex in BAND_COLOURS, because an expander label is markdown and not HTML.
+    """
+    accuracy = word.get("accuracy")
+    score = f"{accuracy:.0f}" if isinstance(accuracy, (int, float)) else "not spoken"
+    colour = BAND_LABEL_COLOURS[utils.word_band(accuracy)]
+    parts = [f":{colour}[**{word.get('word') or ''}**] — {score}"]
+
+    if word.get("disfluency") == speech_analyzer.REPETITION:
+        # Said twice. The score is the stumble, not a sound — and the diff above already
+        # showed the repeat, so the two surfaces now tell the same story about one word.
+        parts.append("said twice — a stumble, not a sound to drill")
+    else:
+        summary = weakest_phoneme(word)
+        if summary:
+            parts.append(summary)
+
+    error_type = word.get("error_type") or "None"
+    if error_type != "None":
+        parts.append(f"{error_type} (flagged by {word.get('error_source') or 'azure'})")
+    parts.extend(DELIVERY_LABELS.get(f, f) for f in word.get("delivery_error_types") or [])
+    return " · ".join(parts)
+
+
 def render_word_card(
     conn: sqlite3.Connection,
     word: dict[str, Any],
     index: int,
     recording: bytes | None = None,
 ) -> None:
-    """One flagged word: what was expected, what came out, and how it should sound."""
+    """One flagged word: a single line until opened, then the full drill."""
     text = str(word.get("word") or "")
-    accuracy = word.get("accuracy")
     error_type = word.get("error_type") or "None"
 
-    with st.container(border=True):
-        score = f"{accuracy:.0f}" if isinstance(accuracy, (int, float)) else "not spoken"
-        colour = BAND_COLOURS[utils.word_band(accuracy)]
-        st.markdown(
-            f'<span style="font-size:1.3rem;font-weight:600;color:{colour};">'
-            f"{html.escape(text)}</span> "
-            f'<span style="opacity:0.7;">— {html.escape(score)}</span>',
-            unsafe_allow_html=True,
-        )
-
-        # The headline sound, before the full phoneme list. A long word can carry a dozen
-        # phonemes, and the one that actually failed should not need hunting for.
+    with st.expander(word_card_label(word)):
         if word.get("disfluency") == speech_analyzer.REPETITION:
-            # Said twice. The score is the stumble, not a sound — and the diff above already
-            # showed the repeat, so the two surfaces now tell the same story about one word.
-            st.markdown("**You said this word twice — a stumble, not a sound to drill.**")
             st.caption(
                 "Azure aligned across the repeat, so the phonemes below pair the end of one "
                 "attempt against the start of the next. That is why the score is so low; it "
                 "is not a substitution."
             )
-        else:
-            summary = weakest_phoneme(word)
-            if summary:
-                st.markdown(f"**{summary}**")
-
-        notes = []
-        if error_type != "None":
-            notes.append(f"{error_type} (flagged by {word.get('error_source') or 'azure'})")
-        notes.extend(DELIVERY_LABELS.get(f, f) for f in word.get("delivery_error_types") or [])
-        if notes:
-            st.caption(" · ".join(notes))
 
         pairs = speech_analyzer.phoneme_pairs(word)
         if pairs:
@@ -1588,21 +1601,24 @@ def render_word_card(
                     f'title="{html.escape(title, quote=True)}">{shown}</span>'
                 )
             st.markdown(
-                '<div style="line-height:2;">' + "".join(rows) + "</div>",
+                '<div style="line-height:1.6;">' + "".join(rows) + "</div>",
                 unsafe_allow_html=True,
             )
-            st.caption("Expected → what you actually produced. Hover for the score.")
 
+        # Misplaced lexical stress is one of the most common intelligibility failures and is
+        # invisible at the phoneme level, so the syllables are named — on the same line as
+        # the phoneme-row legend, since neither is worth a line of its own.
         syllables = [s for s in word.get("syllables") or [] if s.get("syllable")]
+        legend = ["Expected → produced; hover for the score."] if pairs else []
         if syllables:
-            # Misplaced lexical stress is one of the most common intelligibility failures
-            # and is invisible at the phoneme level, so it gets its own line.
             rendered = " · ".join(
                 f"{s['syllable']}"
                 + (f" ({s['score']:.0f})" if isinstance(s.get("score"), (int, float)) else "")
                 for s in syllables
             )
-            st.caption(f"Syllables: {rendered}")
+            legend.append(f"Syllables: {rendered}")
+        if legend:
+            st.caption(" ".join(legend))
 
         if error_type == "Omission":
             # It was never spoken, which is exactly why the target is worth hearing. The
@@ -1739,11 +1755,10 @@ def render_result(conn: sqlite3.Connection, entry: CachedAttempt, source: Any) -
         st.success("Nothing flagged in that attempt.")
     else:
         st.caption(
-            "Worst first. The native version of each word is synthesised on its own, so you "
-            "hear it in citation form — right for drilling a sound, but not how it sounds "
-            "inside the sentence. Your own clip beneath it is cut from this recording at "
-            "Azure's word boundaries, so it is the word in context. Use the whole-text "
-            "playback above to compare the two at sentence length."
+            "Worst first. Open a word to drill it: the native version is synthesised on its "
+            "own, in citation form, and your own clip beneath it is cut from this recording "
+            "at Azure's word boundaries. Use the whole-text playback above to compare the "
+            "two at sentence length."
         )
         index = 0
         for word in needs_attention:
