@@ -2088,6 +2088,7 @@ def _attempt_record(row: Any) -> dict[str, Any]:
         "Pron": score("pron_score"),
         "Accuracy": score("accuracy"),
         "Fluency": score("fluency"),
+        "Prosody": score("prosody"),
         "Date": utils.parse_timestamp(row["created_at"]),
         "Type": type_label,
         "Audio": float(row["audio_seconds"]),
@@ -2115,12 +2116,13 @@ def _history_filters(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             sources = sorted({str(r["Source"]) for r in records})
             chosen_sources = st.multiselect("Mode", sources, key="history-f-source")
 
-        pron_col, accuracy_col, fluency_col = st.columns(3)
+        pron_col, accuracy_col, fluency_col, prosody_col = st.columns(4)
         score_bounds: dict[str, tuple[float, float]] = {}
         for column, holder in (
             ("Pron", pron_col),
             ("Accuracy", accuracy_col),
             ("Fluency", fluency_col),
+            ("Prosody", prosody_col),
         ):
             with holder:
                 score_bounds[column] = st.slider(
@@ -2264,6 +2266,7 @@ def render_history(conn: sqlite3.Connection) -> None:
             "Pron",
             "Accuracy",
             "Fluency",
+            "Prosody",
             "Date",
             "Type",
             "Audio",
@@ -2273,16 +2276,12 @@ def render_history(conn: sqlite3.Connection) -> None:
         ),
         column_config={
             "Text": st.column_config.TextColumn("Attempt", width="large", pinned=True),
-            "Pron": st.column_config.ProgressColumn(
-                "Pron",
-                help="Overall pronunciation score",
-                min_value=0,
-                max_value=100,
-                format="%.0f",
-                width="small",
+            "Pron": st.column_config.NumberColumn(
+                "Pron", help="Overall pronunciation score", format="%.0f", width="small"
             ),
             "Accuracy": st.column_config.NumberColumn("Accuracy", format="%.0f", width="small"),
             "Fluency": st.column_config.NumberColumn("Fluency", format="%.0f", width="small"),
+            "Prosody": st.column_config.NumberColumn("Prosody", format="%.0f", width="small"),
             "Date": st.column_config.DatetimeColumn(
                 "Date", format="YYYY-MM-DD HH:mm", width="medium"
             ),

@@ -1169,8 +1169,34 @@ def test_the_table_carries_a_column_for_every_facet_the_filters_offer(run_app) -
     seed_history(app, 1)
     app.run()
     table = history_table(app)
-    for column in ("Text", "Pron", "Accuracy", "Fluency", "Date", "Type", "Audio", "Source"):
+    for column in (
+        "Text",
+        "Pron",
+        "Accuracy",
+        "Fluency",
+        "Prosody",
+        "Date",
+        "Type",
+        "Audio",
+        "Source",
+    ):
         assert column in table.columns
+
+
+def test_a_row_with_no_prosody_score_renders_an_empty_cell_not_a_zero(run_app) -> None:
+    """`seed_history` records no prosody score, the way an unassessed legacy row has none.
+
+    The cell must be empty (the grid's own placeholder), never `0` — a missing prosody score
+    and a prosody score of zero mean different things, the same rule Analyze already holds.
+    """
+    app = run_app()
+    seed_history(app, 1)
+    app.run()
+    assert not app.exception
+    table = history_table(app)
+    assert "Prosody" in table.columns
+    assert table["Prosody"].isna().all()
+    assert list(table["Pron"]) == [80.0]
 
 
 def test_every_matching_row_goes_to_the_grid_which_scrolls_them_itself(run_app) -> None:
