@@ -5,9 +5,9 @@
 v1.0.0 is released: the two-page scope the brief describes, and nothing else. Analyze
 records scripted or unscripted audio and shows every documented field Azure returned, the
 deterministic coaching, and — on a click — Gemini's prosody annotation. History is one
-`st.dataframe` — attempt text, Pron/Accuracy/Fluency, date, type, audio length and Live vs
-Fixture replay — with a filter per column, inline Open and Delete buttons, and the grid's own
-scrolling. Opening one renders it in place without the inputs; deleting one asks first.
+`st.dataframe` — attempt text, Pron/Accuracy/Fluency/Prosody as plain numbers, date, type,
+audio length and Live vs Fixture replay — with a filter per column, inline Open and Delete
+buttons, and the grid's own scrolling. Opening one renders it in place without the inputs; deleting one asks first.
 
 The app is named Dialect Coach and the page is `layout="wide"`. Analyze's Assess/Stop/Reset
 row is a horizontal container, so Stop can come and go without leaving a hole. While an
