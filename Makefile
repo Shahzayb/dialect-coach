@@ -1,4 +1,4 @@
-.PHONY: setup up down app test lint format typecheck check
+.PHONY: setup up down app remove-app test lint format typecheck check
 
 setup:
 	python3 scripts/setup.py
@@ -17,6 +17,11 @@ app:
 	rm -rf "$(APP)"
 	osacompile -o "$(APP)" -e 'do shell script "/usr/bin/python3 " & quoted form of "$(CURDIR)/scripts/launcher.py"'
 	@echo "Installed $(APP)"
+
+# Removes that icon. Leaves the containers alone: `make down` if they are still running.
+remove-app:
+	rm -rf "$(APP)"
+	@echo "Removed $(APP)"
 
 # Runs offline: tests/conftest.py forces OFFLINE_MODE and clears the API keys, so this
 # never touches the network. Needs `make up` (or `docker compose build`) first after any

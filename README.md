@@ -13,7 +13,7 @@ make up      # starts it at http://localhost:8501
 
 Or, on macOS, `make app` once: it installs a **Dialect Coach** icon in `~/Applications`
 (Spotlight, Launchpad, or drag it to the Dock). Click it to start the app and open the browser;
-click it again to stop. Re-run `make app` if you move the repo.
+click it again to stop. Re-run `make app` if you move the repo; `make remove-app` deletes the icon.
 
 Needs Docker. Fill in `.env` (created by `make setup`) with:
 
