@@ -116,6 +116,7 @@ an explicit no-output audio configuration to return bytes instead of trying a de
   runs `compose up -d` (adding `--build` only when `Dockerfile`/`requirements.txt` is newer
   than the image), waits on `/_stcore/health`, opens the browser; a click while running is
   `compose stop`. About 2 s each way with the daemon up. The app embeds this checkout's path.
+  `make remove-app` deletes the icon only; it does not stop the containers.
 - `.claude/launch.json` has `coach` (normal) and `coach-offline` (fixture replay, its own
   database). Verify UI work through `coach-offline`: a real assessment spends Azure quota.
 - CI uses the same pinned container commands. Never install dependencies globally; a local

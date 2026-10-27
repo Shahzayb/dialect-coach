@@ -56,11 +56,17 @@ class FakeRecognizer:
         self.recognized = FakeSignal()
         self.canceled = FakeSignal()
         self.session_stopped = FakeSignal()
+        self.connection = FakeConnection()
         self.stopped = False
         self.finish_on_start = finish_on_start
+        # What the one-shot probe returns. Left as a NoMatch, an empty session stays "no speech".
+        self.once_result = FakeOnceResult(reason="NoMatch")
+        self.once_calls = 0
 
     def start_continuous_recognition_async(self) -> FakeAsync:
         def maybe_finish() -> None:
+            if self.connection.opens and self.connection.connected.handler is not None:
+                self.connection.connected.handler(None)
             if self.finish_on_start and self.session_stopped.handler is not None:
                 # Fired inline, after the handlers are connected: no timer, no race.
                 self.session_stopped.handler(None)
@@ -72,6 +78,34 @@ class FakeRecognizer:
             self.stopped = True
 
         return FakeAsync(mark)
+
+    def recognize_once(self) -> FakeOnceResult:
+        self.once_calls += 1
+        return self.once_result
+
+
+class FakeConnection:
+    """`speechsdk.Connection`: only its `connected` slot is used.
+
+    `opens` False is the SDK's behaviour on a refused WebSocket upgrade — the session still
+    starts and stops, but the connection never reports opening.
+    """
+
+    def __init__(self) -> None:
+        self.connected = FakeSignal()
+        self.opens = False
+
+
+class FakeOnceResult:
+    """What `recognize_once` returns; a `Canceled` one carries `cancellation_details`."""
+
+    def __init__(self, reason: str, code: object = None, error_details: str = "") -> None:
+        import azure.cognitiveservices.speech as speechsdk
+
+        self.reason = getattr(speechsdk.ResultReason, reason)
+        self.cancellation_details = type(
+            "Details", (), {"code": code, "error_details": error_details}
+        )()
 
 
 @pytest.fixture
@@ -96,7 +130,14 @@ def recognizer_factory(monkeypatch: pytest.MonkeyPatch):
 
     def build(finish_on_start: bool = False) -> FakeRecognizer:
         recognizer = FakeRecognizer(finish_on_start)
+        # The probe builds a second recognizer; handing back the same fake lets a test set
+        # what it returns through `once_result`.
         monkeypatch.setattr(speechsdk, "SpeechRecognizer", lambda **kwargs: recognizer)
+        monkeypatch.setattr(
+            speechsdk,
+            "Connection",
+            type("C", (), {"from_recognizer": staticmethod(lambda r: r.connection)}),
+        )
         return recognizer
 
     return build
@@ -152,6 +193,36 @@ def test_a_slow_session_is_not_cancelled_by_an_unset_event(recognizer_factory) -
         sa._assess_continuous("unused.wav", REFERENCE, threading.Event())
 
     assert recognizer.stopped is True
+
+
+def test_a_refused_connection_is_a_credentials_error_not_no_speech(recognizer_factory) -> None:
+    """A 401 on the upgrade never reaches `canceled`; the probe is what reads it back."""
+    import azure.cognitiveservices.speech as speechsdk
+
+    recognizer = recognizer_factory(finish_on_start=True)  # connection never opens
+    recognizer.once_result = FakeOnceResult(
+        "Canceled",
+        code=speechsdk.CancellationErrorCode.AuthenticationFailure,
+        error_details="WebSocket upgrade failed: Authentication error (401).",
+    )
+
+    with pytest.raises(sa.PermanentError) as caught:
+        sa._assess_continuous("unused.wav", REFERENCE, None)
+
+    assert not isinstance(caught.value, sa.NoSpeechDetected)
+    assert "AZURE_SPEECH_KEY" in str(caught.value)
+    assert recognizer.once_calls == 1
+
+
+def test_a_connected_session_that_heard_nothing_does_not_probe(recognizer_factory) -> None:
+    """Real silence on working credentials stays "no speech", and sends nothing extra."""
+    recognizer = recognizer_factory(finish_on_start=True)
+    recognizer.connection.opens = True
+
+    with pytest.raises(sa.NoSpeechDetected):
+        sa._assess_continuous("unused.wav", REFERENCE, None)
+
+    assert recognizer.once_calls == 0
 
 
 def test_cancellation_is_an_assessment_error_so_existing_handlers_see_it() -> None:
