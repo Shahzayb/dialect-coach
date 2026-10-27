@@ -110,6 +110,12 @@ an explicit no-output audio configuration to return bytes instead of trying a de
 - `make setup`, `make up`, `make down`, `make test`, `make lint`, `make typecheck`, and
   `make check` are the supported commands. Run them in the container. Tests force offline mode
   and clear credentials before dotenv can restore them.
+- `make app` installs `~/Applications/Dialect Coach.app`, a one-click start/stop toggle that
+  runs `scripts/launcher.py` on macOS's `/usr/bin/python3` (3.9 — so stdlib only, and no
+  `datetime.UTC`, which ruff's py312 target rewrites to). It starts Docker Desktop if needed,
+  runs `compose up -d` (adding `--build` only when `Dockerfile`/`requirements.txt` is newer
+  than the image), waits on `/_stcore/health`, opens the browser; a click while running is
+  `compose stop`. About 2 s each way with the daemon up. The app embeds this checkout's path.
 - `.claude/launch.json` has `coach` (normal) and `coach-offline` (fixture replay, its own
   database). Verify UI work through `coach-offline`: a real assessment spends Azure quota.
 - CI uses the same pinned container commands. Never install dependencies globally; a local
