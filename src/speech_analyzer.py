@@ -232,7 +232,8 @@ def classify_cancellation(
     """
     import azure.cognitiveservices.speech as speechsdk
 
-    code = getattr(details, "error_code", None)
+    # Events name it `error_code`; the `CancellationDetails` on a one-shot result names it `code`.
+    code = getattr(details, "error_code", None) or getattr(details, "code", None)
     # error_details can echo request context; scrub before it reaches a log or the UI.
     raw_detail = utils.redact(str(getattr(details, "error_details", "") or ""))
 
@@ -288,6 +289,7 @@ def _raw_json(result: Any) -> dict[str, Any]:
 
 def _continuous_session(
     recognizer: Any,
+    wav_path: str,
     cancel_event: threading.Event | None,
     timeout_seconds: float,
 ) -> list[dict[str, Any]]:
@@ -301,12 +303,21 @@ def _continuous_session(
     `cancel_event` is polled while waiting rather than waited on directly: the SDK signals
     completion through `done` and the caller signals cancellation through `cancel_event`, and
     with two independent events there is nothing to block on but both in turn.
+
+    **A refused connection does not cancel the session.** With file-backed audio the SDK
+    (1.51.1) swallows a failed WebSocket upgrade — a 401 on a bad key never reaches `canceled`;
+    the session just starts and stops. So whether the connection ever opened is tracked, and an
+    empty session that never connected is re-asked once through `recognize_once`, which does
+    return the cancellation. Without that the user is told to check their microphone when the
+    fault is the key.
     """
     import azure.cognitiveservices.speech as speechsdk
 
     payloads: list[dict[str, Any]] = []
     failure: list[Exception] = []
     done = threading.Event()
+    connected = threading.Event()
+    speechsdk.Connection.from_recognizer(recognizer).connected.connect(lambda _evt: connected.set())
 
     def on_recognized(evt: Any) -> None:
         if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
@@ -345,6 +356,15 @@ def _continuous_session(
 
     if failure:
         raise failure[0]
+    if not payloads and not connected.is_set():
+        # A plain recognizer, no assessment config: this only exists to read back why Azure
+        # refused the connection, and a refused call is not metered.
+        probe = speechsdk.SpeechRecognizer(
+            speech_config=_speech_config(),
+            audio_config=speechsdk.AudioConfig(filename=wav_path),
+        ).recognize_once()
+        if probe.reason == speechsdk.ResultReason.Canceled:
+            raise classify_cancellation(probe.cancellation_details)
     if not payloads:
         raise NoSpeechDetected(
             "Azure heard no speech in that recording. Check the microphone picked you up, "
@@ -373,7 +393,7 @@ def _assess_continuous(
     )
     # Mandatory. Without it the transcript comes back and the assessment block does not.
     _pron_config(reference_text, mode, topic=topic).apply_to(recognizer)
-    return _continuous_session(recognizer, cancel_event, _timeout_for(mode))
+    return _continuous_session(recognizer, wav_path, cancel_event, _timeout_for(mode))
 
 
 def _timeout_for(mode: Mode) -> float:
@@ -403,7 +423,7 @@ def _transcribe_continuous(
         speech_config=_speech_config(),
         audio_config=speechsdk.AudioConfig(filename=wav_path),
     )
-    return _continuous_session(recognizer, cancel_event, UNSCRIPTED_TIMEOUT_SECONDS)
+    return _continuous_session(recognizer, wav_path, cancel_event, UNSCRIPTED_TIMEOUT_SECONDS)
 
 
 def _load_fixture(mode: Mode) -> list[dict[str, Any]]:
