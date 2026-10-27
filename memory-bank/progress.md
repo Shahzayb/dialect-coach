@@ -59,7 +59,8 @@ human click is what confirms a change there.
   is continuous-only now, so every omission and insertion comes from the local diff and
   completeness is recomputed — on the committed fixture that moved completeness from Azure's
   85 to 100. Watch for a real reading where the diff and the ear disagree.
-- Whether `MAX_ANNOTATED_WORDS` (400) is the right cut. Untested against a long reading.
+- Whether `MAX_ANNOTATED_WORDS` (5000, raised from 400 on 2026-10-27) fits one Gemini response.
+  Untested against a long reading.
 
 ## Standing preferences
 

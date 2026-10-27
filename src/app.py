@@ -751,12 +751,6 @@ def validate_reference(text: str) -> bool:
     if not text.strip():
         st.error("Enter the text you are going to read first.")
         return False
-    if len(text) > utils.MAX_REFERENCE_CHARS:
-        st.error(
-            f"That reference text is {len(text)} characters, over the "
-            f"{utils.MAX_REFERENCE_CHARS} limit. Shorten it."
-        )
-        return False
     if any(char.isdigit() for char in text):
         # Not fatal, but it does degrade the result, so say why rather than just warning.
         st.warning(
@@ -772,8 +766,8 @@ def validate_prompt(text: str) -> bool:
     """Check Mode C's prompt before anything is sent. Returns False to block the run.
 
     A far lighter check than `validate_reference`, and deliberately so: this text is never read
-    aloud, never scored against and never aligned word-for-word, so the digit warning and the
-    length ceiling that protect a reference text have nothing to protect here. What it does
+    aloud, never scored against and never aligned word-for-word, so the digit warning that
+    protects a reference text has nothing to protect here. What it does
     need is to exist — the content scorer judges topic relevance against it, and two recordings
     are paired into a spontaneous calibration by matching it.
     """

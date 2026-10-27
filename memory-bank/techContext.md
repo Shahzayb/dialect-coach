@@ -43,7 +43,8 @@ modules. `pytest.ini`, mypy, ruff, and scripts each configure `src/` as their on
 - **There is no duration ceiling.** A recording is billed for its own seconds either way, and
   `budget.py` meters what was spent. Only a minimum survives, because Azure returns confusing
   errors on sub-second audio. Continuous timeouts are hung-callback insurance sized far past
-  any real read, never a processing budget.
+  any real read, never a processing budget (4 h scripted, 8 h unscripted). The reference text
+  has no length cap either; uploads are capped at 2 GB (`STREAMLIT_SERVER_MAX_UPLOAD_SIZE`).
 
 ### Legacy rows
 
