@@ -77,15 +77,16 @@ FIXTURES: dict[Mode, str] = {
 
 # How long to wait for continuous recognition to report session_stopped. Generous: it is a
 # backstop against a hung SDK callback, not a processing budget. See the note below.
-CONTINUOUS_TIMEOUT_SECONDS = 3600.0
+CONTINUOUS_TIMEOUT_SECONDS = 14400.0
 
 # Unscripted gets its own, longer backstop, because it pays the timeout twice — once per
-# pass. Both numbers went up when the duration ceilings were removed on 2026-08-25: there is
+# pass. Both numbers went up when the duration ceilings were removed on 2026-08-25, and again
+# (to 4 h / 8 h) when the reference and upload caps were lifted on 2026-10-27: there is
 # no upper bound on a recording any more, so a backstop sized against a former ceiling would
 # fire on a legitimate long read. A backstop that can fire on real audio is worse than no
 # backstop — it throws away audio Azure has already been sent and been paid for. These are
 # hung-callback insurance, not a processing budget, so they are set far past any real read.
-UNSCRIPTED_TIMEOUT_SECONDS = 7200.0
+UNSCRIPTED_TIMEOUT_SECONDS = 28800.0
 
 # How often the continuous wait wakes up to notice a cancellation. Short enough that Stop
 # feels immediate, long enough that the wait is not a busy loop.

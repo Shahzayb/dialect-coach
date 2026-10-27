@@ -34,11 +34,14 @@ EXPOSE 8501
 # Container-only settings; the deployed Hugging Face Space supplies its own.
 # runOnSave defaults to false, which only shows a "Rerun" prompt when a bind-mounted file
 # changes. On here it is a dev container, so apply the edit instead of asking.
+# MAX_UPLOAD_SIZE is in MB: 2 GB, up from Streamlit's 200. Uploads are held in memory, so past
+# this the container's RAM, not Streamlit, is the real limit.
 ENV PYTHONUNBUFFERED=1 \
     STREAMLIT_SERVER_ADDRESS=0.0.0.0 \
     STREAMLIT_SERVER_PORT=8501 \
     STREAMLIT_SERVER_HEADLESS=true \
     STREAMLIT_SERVER_RUN_ON_SAVE=true \
+    STREAMLIT_SERVER_MAX_UPLOAD_SIZE=2000 \
     STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \

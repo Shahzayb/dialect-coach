@@ -162,10 +162,6 @@ def azure_score_band(score: float | None) -> AzureBand:
 # not the lucky case, and the guard and the retry loop must not drift apart.
 MAX_SYNTHESIS_ATTEMPTS = 3
 
-# Reference text limits. Azure aligns words against the reference, and a very long one
-# both costs alignment quality and is not a realistic single attempt.
-MAX_REFERENCE_CHARS = 1000
-
 # Names of the environment variables whose values must never reach a log line.
 SECRET_VARS = ("AZURE_SPEECH_KEY", "GEMINI_API_KEY")
 

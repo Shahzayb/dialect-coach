@@ -54,10 +54,10 @@ MAX_ANNOTATE_ATTEMPTS = 3
 # its shape. There is nothing here for sampling variety to improve.
 TEMPERATURE = 0.2
 
-# Past this the annotation stops being something you can hold on a page and read along with,
-# and the round trip stops being cheap. Longer readings are annotated up to here and the
-# surface says so, rather than the call being refused outright.
-MAX_ANNOTATED_WORDS = 400
+# Roughly what one response's output budget holds once every word carries markup; past it the
+# reply risks being cut off mid-passage. Raised from 400 on 2026-10-27. Longer readings are
+# annotated up to here and the surface says so, rather than the call being refused outright.
+MAX_ANNOTATED_WORDS = 5000
 
 _DATA_TAGS = ("reference_text", "recognised_text")
 _TAG_PATTERN = re.compile(r"</?(?:" + "|".join(_DATA_TAGS) + r")\s*/?>", re.IGNORECASE)
